@@ -5,10 +5,10 @@
 import type { Config } from "./config";
 import { GitHubProvider } from "./github";
 import { getPrDiff } from "./diff";
-import { countPromptTokens } from "./token";
-import { renderTemplate } from "./render";
+import { countPromptTokens } from "./core/token";
+import { renderTemplate } from "./core/render";
 import { DESCRIPTION_SYSTEM_TEMPLATE, DESCRIPTION_USER_TEMPLATE } from "./prompts";
-import { loadYaml } from "./yaml";
+import { loadYaml } from "./core/yaml";
 import { chatCompletion } from "./llm";
 
 export interface DescribeResult {

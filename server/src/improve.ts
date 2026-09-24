@@ -5,10 +5,10 @@
 import type { Config } from "./config";
 import { GitHubProvider } from "./github";
 import { getPrMultiDiffs } from "./diff";
-import { countPromptTokens } from "./token";
-import { renderTemplate } from "./render";
+import { countPromptTokens } from "./core/token";
+import { renderTemplate } from "./core/render";
 import { SUGGESTIONS_SYSTEM_TEMPLATE, SUGGESTIONS_USER_TEMPLATE } from "./prompts";
-import { loadYaml } from "./yaml";
+import { loadYaml } from "./core/yaml";
 import { chatCompletion } from "./llm";
 import { insertBrAfterXChars } from "./describe";
 

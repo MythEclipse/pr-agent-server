@@ -32,18 +32,3 @@ export function renderTemplate(
     );
   }
 }
-
-/** Render with graceful fallback: if a variable is missing, retry with that
- *  var filled as an empty string — mirrors pr_agent's tolerant renders in some
- *  paths. */
-export function renderTemplateTolerant(
-  template: string,
-  data: Record<string, unknown>,
-): string {
-  try {
-    return renderTemplate(template, data);
-  } catch {
-    // last-resort: strip template tags (used only for very broken edge cases)
-    return template.replace(/\{\{.*?\}\}/gs, "");
-  }
-}

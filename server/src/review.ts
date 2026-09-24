@@ -5,12 +5,12 @@
 import type { Config } from "./config";
 import { GitHubProvider } from "./github";
 import { getPrDiff, sortFilesByMainLanguages } from "./diff";
-import { countTokens } from "./token";
-import { countPromptTokens } from "./token";
-import { renderTemplate } from "./render";
+import { countTokens } from "./core/token";
+import { countPromptTokens } from "./core/token";
+import { renderTemplate } from "./core/render";
 import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "./prompts";
-import { loadYaml } from "./yaml";
-import { convertToMarkdownV2 } from "./markdown";
+import { loadYaml } from "./core/yaml";
+import { convertToMarkdownV2 } from "./core/markdown";
 import { chatCompletion } from "./llm";
 import { getModelTokenLimit as getModelTokenLimitInner } from "./config";
 

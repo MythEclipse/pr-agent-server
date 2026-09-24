@@ -6,7 +6,7 @@
 // file summaries.
 
 import type { Config } from "./config";
-import { countTokens } from "./token";
+import { countTokens } from "./core/token";
 
 export enum EditType {
   ADDED = "added",
