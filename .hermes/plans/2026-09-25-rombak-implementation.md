@@ -443,7 +443,28 @@ git commit -m "refactor(server): split http/ + async analytics, remove dead code
   `publishPersistent(provider, markdown, header, name, finalUpdateMessage): Promise<void>`.
 - Consumes: `chatCompletion`, `GitHubProvider`, `getPrDiff`, `getPrMultiDiffs`, `loadYaml`, `convertToMarkdownV2`.
 
-- [ ] **Step 1: Tulis tes GAGAL untuk retry per-model (B4)**
+- [ ] **Step 1: Buat fixture snapshot prompt DARI KODE LAMA (sebelum memindahkan apa pun)**
+
+Jalankan **sebelum Step 5** (prompts.ts masih di `src/prompts.ts`, render sudah di
+`src/core/render.ts` setelah Task 1):
+
+```bash
+cd server && bun -e '
+import { renderTemplate } from "./src/core/render";
+import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "./src/prompts";
+const vars = { title: "T", branch: "b", description: "d", language: "TypeScript", diff: "DIFF",
+  num_pr_files: 1, num_max_findings: 3, require_score: true, require_tests: true,
+  require_estimate_effort_to_review: true, require_estimate_contribution_time_cost: false,
+  require_can_be_split_review: false, require_security_review: true, require_todo_scan: false,
+  question_str: "", answer_str: "", extra_instructions: "", skills_context: "", repo_context: "",
+  commit_messages_str: "1. c", custom_labels: "", enable_custom_labels: false, is_ai_metadata: false,
+  related_tickets: [], duplicate_prompt_examples: false, date: "2026-09-25" };
+const out = renderTemplate(REVIEW_SYSTEM_TEMPLATE, vars) + "\n===USER===\n" + renderTemplate(REVIEW_USER_TEMPLATE, vars);
+await Bun.write("test/fixtures/review-prompt.snapshot.txt", out);
+' && wc -c test/fixtures/review-prompt.snapshot.txt
+```
+
+- [ ] **Step 2: Tulis tes GAGAL untuk retry per-model (B4)**
 
 `server/test/llm-fallback.test.ts`:
 
@@ -582,12 +603,12 @@ await Bun.write("test/fixtures/review-prompt.snapshot.txt", out);
 ' && wc -c test/fixtures/review-prompt.snapshot.txt
 ```
 
-- [ ] **Step 8: Jalankan tes + typecheck**
+- [ ] **Step 9: Jalankan tes + typecheck**
 
 Run: `cd server && bunx tsc --noEmit && bun test`
 Expected: PASS semua, termasuk snapshot prompt.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add -A server
