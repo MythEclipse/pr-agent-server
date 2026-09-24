@@ -14,13 +14,50 @@ describe("getPrDiff language ordering", () => {
     // (default cfg, promptTokens 0) takes the extended fast path and returns
     // raw patch text with no filenames, so indexOf() is -1 for BOTH files and
     // the assertion is unsatisfiable even after sorting is wired up.
-    const cfg = { ...loadConfig(), maxModelTokens: 1500 };
+    // Soft/hard thresholds are pinned to their defaults (1500/1000) so the
+    // pass choice cannot depend on ambient PR_AGENT_OUTPUT_* env vars.
+    const cfg = {
+      ...loadConfig(),
+      maxModelTokens: 1500,
+      outputBufferSoftThreshold: 1500,
+      outputBufferHardThreshold: 1000,
+    };
     const files = [
       file("docs/readme.md", "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"),
       file("src/app.py", "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"),
     ];
     const { diff } = getPrDiff(files, 0, "claude-opus-5", cfg, { Python: 9000, Markdown: 10 });
     expect(diff.indexOf("src/app.py")).toBeLessThan(diff.indexOf("docs/readme.md"));
+  });
+});
+
+// Locks the S6 consolidation AT THE CONSUMER: these run diff/budget.ts's own
+// `getPrDiff`, so they fail if a private token-limit copy is ever re-added to
+// `diff/` (the isolated config assertions below cannot detect that).
+describe("diff/ resolves model limits through config.getModelTokenLimit (S6)", () => {
+  const cfg = () => ({
+    ...loadConfig(),
+    maxModelTokens: 0,
+    customModelMaxTokens: 0,
+    outputBufferSoftThreshold: 1500,
+    outputBufferHardThreshold: 1000,
+  });
+  const files = [file("src/app.py", "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n")];
+
+  test("a model present only in config's superset table gets the extended path", () => {
+    // gpt-5 → 200000 in config, so promptTokens 150000 still fits and the file
+    // is included. A private copy of the OLD table would fall back to 128000
+    // here, exhaust the budget, and return an empty diff with the file listed
+    // as remaining — so this test fails if the consolidation is reverted.
+    const { diff, remainingFiles } = getPrDiff(files, 150000, "gpt-5", cfg());
+    expect(remainingFiles).toEqual([]);
+    expect(diff.length).toBeGreaterThan(0);
+  });
+
+  test("an unknown model falls back to 128000, exhausting the budget", () => {
+    const { diff, remainingFiles } = getPrDiff(files, 150000, "some-unknown-model", cfg());
+    expect(remainingFiles).toEqual(["src/app.py"]);
+    expect(diff).toBe("");
   });
 });
 
