@@ -4,7 +4,7 @@
 
 import type { Config } from "./config";
 import { GitHubProvider } from "./github";
-import { getPrDiff, sortFilesByMainLanguages } from "./diff";
+import { getPrDiff } from "./diff";
 import { countTokens } from "./core/token";
 import { countPromptTokens } from "./core/token";
 import { renderTemplate } from "./core/render";
@@ -12,7 +12,6 @@ import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "./prompts";
 import { loadYaml } from "./core/yaml";
 import { convertToMarkdownV2 } from "./core/markdown";
 import { chatCompletion } from "./llm";
-import { getModelTokenLimit as getModelTokenLimitInner } from "./config";
 
 export interface ReviewResult {
   markdown: string;
@@ -95,8 +94,9 @@ export async function runReview(
     renderTemplate,
   );
 
-  // build diff with token budget (reuses prompt tokens)
-  const { diff, remainingFiles } = getPrDiffWithFiles(files, promptTokens, cfg.model, cfg, vars);
+  // build diff with token budget (reuses prompt tokens); main-language files
+  // are ordered first inside getPrDiff using the languages fetched above
+  const { diff, remainingFiles } = getPrDiff(files, promptTokens, cfg.model, cfg, languages);
 
   // render final prompts with diff
   const systemPrompt = renderTemplate(REVIEW_SYSTEM_TEMPLATE, { ...vars, diff });
@@ -187,23 +187,6 @@ export async function runReview(
   };
 }
 
-function getPrDiffWithFiles(
-  files: Parameters<typeof getPrDiff>[0],
-  promptTokens: number,
-  model: string,
-  cfg: Config,
-  vars: Record<string, unknown>,
-): { diff: string; remainingFiles: string[] } {
-  // Sort by main language first (pushes main-lang files earlier, matching
-  // pr_agent's pr_generate_extended_diff order; we use the files order as-is
-  // since the Python version sorts by lang then processes all files equally).
-  const langs = (vars["_langs"] as Record<string, number>) || {};
-  const sorted = sortFilesByMainLanguages(langs, files);
-  // Reuse getPrDiff with our token budget logic
-  const res = getPrDiff(sorted, promptTokens, model, cfg);
-  return { diff: res.diff, remainingFiles: res.remainingFiles };
-}
-
 function clipTokensSimple(text: string, maxTokens: number): string {
   const tokens = countTokens(text);
   if (tokens <= maxTokens) return text;
@@ -235,8 +218,4 @@ function getMainPrLanguage(
   const langOfExt = extLang[ext] || "";
   if (langOfExt && langOfExt === top) return map[top] || top;
   return langOfExt ? map[langOfExt] || langOfExt : (map[top] || top);
-}
-
-export function getModelTokenLimitLocal(model: string, cfg: Config): number {
-  return getModelTokenLimitInner(model, cfg);
 }
