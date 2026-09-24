@@ -1,17 +1,12 @@
 // GitHub App provider — port of pr_agent.git_providers.github_provider.
-// Uses @octokit/auth-app for JWT→installation token and @octokit/rest for the
-// REST calls the review pipeline needs. Rate-limit-aware retry.
+// Split out of the old src/github.ts (Task 3): App auth lives in ./client,
+// the PR operations the review pipeline needs live here. Rate-limit-aware retry.
 
-import { createAppAuth, type AppAuthentication } from "@octokit/auth-app";
 import { createHash } from "node:crypto";
-import { Octokit } from "@octokit/rest";
-import type { Config } from "./config";
-import { EditType, type FilePatchInfo } from "./diff";
-import { isGeneratedOrInvalidFile } from "./diff";
-// NOTE: with Bun we must NOT pass a Promise-returning `auth()` to Octokit —
-// @octokit/core's token authStrategy expects a STRING and calls .then on the
-// returned value. Instead we pass a custom authStrategy that injects a
-// `Bearer <installationToken>` header (updated lazily).
+import type { Octokit } from "@octokit/rest";
+import type { Config } from "../config";
+import { EditType, type FilePatchInfo, isGeneratedOrInvalidFile } from "../diff";
+import { AppAuthClient } from "./client";
 
 export interface PullRequestData {
   number: number;
@@ -36,12 +31,8 @@ export interface GhComment {
 const MAX_FILES_ALLOWED_FULL = 50;
 
 export class GitHubProvider {
+  private authClient: AppAuthClient;
   private octokit: Octokit;
-  private appClient!: Octokit;
-  private appAuth: ReturnType<typeof createAppAuth>;
-  private auth: AppAuthentication | null = null;
-  private authExpiresAt = 0;
-  private installationToken: string | null = null;
   readonly repo: string; // owner/name
   readonly prNumber: number;
   private pr: PullRequestData | null = null;
@@ -57,85 +48,20 @@ export class GitHubProvider {
   ) {
     this.repo = `${repoOwner}/${repoName}`;
     this.prNumber = prNumber;
-    const baseUrl = cfg.github.baseUrl;
-    this.appAuth = createAppAuth({
-      appId: cfg.github.appId,
-      privateKey: privateKeyPem,
-    });
-    // App-level client: uses JWT (type: 'app'), only for discovering
-    // installation id (GET /repos/{owner}/{repo}/installation needs app JWT).
-    this.appClient = new Octokit({
-      baseUrl,
-      authStrategy: () => ({
-        hook: async (request: any, options: Record<string, any>) => {
-          const jwtAuth = await this.appAuth({ type: "app" });
-          options.headers = options.headers ?? {};
-          options.headers.authorization = `Bearer ${jwtAuth.token}`;
-          options.headers["x-github-api-version"] = "2022-11-28";
-          return request(options);
-        },
-      }),
-      request: { timeout: 20_000 },
-    });
-    // Installation-level client: bearer token per repo.
-    this.octokit = new Octokit({
-      baseUrl,
-      authStrategy: this.installTokenStrategy.bind(this),
-      throttle: {
-        enabled: true,
-        onRateLimit: () => true,
-        onSecondaryRateLimit: () => true,
-      },
-      request: { timeout: 20_000 },
-    });
+    this.authClient = new AppAuthClient(cfg, privateKeyPem);
+    this.octokit = this.authClient.createInstallationOctokit();
   }
 
-  // Custom auth strategy: inject `Authorization: Bearer <installation token>`
-  // lazily on every request (token refreshed on expiry).
-  private installTokenStrategy(): { hook: (request: unknown, options: Record<string, any>) => unknown } {
-    return {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      hook: (request: any, options: { headers?: Record<string, string>; [k: string]: any }) => {
-        const token = this.installationToken;
-        if (!token) {
-          // force fetch (async); can't await in hook — pre-fetch synchronously
-          void this.getInstallationToken().then((t) => {
-            options.headers = options.headers ?? {};
-            options.headers.authorization = `Bearer ${t}`;
-          });
-        } else {
-          options.headers = options.headers ?? {};
-          options.headers.authorization = `Bearer ${token}`;
-        }
-        return request(options);
-      },
-    };
-  }
-
-  private async getInstallationToken(): Promise<string> {
-    // refresh ~1 minute before expiry
-    if (this.installationToken && this.authExpiresAt && Date.now() < this.authExpiresAt - 60_000) {
-      return this.installationToken;
-    }
+  /** Prefetch the installation token so the sync auth hook always has one.
+   *  Every public method that touches `this.octokit` awaits this first (S10). */
+  private async ensureToken(): Promise<void> {
     const [owner, repo] = this.repo.split("/");
-    // list repository installations to discover installation id (uses app JWT)
-    const { data: installs } = await fetchInstallations(this.appClient, owner, repo, this.cfg);
-    const inst = installs[0];
-    if (!inst) throw new Error(`No GitHub App installation for ${this.repo}`);
-    const auth = await this.appAuth({ type: "installation", installationId: inst.id });
-    this.auth = auth as unknown as AppAuthentication;
-    this.authExpiresAt = Date.now() + new Date(auth.expiresAt).getTime() - Date.now() - 60_000;
-    this.installationToken = this.auth.token;
-    return this.installationToken;
-  }
-
-  async ensureInstallationToken(): Promise<string> {
-    return this.getInstallationToken();
+    await this.authClient.installationToken(owner, repo);
   }
 
   async getPr(): Promise<PullRequestData> {
     if (this.pr) return this.pr;
-    await this.ensureInstallationToken();
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     const { data } = await this.retry(() =>
       this.octokit.pulls.get({ owner, repo, pull_number: this.prNumber }),
@@ -163,7 +89,7 @@ export class GitHubProvider {
   }
 
   async getPrDescription(full = true): Promise<string> {
-    await this.ensureInstallationToken();
+    await this.ensureToken();
     const pr = await this.getPr();
     return (full ? pr.body : pr.body) || "";
   }
@@ -174,13 +100,13 @@ export class GitHubProvider {
   }
 
   async getPrBranch(): Promise<string> {
-    await this.ensureInstallationToken();
+    await this.ensureToken();
     const pr = await this.getPr();
     return pr.head.ref;
   }
 
   async getCommits(): Promise<string[]> {
-    await this.ensureInstallationToken();
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     const { data } = await this.retry(() =>
       this.octokit.pulls.listCommits({ owner, repo, pull_number: this.prNumber, per_page: 100 }),
@@ -195,7 +121,7 @@ export class GitHubProvider {
   }
 
   async getLanguages(): Promise<Record<string, number>> {
-    await this.ensureInstallationToken();
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     const resp = await this.retry(() =>
       this.octokit.rest.repos.listLanguages({ owner, repo }),
@@ -204,6 +130,7 @@ export class GitHubProvider {
   }
 
   async getRepoFileContent(path: string, ref: string): Promise<string> {
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     try {
       const { data } = await this.retry(() =>
@@ -218,6 +145,7 @@ export class GitHubProvider {
   }
 
   async getMergeBaseSha(): Promise<string> {
+    await this.ensureToken();
     const pr = await this.getPr();
     const [owner, repo] = this.repo.split("/");
     try {
@@ -236,7 +164,7 @@ export class GitHubProvider {
   }
 
   async getDiffFiles(): Promise<FilePatchInfo[]> {
-    await this.ensureInstallationToken();
+    await this.ensureToken();
     if (this.diffs) return this.diffs;
     const pr = await this.getPr();
     const mergeBaseSha = await this.getMergeBaseSha();
@@ -293,7 +221,7 @@ export class GitHubProvider {
   // ── publishing ──────────────────────────────────────────────────────────
 
   async publishComment(body: string, isTemporary = false): Promise<GhComment> {
-    await this.ensureInstallationToken();
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     const { data } = await this.retry(() =>
       this.octokit.issues.createComment({
@@ -312,6 +240,7 @@ export class GitHubProvider {
   }
 
   async editComment(commentId: number, body: string): Promise<void> {
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     await this.retry(() =>
       this.octokit.issues.updateComment({ owner, repo, comment_id: commentId, body }),
@@ -319,6 +248,7 @@ export class GitHubProvider {
   }
 
   async deleteComment(commentId: number): Promise<void> {
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     await this.retry(() =>
       this.octokit.issues.deleteComment({ owner, repo, comment_id: commentId }),
@@ -326,6 +256,7 @@ export class GitHubProvider {
   }
 
   async listIssueComments(): Promise<GhComment[]> {
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     const { data } = await this.retry(() =>
       this.octokit.issues.listComments({ owner, repo, issue_number: this.prNumber, per_page: 100 }),
@@ -339,6 +270,7 @@ export class GitHubProvider {
   }
 
   async addLabels(labelNames: string[]): Promise<void> {
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     if (!labelNames.length) return;
     await this.retry(() =>
@@ -347,6 +279,7 @@ export class GitHubProvider {
   }
 
   async getLabels(): Promise<string[]> {
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     const { data } = await this.retry(() =>
       this.octokit.issues.listLabelsOnIssue({ owner, repo, issue_number: this.prNumber, per_page: 100 }),
@@ -357,6 +290,7 @@ export class GitHubProvider {
   /** Update the PR title/body (PATCH /pulls/{n}). Mirrors
    *  git_provider.publish_description. */
   async updateDescription(title: string | null, body: string): Promise<void> {
+    await this.ensureToken();
     const [owner, repo] = this.repo.split("/");
     await this.retry(() =>
       this.octokit.pulls.update({
@@ -408,9 +342,12 @@ export class GitHubProvider {
       if (c.body.startsWith(initialHeader)) {
         const latestCommitUrl = await this.getLatestCommitUrl();
         const updatedHeader = `${initialHeader}\n\n#### (${name.charAt(0).toUpperCase() + name.slice(1)} updated until commit ${latestCommitUrl})\n`;
-        const updated = c.body
+        // S9: always publish the fresh content. If it lacks the header (e.g. a
+        // review with no findings renders without one) prepend the updated
+        // header, otherwise the next run could not find this comment.
+        const updated = content.includes(initialHeader)
           ? content.replace(initialHeader, updatedHeader)
-          : content;
+          : `${updatedHeader}\n${content}`;
         await this.editComment(c.id, updated);
         if (finalUpdateMessage) {
           await this.publishComment(
@@ -458,42 +395,6 @@ export class GitHubProvider {
     }
     throw lastErr;
   }
-}
-
-async function fetchInstallations(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  cfg: Config,
-): Promise<{ data: { id: number }[] }> {
-  // try direct repo-scoped lookup first: GET /repos/{owner}/{repo}/installation
-  try {
-        const { data } = await octokit.request("GET /repos/{owner}/{repo}/installation", {
-          owner,
-          repo,
-        });
-        return { data: [{ id: (data as { id: number }).id }] };
-      } catch {
-        // fall back to listing app installations and filtering by repo
-        const { data } = await octokit.request("GET /app/installations", {
-          per_page: 100,
-        });
-        const insts: { id: number }[] = [];
-        for (const inst of data as { id: number; account?: { login?: string } }[]) {
-          try {
-            const resp = await octokit.request("GET /installation/repositories", {
-              per_page: 100,
-            });
-            const found = (
-              resp.data as unknown as { repositories: { full_name?: string }[] }
-            ).repositories.some((r) => r.full_name === `${owner}/${repo}`);
-            if (found) insts.push({ id: inst.id });
-          } catch {
-            // skip
-          }
-        }
-        return { data: insts };
-      }
 }
 
 function buildLargeDiff(filename: string, baseContent: string, headContent: string): string {
