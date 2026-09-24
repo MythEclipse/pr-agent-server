@@ -437,6 +437,18 @@ git commit -m "refactor(server): split http/ + async analytics, remove dead code
   diubah memakai `loadConfig()`)
 - Test: `server/test/llm-fallback.test.ts`, `server/test/prompt-snapshot.test.ts`
 
+**Catatan pre-existing (temuan review Task 1, wajib ditutup di task ini):**
+`server/e2e.ts` TIDAK ikut `tsconfig.json` (`include: ["src/**/*.ts","test/**/*.ts"]`)
+dan tidak dijalankan `bun test`, jadi error-nya tidak pernah terlihat CI. Saat
+Task 1, `e2e.ts:14` sempat menggantung (`./src/token` → sudah diperbaiki ke
+`./src/core/token`). Dua error lama masih ada dan harus dibereskan di task ini
+setelah `secrets.ts` dihapus:
+- `e2e.ts(32,1): TS2322` — `countTokens(...)` (number) di-assign ke `string`.
+- `e2e.ts(33,12): TS2339` — `secrets.privateKey` tidak ada di tipe kembalian
+  `loadSecrets` (key resolution pindah ke `loadConfig()`).
+Setelah perbaikan, tambahkan `e2e.ts` ke `tsconfig.json` `include` agar tidak
+bisa rusak diam-diam lagi, dan buktikan dengan `bunx tsc --noEmit` bersih.
+
 **Interfaces:**
 - Produces: `callWithFallback(opts: {models: string[]; system: string; user: string; temperature?: number; cfg: Config; retries?: number}): Promise<{content: string; model: string; usage: {promptTokens: number; completionTokens: number; cachedTokens: number}}>`;
   `runReview/runDescribe/runImprove` (signature sama seperti sekarang);

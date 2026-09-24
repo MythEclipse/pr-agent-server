@@ -11,7 +11,7 @@ import { loadSecrets } from "./src/secrets";
 import { loadConfig } from "./src/config";
 import { GitHubProvider } from "./src/github";
 import { runReview } from "./src/review";
-import { countTokens } from "./src/token";
+import { countTokens } from "./src/core/token";
 
 const args = process.argv.slice(2);
 const repoArg = args[args.indexOf("--repo") + 1];
