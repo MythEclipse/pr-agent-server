@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { getPrDiff, EditType, type FilePatchInfo } from "../src/diff";
+import { getPrDiff, getPrMultiDiffs, EditType, type FilePatchInfo } from "../src/diff";
 import { loadConfig, getModelTokenLimit } from "../src/config";
 
 const file = (filename: string, patch: string): FilePatchInfo => ({
@@ -58,6 +58,16 @@ describe("diff/ resolves model limits through config.getModelTokenLimit (S6)", (
     const { diff, remainingFiles } = getPrDiff(files, 150000, "some-unknown-model", cfg());
     expect(remainingFiles).toEqual(["src/app.py"]);
     expect(diff).toBe("");
+  });
+
+  // diff/multi.ts is the second getModelTokenLimit consumer; cover it too, so a
+  // private table re-added there alone cannot slip through.
+  test("getPrMultiDiffs uses the same config limit", () => {
+    const fits = getPrMultiDiffs(files, 150000, "gpt-5", cfg(), 3);
+    expect(fits.chunks[0].includes("## File:")).toBe(false);
+
+    const over = getPrMultiDiffs(files, 150000, "some-unknown-model", cfg(), 3);
+    expect(over.chunks[0].includes("## File:")).toBe(true);
   });
 });
 
