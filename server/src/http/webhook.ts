@@ -5,6 +5,9 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Config } from "../config";
+import type { ReviewQueue } from "../queue";
+
+export type { ReviewJob } from "../queue";
 
 export interface WebhookEnv {
   cfg: Config;
@@ -13,19 +16,6 @@ export interface WebhookEnv {
   analyticsDir: string;
   discordWebhookUrl: string;
   discordAlertWebhookUrl: string;
-}
-
-export interface ReviewJob {
-  owner: string;
-  repo: string;
-  pr: number;
-}
-
-/** Minimal structural queue: `enqueue` is synchronous from the handler's point
- *  of view — it must never await the review.
- *  Task 6 replaces this with the dedupe queue (src/queue.ts). */
-export interface ReviewQueue {
-  enqueue(job: ReviewJob): unknown;
 }
 
 export async function handleWebhook(

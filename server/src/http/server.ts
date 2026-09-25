@@ -4,11 +4,12 @@ import type { Server } from "bun";
 import { readFileSync } from "node:fs";
 import { loadConfig } from "../config";
 import { sendDiscord } from "../notify/discord";
+import { ReviewQueue } from "../queue";
 import { runReview } from "../tools/review";
 import { analyticsRoutes } from "./analytics";
 import { notifyReviewFailure, notifyReviewSuccess } from "./notify";
 import { setupCallback } from "./setup";
-import { handleWebhook, type ReviewJob, type ReviewQueue, type WebhookEnv } from "./webhook";
+import { handleWebhook, type WebhookEnv } from "./webhook";
 // Bun's Server type is generic over WebSocketData since Bun 1.3; our routes
 // declare no websocket handlers, so undefined is the natural shape.
 export type AppServer = Server<undefined>;
@@ -47,36 +48,17 @@ export function startServer(env?: Partial<WebhookEnv>): AppServer {
     discordAlertWebhookUrl,
   };
 
-  // Minimal serial in-process review queue: one review at a time, so a burst of
-  // webhooks cannot stampede the LLM. `enqueue` only pushes a job and kicks the
-  // worker off with `void` — the webhook response never waits on a review.
-  // Task 6 replaces this with the dedupe queue (src/queue.ts).
-  const jobs: ReviewJob[] = [];
-  let working = false;
-  const drain = async (): Promise<void> => {
-    if (working) return;
-    working = true;
-    try {
-      while (jobs.length > 0) {
-        const job = jobs.shift()!;
-        try {
-          const result = await runReview(fullEnv.cfg, job.owner, job.repo, job.pr, fullEnv.privateKeyPem);
-          await notifyReviewSuccess(fullEnv, job, result);
-        } catch (e) {
-          await notifyReviewFailure(fullEnv, job, e);
-        }
-      }
-    } finally {
-      working = false;
-    }
-  };
-  const queue: ReviewQueue = {
-    enqueue(job: ReviewJob) {
-      jobs.push(job);
-      void drain();
-      return job;
-    },
-  };
+  // One in-process review queue for the lifetime of the server: a webhook burst
+  // is deduped per PR and capped at two concurrent reviews, so GitHub gets an
+  // immediate 200 while the LLM is not stampeded. `run` owns the notification
+  // side-effects (analytics + Discord) on both the success and failure paths.
+  const queue = new ReviewQueue({
+    concurrency: 2,
+    run: (j) =>
+      runReview(cfg, j.owner, j.repo, j.pr, privateKeyPem)
+        .then((r) => notifyReviewSuccess(fullEnv, j, r))
+        .catch((e: unknown) => notifyReviewFailure(fullEnv, j, e)),
+  });
 
   const server = Bun.serve({
     port: Number(process.env.PORT || 3000),
