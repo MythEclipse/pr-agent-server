@@ -144,10 +144,23 @@ export class GitHubApi {
           // signal a hung connection would block the cron tick indefinitely.
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });
-        // Python line 173-174. Any completed round trip returns here, whatever
-        // the status. A body that will not parse becomes `{}` — not an error.
+        // Python lines 173-174: a completed round trip returns here whatever
+        // the status; a body that will not parse becomes `{}`, not an error.
+        //
+        // A body that stops MID-STREAM is a different case, and the port has to
+        // keep httpx's behaviour: httpx raises RemoteProtocolError, which the
+        // Python catches as a transport failure and RETRIES. Bun's fetch has
+        // already resolved by then and only rejects on the read, so treating
+        // every read failure as "unparseable" would hand the caller a
+        // `{status: 200, data: {}}` — a success carrying no data, which every
+        // caller would then treat as a valid empty response. Distinguish the
+        // two: a truncated/failed transfer rejects (retry), a body that is
+        // genuinely not JSON returns `{}` (return, as Python does).
+        // `res.text()` is read OUTSIDE the parse guard on purpose — a rejected
+        // read must reach the transport catch below, not be swallowed here.
+        const text = await res.text();
         try {
-          return { status: res.status, data: await res.json() };
+          return { status: res.status, data: JSON.parse(text) };
         } catch {
           return { status: res.status, data: {} };
         }

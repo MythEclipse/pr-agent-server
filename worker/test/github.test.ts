@@ -246,6 +246,48 @@ describe("GitHubApi.request transport retries", () => {
     expect(status).toBe(0);
     expect(data).toEqual({});
   }, 15_000);
+
+  // PARITY GAP FOUND BY THE CONTROLLER: a body that stops mid-stream.
+  // httpx raises RemoteProtocolError here, so Python RETRIES. Bun's fetch
+  // resolves the Response with a real 200 and only rejects when the body is
+  // read — so the inner catch turns a truncated response into
+  // `{status: 200, data: {}}`, i.e. a caller sees SUCCESS carrying no data.
+  // Verified against a real socket: fetch resolved 200, .text() rejected.
+  test("a body truncated mid-stream must not read as a successful empty 200", async () => {
+    let calls = 0;
+    const trunc = createServer((sock: Socket) => {
+      calls++;
+      sock.once("data", () => {
+        if (calls === 1) {
+          // Headers promise 999 bytes; send 10, then kill the socket.
+          sock.write(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 999\r\n\r\n{\"partial\":",
+          );
+          setTimeout(() => sock.destroy(), 10);
+          return;
+        }
+        const body = '{"ok":true}';
+        sock.end(
+          `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`,
+        );
+      });
+    });
+    await new Promise<void>((r) => trunc.listen(0, "127.0.0.1", () => r()));
+    const url = `http://127.0.0.1:${(trunc.address() as { port: number }).port}`;
+    try {
+      const res = await api(url).request("GET", "/user", { retries: 2 });
+      // httpx raises RemoteProtocolError on a truncated body, so the Python
+      // retries and the SECOND attempt's complete response is what the caller
+      // sees. The bug this pins is the OLD behaviour: attempt 1 resolved as a
+      // real 200 and was returned immediately with data {}, so calls === 1 and
+      // the truncated payload was never re-requested.
+      expect(res.status).toBe(200);
+      expect(res.data).toEqual({ ok: true });
+      expect(calls).toBe(2);
+    } finally {
+      trunc.close();
+    }
+  }, 15_000);
 });
 
 // ── 5. installationToken ───────────────────────────────────────────────────
