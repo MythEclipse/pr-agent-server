@@ -3,11 +3,11 @@
   "version": "2.0.0",
   "description": "PR-Agent re-implementation in Bun/TypeScript — GitHub App webhook server + AI PR review engine",
   "type": "module",
-  "module": "src/index.ts",
-  "main": "src/index.ts",
+  "module": "src/main.ts",
+  "main": "src/main.ts",
   "scripts": {
-    "dev": "bun --watch src/index.ts",
-    "start": "bun src/index.ts",
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
     "review": "bun src/cli.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"

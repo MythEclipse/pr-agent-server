@@ -5,14 +5,13 @@ import { loadConfig } from "./config";
 import { runReview } from "./review";
 import { runDescribe } from "./describe";
 import { runImprove } from "./improve";
-import { logReviewEvent } from "./index";
+import { appendAnalyticsEvent } from "./analytics";
 import { join } from "node:path";
 
 const ANALYTICS_DIR = process.env.PR_AGENT_ANALYTICS_DIR || "/var/lib/pr-agent-server/analytics";
 
 function recordAnalytics(command: string, result: { status?: string; model?: string }): void {
-  try {
-    logReviewEvent(ANALYTICS_DIR, {
+  void appendAnalyticsEvent(ANALYTICS_DIR, {
       message: result.status === "success" ? "Generated code suggestions" : `Failed to generate (${result.status ?? "error"})`,
       extra: {
         command,
@@ -20,10 +19,9 @@ function recordAnalytics(command: string, result: { status?: string; model?: str
         model: result.model ?? "",
         error: result.status === "success" ? "" : (result.status ?? "error"),
       },
-    });
-  } catch {
+    }).catch(() => {
     // analytics is best-effort; never fail the CLI on a log write
-  }
+  });
 }
 
 async function main() {

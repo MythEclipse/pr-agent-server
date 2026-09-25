@@ -41,7 +41,7 @@ jobs:
       - name: Build single binary
         working-directory: server
         run: |
-          bun build --compile src/index.ts --outfile pr-agent-bun
+          bun build --compile src/main.ts --outfile pr-agent-bun
           ls -lh pr-agent-bun
 
       - name: Setup SSH key
