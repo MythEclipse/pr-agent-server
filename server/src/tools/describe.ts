@@ -2,14 +2,15 @@
 // Generates a full PR description: type, title, description, diagram and
 // per-file walkthrough from the AI prediction, then publishes it.
 
-import type { Config } from "./config";
-import { GitHubProvider } from "./github";
-import { getPrDiff } from "./diff";
-import { countPromptTokens } from "./core/token";
-import { renderTemplate } from "./core/render";
-import { DESCRIPTION_SYSTEM_TEMPLATE, DESCRIPTION_USER_TEMPLATE } from "./prompts";
-import { loadYaml } from "./core/yaml";
-import { chatCompletion } from "./llm";
+import type { Config } from "../config";
+import { GitHubProvider } from "../github";
+import { getPrDiff } from "../diff";
+import { countPromptTokens } from "../core/token";
+import { renderTemplate } from "../core/render";
+import { DESCRIPTION_SYSTEM_TEMPLATE, DESCRIPTION_USER_TEMPLATE } from "../prompts/describe";
+import { loadYaml } from "../core/yaml";
+import { callWithFallback } from "../llm";
+import { publishPersistent } from "./publish";
 
 export interface DescribeResult {
   markdown: string;
@@ -82,45 +83,23 @@ export async function runDescribe(
     baseVars,
     renderTemplate,
   );
-  const { diff, remainingFiles } = getPrDiff(files, promptTokens, cfg.model, cfg);
+  const { diff, remainingFiles } = getPrDiff(files, promptTokens, cfg.modelDescribe, cfg);
 
   const vars = { ...baseVars, diff };
   const systemPrompt = renderTemplate(DESCRIPTION_SYSTEM_TEMPLATE, vars);
   const userPrompt = renderTemplate(DESCRIPTION_USER_TEMPLATE, vars);
 
-  // LLM call with fallback models
-  const models = [cfg.model, ...cfg.fallbackModels];
-  let content = "";
-  let usedModel = cfg.model;
-  let usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
-  let lastErr: unknown = null;
-  for (const model of models) {
-    try {
-      const res = await chatCompletion({
-        model,
-        system: systemPrompt,
-        user: userPrompt,
-        temperature: cfg.temperature,
-        cfg,
-      });
-      content = res.content;
-      usedModel = model;
-      usage = {
-        promptTokens: res.usage?.promptTokens ?? 0,
-        completionTokens: res.usage?.completionTokens ?? 0,
-        cachedTokens: res.usage?.cachedTokens ?? 0,
-      };
-      break;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  if (!content) {
-    throw new Error(`All models failed: ${(lastErr as Error)?.message ?? "unknown"}`);
-  }
+  // LLM call with per-model retry + fallback models
+  const llm = await callWithFallback({
+    models: [cfg.modelDescribe, ...cfg.fallbackModels],
+    system: systemPrompt,
+    user: userPrompt,
+    temperature: cfg.temperature,
+    cfg,
+  });
 
   // Parse prediction YAML
-  let prediction = content.replace(/^```yaml\s*/i, "").replace(/```\s*$/i, "").trim().replace(/^```/i, "");
+  let prediction = llm.content.replace(/^```yaml\s*/i, "").replace(/```\s*$/i, "").trim().replace(/^```/i, "");
   const keysFix = [
     "pr_files:",
     "changes_summary:",
@@ -199,8 +178,12 @@ export async function runDescribe(
     if (idx < entries.length - 1) prBody += "\n\n___\n\n";
   }
 
-  // File walkthrough table
-  const table = processPrFilesPrediction(fileLabelDict, files, provider);
+  // File walkthrough table. The link is deliberately NOT included here: the
+  // walkthrough renders a fully-static table (filename + diff stats + summary)
+  // and embedding getLineLink() would add a per-file API round-trip whose
+  // result is discarded anyway (the old code assigned then immediately blanked
+  // `link`). GitHub already links filenames in the PR Files tab.
+  const table = processPrFilesPrediction(fileLabelDict, files);
   prBody += `\n\n<details> <summary><h3> File walkthrough</h3></summary>\n\n${table}\n\n</details>\n\n`;
 
   // Help text (matches pr_agent when enable_help_comment)
@@ -214,7 +197,8 @@ export async function runDescribe(
   // Publish
   if (opts?.publish !== false) {
     if (descCfg.publishDescriptionAsComment) {
-      await provider.publishPersistentComment(
+      await publishPersistent(
+        provider,
         `## Title\n\n${publishTitle}\n\n___\n${prBody}`,
         "## Title",
         "describe",
@@ -247,9 +231,9 @@ export async function runDescribe(
   return {
     markdown,
     data: ordered,
-    model: usedModel,
-    promptTokens: usage.promptTokens || promptTokens,
-    completionTokens: usage.completionTokens,
+    model: llm.model,
+    promptTokens: llm.usage.promptTokens || promptTokens,
+    completionTokens: llm.usage.completionTokens,
     status: "success",
   };
 }
@@ -310,7 +294,6 @@ function longestChain(edges: string[][]): number {
 function processPrFilesPrediction(
   fileLabelDict: Record<string, FileLabelEntry[]>,
   diffFiles: { filename: string; numPlusLines: number; numMinusLines: number }[],
-  provider: GitHubProvider,
 ): string {
   const labels = Object.keys(fileLabelDict);
   if (!labels.length) return "<table><thead><tr><th></th><th align=\"left\">Relevant files</th></tr></thead><tbody></tbody></table>";
@@ -346,14 +329,6 @@ function processPrFilesPrediction(
         diffPlusMinus = `+${df.numPlusLines}/-${df.numMinusLines}`;
         if (diffPlusMinus.length > 12 || diffPlusMinus === "+0/-0") diffPlusMinus = "[link]";
         deltaNbsp = "&nbsp; ".repeat(Math.max(0, 8 - diffPlusMinus.length));
-      }
-      // line link (best effort)
-      let link = "";
-      try {
-        link = provider.getLineLink(filename, -1) as unknown as string;
-        link = "";
-      } catch {
-        link = "";
       }
       const descBr = insertBrAfterXChars(f.changesSummary, 70);
       out += collapsible

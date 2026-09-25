@@ -5,7 +5,7 @@ import {
   deriveLabels,
   sanitizeDiagram,
   insertBrAfterXChars,
-} from "../src/describe";
+} from "../src/tools/describe";
 
 describe("describe helpers", () => {
   test("deriveLabels from type list", () => {

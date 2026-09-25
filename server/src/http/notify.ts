@@ -4,7 +4,7 @@
 
 import { appendAnalyticsEvent, appendBunAnalyticsRecord } from "../analytics";
 import { htmlToDiscordPlain, sendDiscord } from "../notify/discord";
-import type { ReviewResult } from "../review";
+import type { ReviewResult } from "../tools/review";
 import type { ReviewJob, WebhookEnv } from "./webhook";
 
 type NotifyEnv = Pick<WebhookEnv, "analyticsDir" | "discordWebhookUrl" | "discordAlertWebhookUrl">;

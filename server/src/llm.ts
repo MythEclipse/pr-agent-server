@@ -21,6 +21,42 @@ export interface ChatResult {
   };
 }
 
+export type ChatCall = (o: {
+  model: string;
+  system: string;
+  user: string;
+  temperature?: number;
+  cfg: Config;
+}) => Promise<ChatResult>;
+
+const isTransient = (e: unknown) => {
+  const m = String((e as Error)?.message ?? e);
+  if (/LLM request failed \((4\d\d)\)/.test(m)) return false; // client error → don't retry
+  return /LLM request failed \(5\d\d\)|fetch failed|aborted|timeout|ECONN|socket/i.test(m);
+};
+
+export async function callWithFallback(opts: {
+  models: string[]; system: string; user: string; temperature?: number;
+  cfg: Config; retries?: number; call?: ChatCall;
+}) {
+  const call = opts.call ?? chatCompletion;
+  const retries = opts.retries ?? 2;
+  let last: unknown;
+  for (const model of opts.models) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const r = await call({ model, system: opts.system, user: opts.user, temperature: opts.temperature, cfg: opts.cfg });
+        return { content: r.content, model, usage: { promptTokens: r.usage?.promptTokens ?? 0, completionTokens: r.usage?.completionTokens ?? 0, cachedTokens: r.usage?.cachedTokens ?? 0 } };
+      } catch (e) {
+        last = e;
+        if (!isTransient(e) || attempt === retries) break;
+        await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+      }
+    }
+  }
+  throw new Error(`All models failed: ${(last as Error)?.message ?? "unknown"}`);
+}
+
 const NO_SUPPORT_TEMPERATURE_MODELS = new Set([
   "claude-opus-4-7",
   "claude-opus-4-8",

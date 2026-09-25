@@ -16,7 +16,7 @@ import { countTokens } from "../src/core/token";
 import { convertToMarkdownV2 } from "../src/core/markdown";
 import { renderTemplate } from "../src/core/render";
 import { loadConfig, getModelTokenLimit } from "../src/config";
-import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "../src/prompts";
+import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "../src/prompts/review";
 
 describe("diff processing", () => {
   test("parseHunkHeader", () => {

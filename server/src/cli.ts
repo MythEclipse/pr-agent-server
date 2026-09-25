@@ -2,9 +2,9 @@
 // Also used by the queue worker to trigger reviews without a webhook.
 
 import { loadConfig } from "./config";
-import { runReview } from "./review";
-import { runDescribe } from "./describe";
-import { runImprove } from "./improve";
+import { runReview } from "./tools/review";
+import { runDescribe } from "./tools/describe";
+import { runImprove } from "./tools/improve";
 import { appendAnalyticsEvent } from "./analytics";
 import { join } from "node:path";
 

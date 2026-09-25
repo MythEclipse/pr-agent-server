@@ -2,16 +2,16 @@
 // render prompts, call LLM, parse YAML, render markdown, publish.
 // Port of pr_agent.tools.pr_reviewer.
 
-import type { Config } from "./config";
-import { GitHubProvider } from "./github";
-import { getPrDiff } from "./diff";
-import { countTokens } from "./core/token";
-import { countPromptTokens } from "./core/token";
-import { renderTemplate } from "./core/render";
-import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "./prompts";
-import { loadYaml } from "./core/yaml";
-import { convertToMarkdownV2 } from "./core/markdown";
-import { chatCompletion } from "./llm";
+import type { Config } from "../config";
+import { GitHubProvider } from "../github";
+import { getPrDiff, clipTokens } from "../diff";
+import { countPromptTokens } from "../core/token";
+import { renderTemplate } from "../core/render";
+import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "../prompts/review";
+import { loadYaml } from "../core/yaml";
+import { convertToMarkdownV2 } from "../core/markdown";
+import { callWithFallback } from "../llm";
+import { publishPersistent } from "./publish";
 
 export interface ReviewResult {
   markdown: string;
@@ -52,7 +52,7 @@ export async function runReview(
   const description = await provider.getPrDescription(true);
   const branch = await provider.getPrBranch();
   const commitMessagesStrRaw = await provider.getCommitMessagesStr(cfg.maxCommitsTokens);
-  const commitMessagesStr = clipTokensSimple(commitMessagesStrRaw, cfg.maxCommitsTokens);
+  const commitMessagesStr = clipTokens(commitMessagesStrRaw, cfg.maxCommitsTokens);
   const title = pr.title;
   const date = new Date().toISOString().slice(0, 10);
 
@@ -96,50 +96,20 @@ export async function runReview(
 
   // build diff with token budget (reuses prompt tokens); main-language files
   // are ordered first inside getPrDiff using the languages fetched above
-  const { diff, remainingFiles } = getPrDiff(files, promptTokens, cfg.model, cfg, languages);
+  const { diff, remainingFiles } = getPrDiff(files, promptTokens, cfg.modelReview, cfg, languages);
 
   // render final prompts with diff
   const systemPrompt = renderTemplate(REVIEW_SYSTEM_TEMPLATE, { ...vars, diff });
   const userPrompt = renderTemplate(REVIEW_USER_TEMPLATE, { ...vars, diff });
 
-  // LLM call with fallback models
-  const models = [cfg.model, ...cfg.fallbackModels];
-  let content = "";
-  let finishReason = "";
-  let usedModel = cfg.model;
-  let usage: { promptTokens: number; completionTokens: number; cachedTokens: number } = {
-    promptTokens: 0,
-    completionTokens: 0,
-    cachedTokens: 0,
-  };
-
-  let lastErr: unknown = null;
-  for (const model of models) {
-    try {
-      const res = await chatCompletion({
-        model,
-        system: systemPrompt,
-        user: userPrompt,
-        temperature: cfg.temperature,
-        cfg,
-      });
-      content = res.content;
-      finishReason = res.finishReason;
-      usedModel = model;
-      usage = {
-        promptTokens: res.usage?.promptTokens ?? 0,
-        completionTokens: res.usage?.completionTokens ?? 0,
-        cachedTokens: res.usage?.cachedTokens ?? 0,
-      };
-      break;
-    } catch (e) {
-      lastErr = e;
-      // if all models fail, throw; else try next
-    }
-  }
-  if (!content) {
-    throw new Error(`All models failed: ${(lastErr as Error)?.message ?? "unknown"}`);
-  }
+  // LLM call with per-model retry + fallback models
+  const llm = await callWithFallback({
+    models: [cfg.modelReview, ...cfg.fallbackModels],
+    system: systemPrompt,
+    user: userPrompt,
+    temperature: cfg.temperature,
+    cfg,
+  });
 
   // parse YAML (resilient)
   const keysFix = [
@@ -151,7 +121,7 @@ export async function runReview(
     "relevant_line:",
     "suggestion:",
   ];
-  let data = loadYaml(content, keysFix, "review", "security_concerns") as Record<string, unknown> | null;
+  let data = loadYaml(llm.content, keysFix, "review", "security_concerns") as Record<string, unknown> | null;
   // loadYaml returns { review: ... } — keep as is
   if (data && !("review" in data) && "review" in (data as object)) {
     data = { review: (data as { review: unknown }).review };
@@ -167,7 +137,7 @@ export async function runReview(
     if (markdown) {
       // persistent comment (replace prev "## PR Reviewer Guide 🔍")
       if (r.persistentComment) {
-        await provider.publishPersistentComment(markdown, "## PR Reviewer Guide 🔍", "review", r.finalUpdateMessage);
+        await publishPersistent(provider, markdown, "## PR Reviewer Guide 🔍", "review", r.finalUpdateMessage);
       } else {
         await provider.publishComment(markdown);
       }
@@ -177,23 +147,14 @@ export async function runReview(
   return {
     markdown,
     data,
-    model: usedModel,
-    promptTokens: usage.promptTokens || promptTokens,
-    completionTokens: usage.completionTokens,
-    cachedTokens: usage.cachedTokens,
+    model: llm.model,
+    promptTokens: llm.usage.promptTokens || promptTokens,
+    completionTokens: llm.usage.completionTokens,
+    cachedTokens: llm.usage.cachedTokens,
     remainingFiles,
     diff,
     status: "success",
   };
-}
-
-function clipTokensSimple(text: string, maxTokens: number): string {
-  const tokens = countTokens(text);
-  if (tokens <= maxTokens) return text;
-  // approximate chars/token from actual ratio
-  const ratio = text.length / Math.max(1, tokens);
-  const target = Math.floor(maxTokens * ratio * 0.9);
-  return text.slice(0, target) + "\n...(truncated)";
 }
 
 function getMainPrLanguage(

@@ -8,6 +8,9 @@ import { readFileSync } from "node:fs";
 export interface Config {
   // model routing
   model: string;
+  modelReview: string;
+  modelDescribe: string;
+  modelImprove: string;
   fallbackModels: string[];
   maxModelTokens: number; // capping for get_max_tokens (config.max_model_tokens)
   customModelMaxTokens: number; // used when a model is not in the MAX_TOKENS table
@@ -112,6 +115,9 @@ export function loadConfig(): Config {
 
   return {
     model,
+    modelReview: env.PR_AGENT_MODEL_REVIEW || env.PR_AGENT_MODEL || "claude-opus-5",
+    modelDescribe: env.PR_AGENT_MODEL_DESCRIBE || env.PR_AGENT_MODEL || "claude-opus-5",
+    modelImprove: env.PR_AGENT_MODEL_IMPROVE || env.PR_AGENT_MODEL || "claude-opus-5",
     fallbackModels,
     maxModelTokens: envInt("PR_AGENT_MAX_MODEL_TOKENS", 128000),
     customModelMaxTokens: envInt("PR_AGENT_CUSTOM_MODEL_MAX_TOKENS", 128000),

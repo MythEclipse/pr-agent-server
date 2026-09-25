@@ -7,10 +7,10 @@
 // budget, prompt render, LLM call via 9router, YAML parse, markdown render.
 // Does NOT publish a comment unless --publish is passed.
 
-import { loadSecrets } from "./src/secrets";
+import { readFileSync } from "node:fs";
 import { loadConfig } from "./src/config";
 import { GitHubProvider } from "./src/github";
-import { runReview } from "./src/review";
+import { runReview } from "./src/tools/review";
 import { countTokens } from "./src/core/token";
 
 const args = process.argv.slice(2);
@@ -23,16 +23,24 @@ if (!repoArg || !prArg) {
   process.exit(2);
 }
 
-const secrets = loadSecrets({
-  appDir: process.env.PR_AGENT_APP_DIR ?? "/var/lib/pr-agent-server",
-});
 const cfg = loadConfig();
-cfg.llm.baseUrl = secrets.baseUrl;
-cfg.llm.apiKey = secrets.omniKey;
-cfg.github.appId = secrets.appId;
-cfg.github.privateKey = secrets.privateKey;
+const appDir = process.env.PR_AGENT_APP_DIR ?? "/var/lib/pr-agent-server";
+let privateKey = "";
+const keyCandidates = [
+  `${appDir}/private-key.pem`,
+  `${process.env.HOME ?? "/home/code"}/.hermes/keys/pr-agent-key.pem`,
+];
+for (const p of keyCandidates) {
+  try {
+    privateKey = readFileSync(p, "utf8");
+    break;
+  } catch {
+    // try next
+  }
+}
+if (!privateKey) throw new Error(`private-key.pem not found in ${keyCandidates.join(", ")}`);
 
-const gh = new GitHubProvider(cfg, repoArg.split("/")[0], repoArg.split("/")[1], prArg, secrets.privateKey);
+const gh = new GitHubProvider(cfg, repoArg.split("/")[0], repoArg.split("/")[1], prArg, privateKey);
 
 const startedAt = Date.now();
 console.log(`\n=== E2E review ${repoArg}#${prArg} (publish=${publish}) ===`);
@@ -52,7 +60,7 @@ try {
     repoArg.split("/")[0],
     repoArg.split("/")[1],
     prArg,
-    secrets.privateKey,
+    privateKey,
     { publish },
   );
   const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);

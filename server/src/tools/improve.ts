@@ -2,15 +2,16 @@
 // Splits the PR diff into chunks, calls the LLM per chunk (parallel), merges,
 // filters by score, and publishes a summarized "## PR Code Suggestions" table.
 
-import type { Config } from "./config";
-import { GitHubProvider } from "./github";
-import { getPrMultiDiffs } from "./diff";
-import { countPromptTokens } from "./core/token";
-import { renderTemplate } from "./core/render";
-import { SUGGESTIONS_SYSTEM_TEMPLATE, SUGGESTIONS_USER_TEMPLATE } from "./prompts";
-import { loadYaml } from "./core/yaml";
-import { chatCompletion } from "./llm";
+import type { Config } from "../config";
+import { GitHubProvider } from "../github";
+import { getPrMultiDiffs } from "../diff";
+import { countPromptTokens } from "../core/token";
+import { renderTemplate } from "../core/render";
+import { SUGGESTIONS_SYSTEM_TEMPLATE, SUGGESTIONS_USER_TEMPLATE } from "../prompts/suggestions";
+import { loadYaml } from "../core/yaml";
+import { callWithFallback } from "../llm";
 import { insertBrAfterXChars } from "./describe";
+import { publishPersistent } from "./publish";
 
 export interface Suggestion {
   relevant_file: string;
@@ -51,7 +52,7 @@ export async function runImprove(
   const pr = await provider.getPr();
   const files = await provider.getDiffFiles();
   if (!files.length) {
-    return { markdown: "", data: null, model: cfg.model, promptTokens: 0, completionTokens: 0, status: "empty" };
+    return { markdown: "", data: null, model: cfg.modelImprove, promptTokens: 0, completionTokens: 0, status: "empty" };
   }
 
   const focus = opts?.focusOnlyOnProblems ?? true;
@@ -80,16 +81,16 @@ export async function runImprove(
   const { chunks, chunksNoLineNumbers } = getPrMultiDiffs(
     files,
     promptTokens,
-    cfg.model,
+    cfg.modelImprove,
     cfg,
     3,
     true,
   );
 
-  // parallel LLM calls per chunk (max 3)
-  const models = [cfg.model, ...cfg.fallbackModels];
+  // parallel LLM calls per chunk (max 3), retry per model via callWithFallback
+  const models = [cfg.modelImprove, ...cfg.fallbackModels];
   const preds: Suggestion[][] = [];
-  let usedModel = cfg.model;
+  let usedModel = cfg.modelImprove;
   let totalPrompt = 0;
   let totalCompletion = 0;
   let lastErr: unknown = null;
@@ -98,9 +99,9 @@ export async function runImprove(
     const vars = { ...baseVars, diff_no_line_numbers: chunkNoLn };
     const system = renderTemplate(SUGGESTIONS_SYSTEM_TEMPLATE, vars);
     const user = renderTemplate(SUGGESTIONS_USER_TEMPLATE, vars);
-    const res = await chatCompletion({ model, system, user, temperature: cfg.temperature, cfg });
-    totalPrompt += res.usage?.promptTokens ?? 0;
-    totalCompletion += res.usage?.completionTokens ?? 0;
+    const res = await callWithFallback({ models: [model], system, user, temperature: cfg.temperature, cfg });
+    totalPrompt += res.usage.promptTokens;
+    totalCompletion += res.usage.completionTokens;
     const data = loadYaml(
       res.content.replace(/^```yaml\s*/i, "").replace(/```\s*$/i, "").trim(),
       ["code_suggestions:", "relevant_file:", "suggestion_content:", "improved_code:", "one_sentence_summary:", "label:", "score:"],
@@ -149,7 +150,8 @@ export async function runImprove(
 
   if (opts?.publish !== false) {
     if (all.length) {
-      await provider.publishPersistentComment(
+      await publishPersistent(
+        provider,
         markdown,
         "## PR Code Suggestions ✨",
         "suggestions",

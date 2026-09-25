@@ -4,7 +4,7 @@ import type { Server } from "bun";
 import { readFileSync } from "node:fs";
 import { loadConfig } from "../config";
 import { sendDiscord } from "../notify/discord";
-import { runReview } from "../review";
+import { runReview } from "../tools/review";
 import { analyticsRoutes } from "./analytics";
 import { notifyReviewFailure, notifyReviewSuccess } from "./notify";
 import { setupCallback } from "./setup";
