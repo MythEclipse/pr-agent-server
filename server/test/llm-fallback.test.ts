@@ -39,4 +39,22 @@ describe("callWithFallback", () => {
       .rejects.toThrow(/All models failed/);
     expect(n).toBe(1);
   });
+
+  test("retries Bun's real connection-refused and timeout texts (isTransient)", async () => {
+    // Regression lock for the fix: Bun/undici raises these exact messages,
+    // which the original isTransient regex did not classify as transient —
+    // so no backoff happened on dead upstreams.
+    for (const msg of [
+      "Unable to connect. Is the computer able to access the url?",
+      "The operation timed out.",
+      "The operation was aborted.",
+      "fetch failed",
+    ]) {
+      let n = 0;
+      const fake = async () => { n++; if (n < 2) throw new Error(msg); return { content: "ok", finishReason: "stop", usage: {} }; };
+      const r = await callWithFallback({ models: ["m1"], system: "s", user: "u", cfg, retries: 2, call: fake });
+      expect(r.content).toBe("ok");
+      expect(n).toBe(2); // retried once, then succeeded
+    }
+  });
 });
