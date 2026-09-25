@@ -6,10 +6,11 @@
  * restores both.
  *
  * CALL ORDER (important): the Python version ran `_load_env_file()` at *import*
- * time, before any module-level config constant resolved. TypeScript has no
- * equivalent guarantee, so `bootstrapEnv()` MUST be called explicitly as the
- * very first statement of `src/index.ts` — before any import that reads config,
- * and before any `process.env.PR_AGENT_*` lookup. A later task adds that call.
+ * time, before any module-level config constant resolved. ES module imports
+ * hoist, so TypeScript offers no equivalent guarantee: `bootstrapEnv()` MUST
+ * be called explicitly as the first statement of `src/index.ts` (it is, at
+ * `src/index.ts:13`), before any other module reads config or looks up a
+ * `process.env.PR_AGENT_*` value.
  *
  * Deliberately NOT ported: the provider-key hydration (`_claude_env`, Python
  * lines 85-122). That belongs to the AI-fix task; porting it here would be

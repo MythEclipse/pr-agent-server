@@ -9,6 +9,9 @@
  */
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 
+/** Python `LOCK_FILE` (line 65) — the canonical path the run loop must claim. */
+export const LOCK_FILE = "/tmp/pr-queue-worker.lock";
+
 export class WorkerLock {
   private constructor(private readonly path: string) {}
 
