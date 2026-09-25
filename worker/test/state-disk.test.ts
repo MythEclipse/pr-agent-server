@@ -1,14 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  getSkipReason,
   loadFixState,
   loadSyncState,
   prEntry,
   markFixed,
+  markSkip,
+  markSkipNotified,
   saveFixState,
   saveSyncState,
+  wasSkipNotified,
 } from "../src/state";
 
 const tmpFile = (name: string) => join(mkdtempSync(join(tmpdir(), "st-")), name);
@@ -49,6 +53,33 @@ describe("fix state on-disk shape", () => {
     prEntry(s, "o/r", 3).sha = "deadbeef";
     saveFixState(f, s);
     expect(loadFixState(f)).toEqual(s);
+  });
+
+  // The Python mutators persisted as a side effect. A caller here that forgets
+  // to save would re-fix the same PR every tick, so passing `file` must write.
+  test("markFixed with a file persists without a separate saveFixState call", () => {
+    const f = tmpFile("fix.json");
+    const s: any = {};
+    markFixed(s, "o/r", 5, "sha5", f);
+    expect(loadFixState(f)["o/r"]["5"]).toEqual({ sha: "sha5", notified: false });
+  });
+
+  test("markSkip and markSkipNotified persist when given a file", () => {
+    const f = tmpFile("fix.json");
+    const s: any = {};
+    markSkip(s, "o/r", 6, "sha6", "infra down", f);
+    expect(getSkipReason(loadFixState(f), "o/r", 6, "sha6")).toBe("infra down");
+    expect(wasSkipNotified(loadFixState(f), "o/r", 6, "sha6")).toBe(false);
+    markSkipNotified(s, "o/r", 6, "sha6", f);
+    expect(wasSkipNotified(loadFixState(f), "o/r", 6, "sha6")).toBe(true);
+  });
+
+  test("omitting the file leaves the mutators in-memory (tests never touch prod state)", () => {
+    const f = tmpFile("fix.json");
+    const s: any = {};
+    markFixed(s, "o/r", 8, "sha8");
+    expect(existsSync(f)).toBe(false);
+    expect(s["o/r"]["8"].sha).toBe("sha8");
   });
 });
 

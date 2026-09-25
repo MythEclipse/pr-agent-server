@@ -3,17 +3,23 @@
  * lines 236-298 (fix state) and 1006-1022 (sync state).
  *
  * CUT-OVER CONTRACT (Task 17): these files survive the Python→TS switch, so the
- * on-disk bytes must stay compatible with the Python reader. Two files, two
+ * on-disk format must stay parseable by the Python reader. Two files, two
  * different serializers — deliberately NOT unified:
  *   - fix state  → `JSON.stringify(state)`, compact, no indent (Python line 249)
  *   - sync state → `JSON.stringify(state, null, 1)`, indent=1 (Python line 1020)
  * Repo keys are full `owner/repo` names; PR keys are STRINGIFIED numbers.
  *
+ * Note: JSON.parse/JSON.stringify omit the `": "` separator spaces Python's
+ * `json.dumps` emits, so the fix-state bytes are not identical — they are
+ * PARSE-equivalent, which is what the Python reader needs. The sync state
+ * (indent=1) matches the live file byte-for-byte.
+ *
  * SAVE SEMANTICS: the Python mutators (`mark_fixed`, `mark_skip`,
- * `mark_skip_notified`) persist as a side effect. Here they are PURE mutations
- * and the caller must call `saveFixState(file, state)` — the brief's spec calls
- * them with no file argument (`markFixed(s, "o/r", 1, "sha9")`). A later task
- * that drives these mutators MUST save; see task-8-report.md.
+ * `mark_skip_notified`) persist as a side effect, so a caller that forgets to
+ * save re-fixes the same PR every tick. Here each mutator takes an OPTIONAL
+ * `file`: pass it and the write happens for you (Python parity); omit it and
+ * the mutation stays in memory (which is what the unit tests do, so they
+ * never touch the production state path). Prefer passing the file.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -98,17 +104,19 @@ export function alreadyFixed(
   return prEntry(state, repo, pr).sha === headSha;
 }
 
-/** Mark the PR as fixed at `headSha`. Caller must `saveFixState`. */
+/** Mark the PR as fixed at `headSha`. Pass `file` to persist (Python parity). */
 export function markFixed(
   state: FixState,
   repo: string,
   pr: number | string,
   headSha: string,
+  file?: string,
 ): PrEntry {
   const entry = prEntry(state, repo, pr);
   entry.sha = headSha;
   delete entry.skip_reason;
   entry.notified = false;
+  if (file !== undefined) saveFixState(file, state);
   return entry;
 }
 
@@ -123,17 +131,19 @@ export function getSkipReason(
   return entry.sha === headSha ? entry.skip_reason : undefined;
 }
 
-/** Permanently skip AI-fix/merge for this PR at this SHA. Caller must `saveFixState`. */
+/** Permanently skip AI-fix/merge for this PR at this SHA. Pass `file` to persist. */
 export function markSkip(
   state: FixState,
   repo: string,
   pr: number | string,
   headSha: string,
   reason: string,
+  file?: string,
 ): PrEntry {
   const entry = prEntry(state, repo, pr);
   entry.sha = headSha;
   entry.skip_reason = reason;
+  if (file !== undefined) saveFixState(file, state);
   return entry;
 }
 
@@ -148,14 +158,16 @@ export function wasSkipNotified(
   return Boolean(entry.notified) && entry.sha === headSha;
 }
 
-/** Record that the skip notification went out. Caller must `saveFixState`. */
+/** Record that the skip notification went out. Pass `file` to persist. */
 export function markSkipNotified(
   state: FixState,
   repo: string,
   pr: number | string,
   headSha: string,
+  file?: string,
 ): PrEntry {
   const entry = prEntry(state, repo, pr);
   entry.notified = true;
+  if (file !== undefined) saveFixState(file, state);
   return entry;
 }
