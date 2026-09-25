@@ -384,6 +384,49 @@ describe("redactApiKey", () => {
       gw.stop();
     }
   });
+
+  // Ruling 2 covers BOTH exits, and the success snippet is the one the first
+  // pass missed: the agent runs with file and terminal tools inside the
+  // worktree, so it can read `~/.hermes/.env` and quote the key back. That
+  // snippet is written to `<label>.out.log` and posted to the ops channel.
+  test("never leaks the key through the SUCCESS snippet", async () => {
+    const gw = fakeGateway(() =>
+      raw(
+        JSON.stringify({
+          choices: [{ message: { content: "I read the config; the key is sk-abc123. Done." } }],
+        }),
+        200,
+      ),
+    );
+    try {
+      const r = await client(gw.baseUrl, { key: "sk-abc123" }).post("p");
+      expect(r.ok).toBe(true);
+      expect(r.snippet).toBe("I read the config; the key is [REDACTED]. Done.");
+      expect(r.snippet).not.toContain("sk-abc123");
+    } finally {
+      gw.stop();
+    }
+  });
+
+  test("keeps a success snippet redacted after the 4000-char cut and fold", async () => {
+    // Order matters: cut to the TAIL first, then fold newlines, then redact —
+    // the key may sit in the retained half or in the discarded half.
+    const key = "sk-abc123";
+    const content = `${"x".repeat(3900)}\nsk-abc123\n${"y".repeat(200)}`;
+    const gw = fakeGateway(() => raw(JSON.stringify({ choices: [{ message: { content } }] }), 200));
+    try {
+      const r = await client(gw.baseUrl, { key }).post("p");
+      expect(r.ok).toBe(true);
+      expect(r.snippet).not.toContain(key);
+      // The cut keeps the LAST 4000 characters of an 4111-char body, so the
+      // first 111 'x' of the 3900-char filler are dropped and 3789 remain —
+      // proof the tail, not the head, is what survives.
+      expect(r.snippet).toContain("x".repeat(3789));
+      expect(r.snippet).not.toContain("x".repeat(3790));
+    } finally {
+      gw.stop();
+    }
+  });
 });
 
 // ── 5. Dotenv key lookup ─────────────────────────────────────────────────────

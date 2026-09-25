@@ -18,8 +18,10 @@
  * 2. THE KEY NEVER APPEARS IN A RETURNED STRING. The Python's generic
  *    `except Exception` branch interpolates the exception text, and HTTP client
  *    exceptions embed request headers; a returned snippet is logged and then
- *    posted to the public ops Discord channel. Every string this module builds
- *    is passed through `redactApiKey` first.
+ *    posted to the public ops Discord channel. Both exits — the `[INFRA]`
+ *    failures and the success snippet — are passed through `redactApiKey`; a
+ *    success snippet can carry the key because the agent has file and terminal
+ *    tools inside the worktree.
  *
  * 3. TRUNCATE, THEN REPLACE NEWLINES. `text[-4000:].replace("\n", " ")` in
  *    Python cuts first and folds second. Folding first would change the
@@ -230,9 +232,14 @@ export class AgentClient {
           key,
         );
       }
-      // Python line 1246-1247: keep the TAIL, then fold newlines.
+      // Python line 1246-1247: keep the TAIL, then fold newlines. The result
+      // is still routed through `infra`-style redaction: the agent has file
+      // and terminal tools inside the worktree, so a snippet that quotes a key
+      // it read (or one it echoed from the request headers) would otherwise
+      // reach the ops Discord channel unredacted.
       const text = (choices[0].message || {}).content || "";
-      return { ok: true, snippet: text ? text.slice(-SNIPPET_TAIL).replace(/\n/g, " ") : "" };
+      if (!text) return { ok: true, snippet: "" };
+      return { ok: true, snippet: redactApiKey(text.slice(-SNIPPET_TAIL).replace(/\n/g, " "), key) };
     } catch (err) {
       // Python lines 1248-1253. Bun's shapes were PROBED on Bun 1.3.14 rather
       // than assumed: an AbortSignal.timeout rejects with a DOMException named
