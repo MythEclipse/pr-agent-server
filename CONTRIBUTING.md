@@ -5,25 +5,34 @@
 1. Fork the repo
 2. Create a feature branch: `git checkout -b feat/your-feature`
 3. Make changes — keep files organized in the project layout:
-   - `src/` for application modules
+   - `server/src/` for the TypeScript server (`server/test/` for `bun:test` suites)
    - `scripts/` for setup/deployment helpers
    - `templates/` for config templates
-4. Syntax check: `python3 -m py_compile src/*.py scripts/*.py`
-5. Nix build: `nix build .#default` (verify the flake still builds)
-6. Commit with descriptive message + push
-7. Open PR — the server's auto-merge bot will review it
+4. Verify before committing:
+   ```bash
+   cd server
+   bunx tsc --noEmit
+   bun test
+   ```
+5. Commit with a descriptive message + push
+6. Open PR — the server's auto-merge bot will review it
 
 ## Standards
 
-- **Python**: 4-space indent, type hints where practical, no hardcode secrets
+- **TypeScript**: `strict: true`; logic files stay ≤ 400 lines; relative imports
+  without a file extension
+- **Runtime**: Bun 1.3.14+ for server and scripts
 - **Secrets**: Always via environment variables or BWS at runtime — never in source
-- **Model names**: Must be tested live against 9router before committing (strip `openai/` prefix issue)
-- **Nix**: Update `flake.nix` `installPhase` if you move files between directories
+- **Model names**: Must be tested live against 9router before committing (strip the
+  `openai/` provider prefix)
+- **CI is the gate**: `.github/workflows/deploy.yml` runs
+  `bun install --frozen-lockfile && bunx tsc --noEmit && bun test` before building
+  the single binary
 
 ## Testing Checklist
 
-- [ ] `python3 -m py_compile` passes on all modified files
-- [ ] `nix build .#default` succeeds
-- [ ] CI syntax-check job passes
-- [ ] New models tested via curl to 9router (not assumed)
+- [ ] `bunx tsc --noEmit` reports 0 errors
+- [ ] `bun test` passes
+- [ ] CI `typecheck + tests` job passes
+- [ ] New models tested live via curl to 9router (not assumed)
 - [ ] No secret values in git history (`sk-[a-z0-9]+` patterns)
