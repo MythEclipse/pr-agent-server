@@ -41,9 +41,15 @@ export class Report {
         console.log(report);
         return;
       }
-      // Python hardcodes ~/.hermes here (line 141); keep that, unlike env.ts.
+      // Python hardcodes ~/.hermes here (line 141). Resolved at CALL time via
+      // HERMES_HOME (same precedence as env.ts) rather than the module-scope
+      // `homedir()`, which Bun snapshots at process start and cannot be
+      // redirected afterwards — that made this path untestable in isolation.
       const cfg = JSON.parse(
-        readFileSync(join(homedir(), ".hermes", ".ops-webhooks.json"), "utf8"),
+        readFileSync(
+          join(process.env.HERMES_HOME ?? join(homedir(), ".hermes"), ".ops-webhooks.json"),
+          "utf8",
+        ),
       ) as Record<string, string | undefined>;
       const url = cfg["pr-agent-ops"];
       if (!url) return;

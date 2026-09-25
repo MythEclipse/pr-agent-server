@@ -1,12 +1,34 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Report } from "../src/report";
 
-// Isolate the network BEFORE any test: the real ~/.hermes/.ops-webhooks.json holds
-// a LIVE pr-agent-ops Discord URL, and `homedir()` in Bun ignores a runtime
-// $HOME override — so without this stub `bun test` posts to the real channel.
-const realFetch = globalThis.fetch;
+// Hermetic by construction: point HERMES_HOME at a temp dir holding a FAKE
+// pr-agent-ops URL, and stub fetch. The real ~/.hermes/.ops-webhooks.json holds a
+// LIVE Discord webhook, so reading it from a test would (a) depend on a secret
+// existing on the host — failing on any other machine or CI runner — and (b)
+// risk posting to the real channel.
+const FAKE_WEBHOOK = "https://discord.invalid/api/webhooks/fake/pr-agent-ops";
+let fakeHome = "";
+let realHermesHome: string | undefined;
+let realFetch: typeof globalThis.fetch;
+
+beforeEach(() => {
+  fakeHome = mkdtempSync(join(tmpdir(), "report-home-"));
+  writeFileSync(
+    join(fakeHome, ".ops-webhooks.json"),
+    JSON.stringify({ "pr-agent-ops": FAKE_WEBHOOK }),
+  );
+  realHermesHome = process.env.HERMES_HOME;
+  process.env.HERMES_HOME = fakeHome;
+  realFetch = globalThis.fetch;
+});
+
 afterEach(() => {
   globalThis.fetch = realFetch;
+  if (realHermesHome === undefined) delete process.env.HERMES_HOME;
+  else process.env.HERMES_HOME = realHermesHome;
   // `isTTY` is typed `boolean`; tests toggle it, so restore through a cast.
   (process.stdin as { isTTY?: boolean }).isTTY = undefined;
 });
@@ -47,9 +69,9 @@ describe("Report", () => {
     r.push("b");
     await expect(r.flush()).resolves.toBeUndefined();
     expect(calls).toHaveLength(1);
-    // The real value is a bare discord.com webhook URL; assert it came from
-    // config without hardcoding the (secret) URL.
-    expect(calls[0].url).toMatch(/^https:\/\//);
+    // The URL must be the fake one from the temp HERMES_HOME — proving the config
+    // path is resolved at call time and this suite can never reach a live host.
+    expect(calls[0].url).toBe(FAKE_WEBHOOK);
     const body = JSON.parse(String(calls[0].init!.body));
     expect(body.username).toBe("PR-Agent Ops");
     expect(body.embeds).toHaveLength(1);
@@ -94,6 +116,19 @@ describe("Report", () => {
       console.log = log;
     }
     expect(printed).toEqual(["a\nb"]);
+    expect(calls).toHaveLength(0);
+  });
+
+  // Hermeticity regression guard: the suite must not depend on a real
+  // ~/.hermes/.ops-webhooks.json existing on the host (it holds a live secret),
+  // and a missing config must still resolve rather than throw.
+  test("resolves without sending when the ops-webhook config is missing", async () => {
+    process.env.HERMES_HOME = join(fakeHome, "does-not-exist");
+    const calls = stubFetch();
+    noTty();
+    const r = new Report();
+    r.push("a");
+    await expect(r.flush()).resolves.toBeUndefined();
     expect(calls).toHaveLength(0);
   });
 
