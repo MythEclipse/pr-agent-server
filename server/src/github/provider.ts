@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import type { Octokit } from "@octokit/rest";
 import type { Config } from "../config";
 import { EditType, type FilePatchInfo, isGeneratedOrInvalidFile } from "../diff";
+import { buildLargeDiff } from "./large-diff";
 import { AppAuthClient } from "./client";
 
 export interface PullRequestData {
@@ -395,23 +396,4 @@ export class GitHubProvider {
     }
     throw lastErr;
   }
-}
-
-function buildLargeDiff(filename: string, baseContent: string, headContent: string): string {
-  if (!baseContent && !headContent) return "";
-  if (baseContent === headContent) return "";
-  const baseLines = baseContent.split("\n");
-  const headLines = headContent.split("\n");
-  // Simple whole-file diff: present as full add or full delete
-  if (!baseContent) {
-    return `@@ -0,0 +1,${headLines.length} @@\n${headLines.map((l) => "+" + l).join("\n")}`;
-  }
-  if (!headContent) {
-    return `@@ -1,${baseLines.length} +0,0 @@\n${baseLines.map((l) => "-" + l).join("\n")}`;
-  }
-  // fallback: whole-file replace (approximation)
-  return `@@ -1,${baseLines.length} +1,${headLines.length} @@\n${baseLines
-    .map((l) => "-" + l)
-    .concat(headLines.map((l) => "+" + l))
-    .join("\n")}`;
 }
