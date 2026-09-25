@@ -2,6 +2,8 @@
 // or running, and caps how many reviews execute at once so a burst of webhooks
 // cannot stampede the LLM. `enqueue` is synchronous — the webhook handler never
 // awaits a review. A failing job is logged and the queue keeps going.
+// A push that lands while a review is running is deduped, so that PR is
+// re-queued once when the run settles — the re-run re-reads the current head.
 
 export interface ReviewJob {
   owner: string;
@@ -26,6 +28,8 @@ export class ReviewQueue {
   private readonly pending: ReviewJob[] = [];
   /** Keys of every job queued or running; an entry clears when the job settles. */
   private readonly inFlight = new Set<string>();
+  /** Keys that got a duplicate while running — one coalesced re-run follows. */
+  private readonly rerun = new Set<string>();
   private running = 0;
   private waiters: (() => void)[] = [];
 
@@ -35,10 +39,17 @@ export class ReviewQueue {
     this.log = opts.log ?? ((m: string) => console.error(m));
   }
 
-  /** Queue a review, or report "deduped" when that PR is already queued/running. */
+  /**
+   * Queue a review, or report "deduped" when that PR is already queued/running.
+   * A deduped PR is re-queued once the in-flight run settles, so a push that
+   * lands mid-review is never dropped — the re-run reads the current head.
+   */
   enqueue(job: ReviewJob): "queued" | "deduped" {
     const key = keyOf(job);
-    if (this.inFlight.has(key)) return "deduped";
+    if (this.inFlight.has(key)) {
+      this.rerun.add(key);
+      return "deduped";
+    }
     this.inFlight.add(key);
     this.pending.push(job);
     this.pump();
@@ -72,9 +83,22 @@ export class ReviewQueue {
     try {
       await this.run(job);
     } catch (e) {
-      this.log(`[queue] review job ${key} failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      try {
+        this.log(`[queue] review job ${key} failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      } catch {
+        // A throwing logger must not strand the queue.
+      }
     } finally {
       this.inFlight.delete(key);
+      // Coalesced re-run: the deduped webhook(s) landed while this ran, so
+      // review the PR again against its current head. Doing it here — before
+      // the idle check below — keeps the "pending implies running" invariant.
+      if (this.rerun.delete(key)) {
+        this.pending.push(job);
+        this.running--;
+        this.pump();
+        return;
+      }
       this.running--;
       this.pump();
       if (this.running === 0 && this.pending.length === 0) {
