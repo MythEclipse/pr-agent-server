@@ -334,6 +334,125 @@ describe("cloneForPr", () => {
   });
 });
 
+// ── Controller fix round: credential redaction on the timeout path ─────────
+// The Python's `_sync_git` timeout message interpolates the full argv, so a
+// timed-out `git push <credential-url> …` leaves the token inside `stderr`.
+// `pushRef` copies that stderr into `detail`, and `detail` is posted to
+// Discord by the sync reporter (py:1447 → 1492-1497) — so a 300s push timeout
+// on BOTH credentials would print the App installation token in a channel.
+// These tests drive the REAL runGit, not a stub, so they cannot pass while
+// the redaction is missing.
+describe("credential redaction", () => {
+  const SECRET = "ghs_LITERALLYNOTAREALTOKEN0123456789";
+
+  test("a timeout synthesized by runGit carries no credential from argv", () => {
+    const dir = tempDir("redact-");
+    try {
+      runGit(["init", "-q", dir]);
+      runGit(["config", "user.email", "b@b.c"], dir, 10);
+      runGit(["config", "user.name", "b"], dir, 10);
+      writeFileSync(join(dir, "f.txt"), "x");
+      runGit(["add", "f.txt"], dir, 10);
+      runGit(["commit", "-q", "-m", "x"], dir, 10);
+      mkdirSync(join(dir, ".git", "hooks"), { recursive: true });
+      const hook = join(dir, ".git", "hooks", "pre-push");
+      writeFileSync(hook, "#!/bin/sh\nsleep 5\n");
+      chmodSync(hook, 0o755);
+
+      // The push URL carries the secret; the command blocks past the budget,
+      // so the timeout message is the one under test.
+      const r = runGit(
+        ["push", `https://x-access-token:${SECRET}@github.com/o/f.git`, "HEAD:refs/heads/main"],
+        dir,
+        0.5,
+      );
+      expect(r.code).toBe(124);
+      expect(r.stderr).toContain("timeout after 0.5s");
+      expect(r.stderr).not.toContain(SECRET);
+      expect(r.stderr).not.toContain("x-access-token:");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("pushRef detail stays clean when BOTH credentials time out", () => {
+    // The exhausting case: neither credential answers, so `last` keeps the
+    // final attempt's stderr — the exact string that used to carry the token.
+    const { run } = stubRunner([
+      { code: 124, stdout: "", stderr: `timeout after 300s: git push https://x-access-token:${SECRET}@github.com/o/f.git HEAD:refs/heads/main` },
+      { code: 124, stdout: "", stderr: `timeout after 300s: git push https://x-access-token:${SECRET}@github.com/o/f.git HEAD:refs/heads/main` },
+    ]);
+    const r = pushRef("/wd", "o/f", "HEAD", "refs/heads/main", SECRET, false, { pat: SECRET, run });
+    expect(r.ok).toBe(false);
+    expect(r.detail).not.toContain(SECRET);
+    expect(r.detail).not.toContain("x-access-token:");
+  });
+
+  test("redaction does not swallow an ordinary git error", () => {
+    const { run } = stubRunner([
+      fail("fatal: unable to access 'https://github.com/o/f.git/': Could not resolve host"),
+    ]);
+    const r = pushRef("/wd", "o/f", "HEAD", "refs/heads/main", "", false, { pat: "pattok", run });
+    expect(r.detail).toContain("Could not resolve host");
+  });
+});
+
+// ── Controller fix round: the invariants the first pass left untested ───────
+describe("error-string invariants", () => {
+  test("the concatenated error is trimmed before it is classified and kept", () => {
+    // Python line 1184 applies .strip() to `stderr + stdout`; without it a
+    // whitespace-only stderr would make the error invisible to the markers.
+    const { run } = stubRunner([fail("   \n  GH006: Protected branch update failed  \n\t")]);
+    const r = pushRef("/wd", "o/f", "HEAD", "refs/heads/main", "apptok", false, { pat: "pattok", run });
+    expect(r.protected).toBe(true);
+    expect(r.detail).toBe("pat: GH006: Protected branch update failed");
+  });
+
+  test("strips the leading whitespace that the tail slice would otherwise keep", () => {
+    // `err.slice(-260)` runs AFTER the trim, so padding longer than 260 chars
+    // cannot survive into the detail. BOTH credentials fail, so `last` holds
+    // the app attempt — the one this assertion is about.
+    const { run } = stubRunner([
+      fail(`${" ".repeat(400)}tail-marker`),
+      fail(`${" ".repeat(400)}tail-marker`),
+    ]);
+    const r = pushRef("/wd", "o/f", "HEAD", "refs/heads/main", "apptok", false, { pat: "pattok", run });
+    expect(r.detail).toBe("app: tail-marker");
+  });
+
+  test("the detail tail counts code points, not UTF-16 units", () => {
+    // Python slices `err[-260:]` by CODE POINT. String.slice counts UTF-16
+    // code units, so an emoji straddling the boundary would be cut in half
+    // and render as U+FFFD. Put the emoji exactly ON the cut so the two
+    // implementations disagree: 259 filler + emoji + trailing filler.
+    const emoji = "😀"; // one code point, two UTF-16 units
+    const err = `${"a".repeat(259)}${emoji}${"b".repeat(10)}`;
+    // Two failures so the loop exhausts and `last` is the app attempt.
+    const { run } = stubRunner([fail(err), fail(err)]);
+    const r = pushRef("/wd", "o/f", "HEAD", "refs/heads/main", "apptok", false, { pat: "pattok", run });
+    // The whole error is 270 code points, so the tail is its last 260: 249 'a',
+    // the emoji, then the ten 'b'. A UTF-16 slice would instead cut the emoji
+    // in half and leave 258 'a' with a U+FFFD where it used to be.
+    expect(r.detail).toBe(`app: ${"a".repeat(249)}${emoji}${"b".repeat(10)}`);
+    expect(r.detail).not.toContain("�");
+  });
+
+  test("the clone keeps the Python's 60s budget", () => {
+    // A mutant that raises CLONE_TIMEOUT_SEC to the push budget (300) would
+    // hang a cron tick for five minutes on a slow clone.
+    const { run, calls } = stubRunner([ok]);
+    cloneForPr("o/f", "feature", "tok", "/wd/new", 20, { run });
+    expect(calls[0]!.timeoutSec).toBe(60);
+  });
+
+  test("setBotIdentity keeps the Python's 10s budget on each config call", () => {
+    const { run, calls } = stubRunner([]);
+    setBotIdentity("/wd", run);
+    expect(calls[0]!.timeoutSec).toBe(10);
+    expect(calls[1]!.timeoutSec).toBe(10);
+  });
+});
+
 describe("setBotIdentity", () => {
   test("writes both config values with a 10s budget each", () => {
     const { run, calls } = stubRunner([]);

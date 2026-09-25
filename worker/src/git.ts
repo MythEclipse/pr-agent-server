@@ -16,9 +16,10 @@
  *    Python's numeric code below, and the whole call sits in a try/catch so an
  *    unforeseen spawn failure also degrades to a result.
  *
- * 2. `pushRef` must not leak a credential. The push URL carries the token, but
- *    only git's own stderr/stdout reaches `detail` — never the URL — so the
- *    shape is safe by construction, exactly as in the Python.
+ * 2. `pushRef` must not leak a credential. A push/clone argv carries the token
+ *    in the URL's userinfo, and a synthesized timeout message echoes that argv,
+ *    so every string that can reach `detail` is redacted first. git's own
+ *    stderr never echoes the URL, so the ordinary path was already safe.
  */
 /** Python `_sync_git(..., timeout=180)` (line 1055) — the default budget. */
 const DEFAULT_TIMEOUT_SEC = 180;
@@ -33,6 +34,36 @@ const DETAIL_TAIL = 260;
 
 /** Python's `subprocess.CompletedProcess`, reduced to the three fields used. */
 export type GitResult = { code: number; stdout: string; stderr: string };
+
+/**
+ * Strip credential userinfo out of anything that will be reported.
+ *
+ * The Python's timeout message interpolates the full argv, and a push/clone
+ * argv contains `https://x-access-token:<token>@github.com/…`. That string
+ * reaches `pushRef().detail`, which the sync reporter posts to a Discord
+ * channel (py:1447 → 1492-1497) — so a 300s push timeout on both credentials
+ * would print the App installation token in public. The Python inherited this
+ * leak; the port does not.
+ *
+ * Redaction is deliberately narrow: only the userinfo of an http(s) URL is
+ * rewritten, so an ordinary git error mentioning a repository path survives
+ * intact and stays diagnosable.
+ */
+export function redactCredentials(text: string): string {
+  return text.replace(/(https?:\/\/)[^/@\s]+@/gi, "$1[REDACTED]@");
+}
+
+/**
+ * Python's `err[-260:]` — the last 260 CODE POINTS.
+ *
+ * `String.prototype.slice` counts UTF-16 code units, so a 4-byte emoji
+ * straddling the boundary would be cut in half and render as U+FFFD, and the
+ * tail would come up one code point short. Spreading iterates code points.
+ */
+export function tail(text: string, n: number): string {
+  const points = [...text];
+  return points.length <= n ? text : points.slice(-n).join("");
+}
 
 /** Injection seam so push/clone decision logic is testable without real git. */
 export type GitRunner = (
@@ -49,8 +80,9 @@ export type GitRunner = (
  *   - timeout   → `exitCode: null`, `signalCode: "SIGTERM"`, `exitedDueToTimeout: true`
  *   - self-kill → `exitCode: null`, `signalCode: "SIGKILL"`, `exitedDueToTimeout: undefined`
  *   - ENOENT    → spawnSync THROWS a Node-style ENOENT
- * `exitCode === null` alone is therefore AMBIGUOUS, so the timeout is keyed off
- * the explicit `exitedDueToTimeout` flag and mapped to 124.
+ * The timeout is therefore keyed off the explicit `exitedDueToTimeout` flag
+ * rather than `exitCode === null`, which cannot tell a timeout from a signal
+ * kill. (A leftover `null` below means the signal-kill case, not the timeout.)
  */
 export const runGit: GitRunner = (args, cwd, timeoutSec = DEFAULT_TIMEOUT_SEC) => {
   const cmd = ["git", ...args.map((a) => String(a))];
@@ -72,7 +104,7 @@ export const runGit: GitRunner = (args, cwd, timeoutSec = DEFAULT_TIMEOUT_SEC) =
       return {
         code: 124,
         stdout: "",
-        stderr: `timeout after ${timeoutSec}s: git ${args.join(" ")}`,
+        stderr: redactCredentials(`timeout after ${timeoutSec}s: git ${args.join(" ")}`),
       };
     }
     // `null` here means a signal kill we did not ask for; git never reports
@@ -196,9 +228,12 @@ export function pushRef(
     }
     // Python line 1184: stderr AND stdout concatenated.
     const err = (r.stderr || "").concat(r.stdout || "").trim();
-    // Python line 1185. The URL — and therefore the token — never enters this
-    // string; git does not echo a push URL back either, so detail is safe.
-    last = `${kind}: ${err.slice(-DETAIL_TAIL)}`;
+    // Python line 1185. `err[-260:]` slices by CODE POINT, so the tail is taken
+    // with a spread rather than `String.slice` (UTF-16 units — a boundary
+    // emoji would leave a lone surrogate). The URL — and therefore the token —
+    // is redacted as well: the timeout message echoes argv, and a redaction
+    // gap would put the credential into this string, which reaches Discord.
+    last = `${kind}: ${tail(redactCredentials(err), DETAIL_TAIL)}`;
     if (isProtectedPushError(err)) {
       return { ok: false, detail: last, protected: true };
     }
