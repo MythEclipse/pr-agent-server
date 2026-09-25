@@ -83,7 +83,7 @@ export function startServer(env?: Partial<WebhookEnv>): AppServer {
     async fetch(req) {
       const url = new URL(req.url);
       if (url.pathname === "/health") {
-        return Response.json({ status: "ok", model: cfg.model });
+        return Response.json({ status: "ok", model: cfg.modelReview });
       }
       const setup = await setupCallback(url, appDir);
       if (setup) return setup;

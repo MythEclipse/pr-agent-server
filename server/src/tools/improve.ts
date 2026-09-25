@@ -87,21 +87,23 @@ export async function runImprove(
     true,
   );
 
-  // parallel LLM calls per chunk (max 3), retry per model via callWithFallback
+  // parallel LLM calls per chunk (max 3); retry per model inside one
+  // callWithFallback per chunk, so error text is owned by llm.ts (no nested
+  // "All models failed" double-prefix) and retries count per chunk.
   const models = [cfg.modelImprove, ...cfg.fallbackModels];
   const preds: Suggestion[][] = [];
   let usedModel = cfg.modelImprove;
   let totalPrompt = 0;
   let totalCompletion = 0;
-  let lastErr: unknown = null;
 
-  const callChunk = async (chunk: string, chunkNoLn: string, model: string): Promise<void> => {
+  const callChunk = async (chunk: string, chunkNoLn: string): Promise<void> => {
     const vars = { ...baseVars, diff_no_line_numbers: chunkNoLn };
     const system = renderTemplate(SUGGESTIONS_SYSTEM_TEMPLATE, vars);
     const user = renderTemplate(SUGGESTIONS_USER_TEMPLATE, vars);
-    const res = await callWithFallback({ models: [model], system, user, temperature: cfg.temperature, cfg });
+    const res = await callWithFallback({ models, system, user, temperature: cfg.temperature, cfg });
     totalPrompt += res.usage.promptTokens;
     totalCompletion += res.usage.completionTokens;
+    usedModel = res.model;
     const data = loadYaml(
       res.content.replace(/^```yaml\s*/i, "").replace(/```\s*$/i, "").trim(),
       ["code_suggestions:", "relevant_file:", "suggestion_content:", "improved_code:", "one_sentence_summary:", "label:", "score:"],
@@ -111,27 +113,7 @@ export async function runImprove(
     }
   };
 
-  const attemptOneModel = async (model: string): Promise<boolean> => {
-    preds.length = 0;
-    totalPrompt = 0;
-    totalCompletion = 0;
-    try {
-      await Promise.all(chunks.map((c, i) => callChunk(c, chunksNoLineNumbers[i] ?? c, model)));
-      usedModel = model;
-      return true;
-    } catch (e) {
-      lastErr = e;
-      return false;
-    }
-  };
-
-  let ok = false;
-  for (const model of models) {
-    if (await attemptOneModel(model)) { ok = true; break; }
-  }
-  if (!ok) {
-    throw new Error(`All models failed: ${(lastErr as Error)?.message ?? "unknown"}`);
-  }
+  await Promise.all(chunks.map((c, i) => callChunk(c, chunksNoLineNumbers[i] ?? c)));
 
   // merge + filter by score threshold (default 0 → keep all)
   const threshold = 0;

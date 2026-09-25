@@ -131,6 +131,13 @@ export async function runReview(
   const markdown = data && "review" in data
     ? convertToMarkdownV2(data as { review: Record<string, unknown> }, true, r.enableIntroText)
     : "";
+  // A malformed/empty response must not be reported as a completed review:
+  // the old code threw All models failed here; callWithFallback only checks
+  // that the HTTP call didn't throw, so an unparseable-but-2xx body would
+  // otherwise return status:"success" with a 0-char comment.
+  if (!markdown) {
+    throw new Error("All models failed: failed to parse review response into markdown");
+  }
 
   // publish
   if (opts?.publish !== false) {

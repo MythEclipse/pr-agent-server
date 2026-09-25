@@ -63,7 +63,7 @@ bun src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
 
 ```bash
 # Secrets are resolved at startup: PR_AGENT_APP_ID, private key path,
-# omniroute key file (see src/config.ts + src/secrets.ts)
+# omniroute key file (see src/config.ts key resolution)
 cd server
 bun src/index.ts           # starts on PORT (default 4023)
 ```

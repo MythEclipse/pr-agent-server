@@ -83,7 +83,7 @@ export async function runDescribe(
     baseVars,
     renderTemplate,
   );
-  const { diff, remainingFiles } = getPrDiff(files, promptTokens, cfg.modelDescribe, cfg);
+  const { diff } = getPrDiff(files, promptTokens, cfg.modelDescribe, cfg);
 
   const vars = { ...baseVars, diff };
   const systemPrompt = renderTemplate(DESCRIPTION_SYSTEM_TEMPLATE, vars);

@@ -32,7 +32,7 @@ export type ChatCall = (o: {
 const isTransient = (e: unknown) => {
   const m = String((e as Error)?.message ?? e);
   if (/LLM request failed \((4\d\d)\)/.test(m)) return false; // client error → don't retry
-  return /LLM request failed \(5\d\d\)|fetch failed|aborted|timeout|ECONN|socket/i.test(m);
+  return /LLM request failed \(5\d\d\)|fetch failed|aborted|timeout|timed out|Unable to connect|ECONN|ECONNREFUSED|socket/i.test(m);
 };
 
 export async function callWithFallback(opts: {
