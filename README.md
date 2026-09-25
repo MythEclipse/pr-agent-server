@@ -1,44 +1,53 @@
 # PR-Agent Server
 
-Nix-deployed GitHub App server for **automated PR review + auto-merge** using a custom LLM endpoint (9router/Omniroute).
+GitHub App server for **automated PR review + auto-merge** using a custom LLM
+endpoint (9router/Omniroute). Runtime is **Bun + TypeScript**, deployed as a
+single compiled binary.
 
 ## Architecture
 
 ```
-GitHub webhook → Caddy (reverse proxy, :4002)
-    → pr-agent-server (Nix profile, uvicorn on :4002)
-        → PR-Agent github_app.py (FastAPI)
+GitHub webhook → pr-agent-bun (Bun.serve, systemd unit, PORT=4023)
+    → in-process review queue (dedupe per PR, 2 concurrent)
+        → review pipeline (diff → token budget → prompt → LLM)
             → 9router API (custom OpenAI-compatible endpoint)
 ```
+
+The server listens on `$PORT` (code default `3000`; the systemd unit sets
+`PORT=4023`). The only inbound webhook path is `/api/v1/github_webhooks`
+(`POST`, HMAC-verified); `POST /setup/callback` completes the GitHub App
+manifest flow using `templates/manifest.json`.
 
 ## Project Layout
 
 ```
 pr-agent-server/
-├── src/                    # Main application modules
-│   ├── run_server.py       # FastAPI server + analytics/metrics + Discord webhook
-│   ├── auto_merge_bot.py   # Periodic PR review→approve→merge bot
-│   ├── trivial_merge.py    # Trivial PR fast-path (docs/dependabot/tiny diffs)
-│   ├── health-check.py     # Model health watchdog (tests primary + fallbacks)
-│   ├── sync-key.py         # Auto-syncs BWS router key to disk on service start
-│   ├── callback_server.py  # Dev callback server for GitHub App manifest
-│   ├── start_server.py     # Legacy server start script
-│   └── config/             # Runtime config (gitignored at deploy time)
-├── scripts/                # Setup and deployment helpers
-│   ├── setup_all.py        # Full setup: manifest + config + systemd service
-│   ├── setup_app.py        # App-specific setup
-│   ├── generate_manifest.py  # GitHub App manifest URL generator
-│   └── generate_manifest_domain.py
-├── templates/
-│   └── manifest.json       # GitHub App manifest template
-├── .github/workflows/
-│   ├── deploy.yml          # CI: syntax → build → deploy → GC
-│   ├── flakehub-publish-rolling.yaml
-│   └── mirror-gitea.yml
-├── flake.nix               # Nix build (creates venv + binary wrappers)
-├── flake.lock              # Pinned Nix dependencies
-├── .editorconfig           # Editor formatting rules
+├── server/                  # TypeScript/Bun GitHub App server
+│   ├── src/
+│   │   ├── main.ts          # entry: `if (import.meta.main) startServer()`
+│   │   ├── cli.ts           # one-shot CLI: review / describe / improve
+│   │   ├── config.ts        # env + key resolution
+│   │   ├── llm.ts           # chatCompletion + callWithFallback (retry per model)
+│   │   ├── queue.ts         # in-process review queue: dedupe + concurrency cap
+│   │   ├── analytics.ts     # async serialized jsonl writer
+│   │   ├── core/            # token, render (templates), yaml, markdown
+│   │   ├── diff/            # hunk/extend/filter/budget/multi
+│   │   ├── github/          # client, provider, large-diff
+│   │   ├── http/            # server, webhook, notify, analytics, setup
+│   │   ├── notify/discord.ts  # HTML→Discord plain text + webhook poster
+│   │   ├── prompts/         # review, describe, suggestions
+│   │   └── tools/           # review, describe, improve, publish
+│   ├── test/                # bun:test suites
+│   └── e2e.ts               # live end-to-end against real GitHub + LLM
+├── scripts/                 # setup/deploy helpers + the PR queue cron worker
+│   ├── pr-queue-worker.py   # cron worker (Python today; being migrated to TS)
+│   ├── smoke_hermes_api_server.py
+│   └── test_pr_queue_sync.py
+├── templates/manifest.json  # GitHub App manifest template
+├── .github/workflows/       # deploy.yml (Bun CI), mirror-gitea.yml
+├── .editorconfig
 ├── .gitignore
+├── CONTRIBUTING.md
 └── README.md
 ```
 
@@ -55,7 +64,7 @@ pr-agent-server/
 cd server
 bun install
 bunx tsc --noEmit          # typecheck
-bun test                   # unit tests (16 tests)
+bun test                   # unit tests (48 tests)
 bun src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
 ```
 
@@ -65,7 +74,7 @@ bun src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
 # Secrets are resolved at startup: PR_AGENT_APP_ID, private key path,
 # omniroute key file (see src/config.ts key resolution)
 cd server
-bun src/index.ts           # starts on PORT (default 4023)
+bun src/main.ts            # starts on $PORT (code default 3000)
 ```
 
 ### Test tools end-to-end (real GitHub + LLM)
@@ -85,12 +94,14 @@ Deploy is fully automated via GitHub Actions on push to `main`:
 1. build-and-deploy → bun install → typecheck → tests → bun build --compile
    → scp binary to VPS → swap /opt/pr-agent-server/bin/pr-agent-bun
    → restart pr-agent-bun.service → health check on :4023
-2. cleanup → nix-gc-vps.sh (cleans legacy Nix store entries)
+2. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
 ```
 
 The production server is a single compiled binary
 (`/opt/pr-agent-server/bin/pr-agent-bun`) running as a systemd service
-(`pr-agent-bun.service`, port 4023, secrets via `bws-exec pr-agent`).
+(`pr-agent-bun.service`, port 4023, secrets via `bws-exec pr-agent`). The
+runtime has no Nix dependency — the `cleanup` job only reaps leftover Nix
+store entries on the VPS.
 
 Secrets required in GitHub Actions:
 - `VPS_HOST` — VPS IP address
@@ -109,9 +120,11 @@ Secrets required in GitHub Actions:
 ## Legacy (Python/Nix — retired 2026-09-21)
 
 The original Python `pr_agent` server (FastAPI + Nix build, port 4002) is fully
-retired: systemd unit deleted, venv removed, `src/*.py` + `scripts/setup_*` +
-flake removed from the repo. The Bun binary replaced it end-to-end.
+retired: its systemd unit, venv, `src/*.py`, `scripts/setup_*` and flake are all
+gone from the repo. The Bun binary replaced the server end-to-end. The Python
+cron worker in `scripts/` is still live in production and is being migrated to
+TypeScript.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) if present at deploy.
+MIT.
