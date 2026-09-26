@@ -109,8 +109,6 @@ type FakeGit = {
     aborts: number;
     pushes: string[];
     commits: string[][];
-    /** Every argv's full text, so `--dry-run` can be asserted on. */
-    argvs: string[][];
   };
   /** Every argv the flow issued, verb only — for "must not happen" assertions. */
   verbs: string[];
@@ -125,14 +123,12 @@ function fakeGit(opts: FakeGitOpts = {}): FakeGit {
     aborts: 0,
     pushes: [] as string[],
     commits: [] as string[][],
-    argvs: [] as string[][],
   };
   const verbs: string[] = [];
   const run: GitRunner = (args) => {
     const a = args.map(String);
     const verb = a[0];
     verbs.push(verb);
-    state.argvs.push(a);
     switch (verb) {
       case "clone": {
         const c = opts.clone;
@@ -696,10 +692,8 @@ describe("group 4 · dry run", () => {
   });
 
   test("an unprotected branch in dry mode reports dry, not pr-path", async () => {
-    // The App gets 403 (not 404) on the protection endpoint for repos it
-    // cannot read the rules of. That is "unknown", and an unknown must NOT be
-    // reported as protected — a false pr-path would send an operator looking
-    // for a PR that would never be opened.
+    // 404 is GitHub's answer for a branch that exists but carries no protection
+    // rules — the plain "not protected" case.
     const api = fakeApi((method, path) => {
       if (method === "GET" && path.includes("/protection")) return { status: 404, data: {} };
       return { data: {} };
@@ -707,9 +701,27 @@ describe("group 4 · dry run", () => {
     const git = fakeGit({ mergeCode: 0, unmerged: [] });
     const { deps } = forkDeps({ git, api: api.api });
     const [status, detail] = await syncForkRepo(deps, request(), {} as SyncState, baseConfig(), true);
-
     expect(status).toBe("dry");
     expect(detail).toContain(`prepared in ${SYNC_TMP_BASE}/f_x`);
+    expect(git.state.pushes).toEqual([]);
+  });
+
+  test("a 403 (rules unreadable) is unknown, and unknown is reported as dry", async () => {
+    // The App gets 403 — not 404 — on the protection endpoint for a branch
+    // whose rules it cannot read. That is UNKNOWN, and unknown must NOT be
+    // reported as protected: a false pr-path sends an operator looking for a PR
+    // that would never be opened. Only a literal 200 yields pr-path
+    // (run.ts:463), so this pins the requirement that a future reading of 403
+    // as "protected" cannot pass the suite.
+    const api = fakeApi((method, path) => {
+      if (method === "GET" && path.includes("/protection")) return { status: 403, data: {} };
+      return { data: {} };
+    });
+    const git = fakeGit({ mergeCode: 0, unmerged: [] });
+    const { deps } = forkDeps({ git, api: api.api });
+    const [status] = await syncForkRepo(deps, request(), {} as SyncState, baseConfig(), true);
+
+    expect(status).toBe("dry");
     expect(git.state.pushes).toEqual([]);
   });
 
