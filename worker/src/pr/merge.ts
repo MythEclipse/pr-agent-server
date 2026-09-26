@@ -5,16 +5,19 @@
  * THE 403 RETRY IS THE WHOLE POINT OF `mergePr`. A GitHub App without the
  * `workflows` permission cannot merge a PR that touches `.github/workflows/*`,
  * and merging such a PR *is* a push of those files — so the App gets a 403 on a
- * PR the repository owner could merge. The fix is to retry the same PUT as the
- * owner (a `gh` CLI PAT), and to REPORT THAT RESULT rather than the first one
- * (Python line 469 returns the retry's tuple, not the original 403). A caller
- * that read the first 403 would report "merge denied" for a merge that worked.
+ * PR the owner could merge. The fix is to retry the same PUT as the owner (a
+ * `gh` CLI PAT), and to REPORT THAT RESULT rather than the first one (Python
+ * line 469 returns the retry's tuple, not the original 403). A caller reading
+ * the first 403 would report "merge denied" for a merge that worked.
  *
- * Both functions return the HTTP status VERBATIM and never throw: `api.request`
- * already degrades a transport failure to `{status: 0, data: {}}`
- * (github.ts), and the pipeline branches on that status. `0` therefore means
- * "could not ask GitHub", which is distinct from a real 4xx and is reported the
- * same way — as a status the caller judges.
+ * Both functions return the HTTP status VERBATIM and, in the normal case, do not
+ * throw — but the reason is a property of the INJECTED client, not of this
+ * module: `api.request` (github.ts) degrades a transport failure to
+ * `{status: 0, data: {}}`, and the pipeline branches on that status. `0` means
+ * "could not ask GitHub" — distinct from a real 4xx, reported the same way, as
+ * a status the caller judges. A client that DID reject would propagate:
+ * `mergePr` returns the retry's `api.request` directly rather than awaiting and
+ * catching it, so there is no second guard here on top of the client's.
  */
 import type { GhClient } from "./scan";
 

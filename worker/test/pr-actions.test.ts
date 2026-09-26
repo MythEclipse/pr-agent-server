@@ -496,6 +496,54 @@ describe("credential redaction", () => {
     expect(r.summary).not.toContain(PAT);
     expect(r.summary.startsWith("AI committed but push failed: ")).toBe(true);
   });
+
+  /**
+   * The two sites where the AGENT'S OWN TEXT reaches a summary.
+   *
+   * These are not like the three above: the fragment is an LLM's final answer
+   * written by a session holding file and terminal tools in the workdir the
+   * worker just cloned. Git persists the credentialed clone URL in plaintext in
+   * `.git/config` there, and "here is what I found" is a natural thing for the
+   * agent to say. So these two summaries are the reachable path from a live
+   * installation token to the ops Discord channel. `redactApiKey` in agent.ts
+   * does NOT cover it — that only strips `API_SERVER_KEY`, a different secret.
+   */
+  const LEAKED = "ghp_FIXTUREnotAreal000000000000000000";
+  const quotedConfig = `I read .git/config and found the remote url\n  url = https://x-access-token:${LEAKED}@github.com/owner/repo.git`;
+
+  test("an [INFRA] agent snippet quoting the clone URL does not carry the token", async () => {
+    // autofix.ts:366 — the VERBATIM skip-once site. The `[INFRA]` prefix and the
+    // surrounding prose must survive; only the credential userinfo is rewritten.
+    const proc = fakeProc({ "diff --name-only": { code: 0, stdout: "src/a.ts\n" } });
+    const fs = fakeWorkdirs();
+    const { agent } = fakeAgent({ ok: false, snippet: `[INFRA] gateway dropped. ${quotedConfig}` });
+    const r = await runAiFix(aiFixDeps(proc, fs, agent), REPO, PR, "t", "abc123def456", "dep/x", "main", "appTok");
+    expect(r.ok).toBe(false);
+    expect(r.summary).not.toContain(LEAKED);
+    expect(r.summary).not.toContain("ghp_");
+    expect(r.summary.startsWith("[INFRA] gateway dropped.")).toBe(true);
+    expect(r.summary).toContain("I read .git/config and found the remote url");
+    expect(r.summary).toContain("https://[REDACTED]@github.com/owner/repo.git");
+  });
+
+  test("a no-commit agent snippet quoting the clone URL does not carry the token", async () => {
+    // autofix.ts:399 — the "ran but produced nothing" site. Same agent, same
+    // workdir, so the same leak; here the snippet is truncated to 300 chars, so
+    // redaction has to happen BEFORE `head()` for the token to be gone.
+    const proc = fakeProc({
+      "diff --name-only": { code: 0, stdout: "src/a.ts\n" },
+      "rev-list --count": { code: 0, stdout: "0\n" },
+    });
+    const fs = fakeWorkdirs();
+    const { agent } = fakeAgent({ ok: true, snippet: quotedConfig });
+    const r = await runAiFix(aiFixDeps(proc, fs, agent), REPO, PR, "t", "abc123def456", "dep/x", "main", "appTok");
+    expect(r.ok).toBe(false);
+    expect(r.summary).not.toContain(LEAKED);
+    expect(r.summary).not.toContain("ghp_");
+    expect(r.summary.startsWith("Hermes ran but no commit/push. Output: ")).toBe(true);
+    expect(r.summary).toContain("I read .git/config and found the remote url");
+    expect(r.summary).toContain("https://[REDACTED]@github.com/owner/repo.git");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -664,6 +712,26 @@ describe("runAiFix", () => {
     await runAiFix(aiFixDeps(proc, fs, agent, api), REPO, PR, "t", "abc123def456", "dep/x", "main", "tok");
     expect(calls[0].prompt).toContain("  - src/a.ts\n  - src/b.ts\n  - src/c.ts\n");
     expect(calls[0].prompt).not.toContain("src/del.ts");
+  });
+
+  test("a file entry with a status but no filename costs no agent call", async () => {
+    // Python line 874 is `f["filename"]`, INSIDE the `try`. A missing key is a
+    // KeyError, the `except Exception: pass` at 875-876 discards the WHOLE
+    // comprehension, and lines 878-880 then return "no changed files to fix"
+    // WITHOUT reaching the gateway. That matters: the fallback clone already
+    // happened, and the next step is a paid agent call (up to 1800s) on a
+    // prompt whose file list would be the literal string "undefined".
+    const proc = fakeProc({ "diff --name-only": { code: 0, stdout: "" } });
+    const fs = fakeWorkdirs();
+    const { api } = fakeApi(() => ({
+      status: 200,
+      data: [{ status: "modified" }], // no filename — KeyError in the Python
+    }));
+    const { agent, calls } = fakeAgent({ ok: true, snippet: "" });
+    const r = await runAiFix(aiFixDeps(proc, fs, agent, api), REPO, PR, "t", "abc123def456", "dep/x", "main", "tok");
+    expect(r).toEqual({ ok: false, summary: "no changed files to fix" });
+    expect(calls).toHaveLength(0); // the money: no gateway call was made
+    expect(fs.removed).toContain(AI_WD);
   });
 
   test("a clone failure carries 200 characters of stderr", async () => {
