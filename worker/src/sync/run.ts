@@ -1,0 +1,895 @@
+/**
+ * The sync orchestrator — port of `scripts/pr-queue-worker.py` lines 1518-1689
+ * (`sync_fork_repo`), 1690-1720 (`open_sync_pr`) and 1723-1829
+ * (`run_upstream_sync`).
+ *
+ * THE ORDERING IN `syncForkRepo` IS THE FEATURE, so it is spelled out once here
+ * and nowhere repeated: clone → identity → `pre_merge_sha` → fetch upstream
+ * `--no-tags <url> <branch>:refs/remotes/upstream/<branch>` → merge → detect
+ * unmerged → (agent → SALVAGE → finish-merge) OR (quality pass on a clean
+ * merge) → `syncFinishMerge` guards → `pushRef` → protected? → `openSyncPr` →
+ * state update → workdir removed in a `finally`.
+ *
+ * FOUR THINGS THAT LOOK LIKE OPTIMISATIONS AND ARE NOT:
+ *
+ * 1. THE MERGE IS A MERGE, NEVER A REBASE. The fork keeps its local
+ *    divergence (Python lines 963-984). `git merge <remote-ref> --no-edit`
+ *    with the upstream ref under `refs/remotes/upstream/` is what makes the
+ *    merge commit a real two-parent commit the revert path can reason about.
+ * 2. THE SALVAGE ORDER IS agent → unmerged check → salvage (lines 1575-1596).
+ *    An `ok:false` from the agent does NOT mean failure: resolving N conflicts
+ *    legitimately runs past the HTTP timeout (observed: 17 files ≈ 16 min,
+ *    128 API calls), so the call can time out AFTER the agent committed. The
+ *    salvage is therefore `syncFinishMerge(workdir)` — which re-reads the
+ *    ACTUAL unmerged state — and only a refusal there aborts. Checking the
+ *    unmerged list BEFORE the agent (i.e. caching the pre-agent list) turns
+ *    every recoverable merge into a `conflict-failed`, which is the exact
+ *    failure this task exists to prevent.
+ * 3. DRY RUNS ARE PURE. `runUpstreamSync` builds a throwaway state and passes
+ *    it in; `syncForkRepo` additionally never mutates the state it was given,
+ *    never pushes, never opens a PR and never posts to Discord (lines
+ *    1527-1531, 1565, 1589, 1602, 1627, 1657, 1788). The workdir is KEPT in dry
+ *    mode, because "prepared in <dir>" is the entire point of a dry run.
+ * 4. THE BUDGET IS PER TICK AND THE ORDER IS STALEST-FIRST (lines 1746-1747).
+ *    Sorting on `last_sync_ts or 0` before spending `max_per_tick` is what
+ *    makes the budget rotate fairly across forks instead of always serving
+ *    whichever one the installation listing happened to return first.
+ */
+import { pushRef, type GitRunner } from "../git";
+import { head, reportable, type Workdirs } from "../pr/lockfix";
+import type { GhAppClient } from "../pr/scan";
+import type { PostResult } from "../agent";
+import { loadSyncState, saveSyncState, SYNC_STATE_FILE } from "../state";
+import { num, pendingVerify, syncConfig, syncEntry, upstreamSyncEnabled } from "./config";
+import type { RepoOverrides, SyncConfig, SyncState } from "./config";
+import { listForkRepos, syncOpenPr, upstreamStatus } from "./repos";
+import {
+  QUALITY_LINE,
+  RESOLVING_LINE,
+  SALVAGE_LINE,
+  SYNC_PR_PREFIX,
+  SYNC_TMP_BASE,
+  conflictPrompt,
+  qualityPrompt,
+  setSyncIdentity,
+  syncCommitIfDirty,
+  syncFetchUrl,
+  syncFinishMerge,
+  syncRevertMerge,
+  syncUnmergedFiles,
+  type RevertArgs,
+  type RevertOutcome,
+} from "./merge";
+import { verifyPendingSyncs } from "./verify";
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+/**
+ * The Python's `return "synced", ""` pairs. The brief names this union exactly,
+ * and every value is a REPORTED outcome — `runUpstreamSync` switches on it to
+ * pick the report line, the Discord post and whether the budget is spent.
+ */
+export type SyncStatus =
+  | "synced"
+  | "pr-opened"
+  | "conflict-failed"
+  | "push-failed"
+  | "error"
+  | "dry"
+  | "pr-path";
+
+/** Python's `(status, detail)`. */
+export type SyncResult = [SyncStatus, string];
+
+/** One fork's sync inputs — the Python's seven positional parameters. */
+export interface SyncRequest {
+  fork: string;
+  /** The installation token: clones, pushes and API calls for the FORK. */
+  token: string;
+  /** The upstream's `owner/repo`. */
+  parent: string;
+  localBranch: string;
+  upstreamBranch: string;
+  /** The upstream tip sha being merged. */
+  upstreamSha: string;
+  /** Upstream commits the fork lacks (compare `ahead_by`). */
+  mergeCount: number;
+  /** Fork-only commits (compare `behind_by`) — reported, never discarded. */
+  divergence: number;
+}
+
+/** The report buffer (report.ts). Optional, so a caller can drop the line. */
+export type ReportPort = { push(line: string): void };
+
+/** `AgentClient` satisfies this structurally. */
+export type SyncAgentPort = {
+  runSync(opts: {
+    workdir: string;
+    prompt: string;
+    label: string;
+    fork: string;
+    dry?: boolean;
+  }): Promise<PostResult>;
+};
+
+/** Python `post_sync_discord(title, lines, color=0x5865F2)`. */
+export type PostDiscord = (title: string, lines: string[], color?: number) => Promise<boolean>;
+
+/** Everything `syncForkRepo` needs. Nothing is read from module scope. */
+export type SyncForkDeps = {
+  run: GitRunner;
+  workdirs: Workdirs;
+  agent: SyncAgentPort;
+  api: GhAppClient;
+  /** Python `_fetch_gh_token()` — the PAT push tries FIRST. */
+  fetchGhToken: () => string;
+  postDiscord: PostDiscord;
+  loadState: () => SyncState;
+  saveState: (state: SyncState) => void;
+  /** Python `time.time()`. */
+  now: () => number;
+  report?: ReportPort;
+};
+
+/** Everything `runUpstreamSync` needs on top of the fork flow. */
+export type RunUpstreamSyncDeps = SyncForkDeps & {
+  /** Per-repo overrides, passed in rather than read from a singleton. */
+  repoOverrides: RepoOverrides;
+  /**
+   * The real `syncForkRepo`. A parameter so the gating test can observe the
+   * attempts without running a clone — the Python replaced the module global
+   * for the same reason.
+   */
+  syncForkRepo?: (
+    deps: SyncForkDeps,
+    req: SyncRequest,
+    state: SyncState,
+    cfg: SyncConfig,
+    dry: boolean,
+  ) => Promise<SyncResult>;
+};
+
+// ── Timeout budgets, one per Python `subprocess.run(..., timeout=N)` ──────────
+const CLONE_TIMEOUT_SEC = 300; // 1536
+const REV_PARSE_TIMEOUT_SEC = 30; // 1543, 1633
+const FETCH_TIMEOUT_SEC = 300; // 1546
+const MERGE_TIMEOUT_SEC = 300; // 1553
+const ABORT_TIMEOUT_SEC = 60; // 1562, 1587, 1598
+const MERGE_DIFF_TIMEOUT_SEC = 120; // 1609
+const CHECKOUT_TIMEOUT_SEC = 60; // 1696
+
+/** Python `clone failed: {stderr[:200]}` (1540) and the same width at 1551. */
+const CLONE_DETAIL = 200;
+/** Python `merge error: {(stderr+stdout)[:200]}` (1558). */
+const MERGE_ERROR_DETAIL = 200;
+/** Python `detail[:200]` on the push-failed paths (1675, 1679). */
+const PUSH_DETAIL = 200;
+/** Python `snippet[:200]` in the conflict-failure note (1588). */
+const SNIPPET = 200;
+/** Python `snippet[:120]` in the quality-skip note (1622). */
+const SHORT_SNIPPET = 120;
+/** Python `snippet[:80]` in the salvage note (1585). */
+const SALVAGE_SNIPPET = 80;
+/** Python `detail[:300]` on the final push-failed return (1682). */
+const PUSH_REPORT = 300;
+/** Python's `0x5865F2` default embed colour (line 1036), used explicitly. */
+const DISCORD_COLOR = 0x5865f2;
+/** Python line 1820's amber for a skipped fork. */
+const SKIP_COLOR = 0xe67e22;
+
+const credentialUrl = (token: string, repo: string): string =>
+  `https://x-access-token:${token}@github.com/${repo}.git`;
+
+/** Python's `time.strftime("%Y%m%d-%H%M%S")` (line 1695), in UTC. */
+function syncBranchStamp(epochSec: number): string {
+  const d = new Date(epochSec * 1000);
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  return (
+    `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}` +
+    `-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`
+  );
+}
+
+// ── sync_fork_repo ───────────────────────────────────────────────────────────
+
+/**
+ * Python `sync_fork_repo(...)` (lines 1518-1687): "One sync attempt for one
+ * fork: clone → merge upstream → Claude Code when needed → push (or open a PR
+ * when the branch is protected)."
+ *
+ * NEVER THROWS: the Python's `except Exception` becomes the `try`/`finally`
+ * here, and the `finally` removes the workdir on every non-dry path (line
+ * 1686-1687) — a leaked clone holds a credentialed `.git/config` and a live
+ * `.git/index.lock`.
+ *
+ * EVERY COMMAND'S OUTPUT PASSES THROUGH `reportable` BEFORE IT REACHES A
+ * DETAIL, because a detail is reported to the ops Discord channel (Python
+ * lines 1787-1821). The Python inherited a credential leak here (worker fix
+ * cc15d06): a push or clone error echoes the URL userinfo.
+ */
+export async function syncForkRepo(
+  deps: SyncForkDeps,
+  req: SyncRequest,
+  state: SyncState,
+  cfg: SyncConfig,
+  dry = false,
+): Promise<SyncResult> {
+  const { run, workdirs, agent } = deps;
+  const { fork, token, parent, localBranch, upstreamBranch, upstreamSha } = req;
+  const workdir = `${SYNC_TMP_BASE}/${fork.replace(/\//g, "_")}`;
+
+  // Python line 1527: a dry run gets a detached entry and never the real one.
+  const entry = dry ? {} : syncEntry(state, fork);
+
+  // DIVERGENCE FROM THE PYTHON, deliberate, and required by the brief.
+  //
+  // Python lines 1539, 1550 and 1557 call `save_sync_state(state)`
+  // UNCONDITIONALLY on the clone / fetch / merge-error exits — no `if dry`.
+  // In dry mode `entry` is a throwaway dict, so the entry writes go nowhere,
+  // but the SAVE still runs with the caller's `state`, which
+  // `run_upstream_sync` sets to `{}` (line 1737). The Python therefore writes
+  // `{}` over the real `/tmp/pr-queue-sync-state.json` on a dry run — which
+  // silently discards every armed `pending_verify` watch and every
+  // `skip_reason`, so the next real tick re-does work and the CI revert
+  // guarantee is lost with no trace.
+  //
+  // Brief group 4 states the requirement directly: "Dry run murni: `state == {}`
+  // setelah `syncForkRepo(dry)` (tidak ada tulisan)" — no writes. This guard is
+  // that requirement, and it is the only behavioural difference in this file
+  // that a caller could observe on a NON-dry path (there is none: every
+  // non-dry path still saves, at the same points).
+  const persist = () => {
+    if (!dry) deps.saveState(state);
+  };
+
+  try {
+    if (workdirs.exists(workdir)) workdirs.remove(workdir); // Python lines 1532-1533
+    workdirs.mkdir(SYNC_TMP_BASE); // Python line 1534 (`workdir.parent`)
+
+    const clone = run(
+      ["clone", credentialUrl(token, fork), workdir, "--branch", localBranch],
+      undefined,
+      CLONE_TIMEOUT_SEC,
+    );
+    if (clone.code !== 0) {
+      entry.last_sync_ts = deps.now(); // Python line 1538
+      persist();
+      return ["error", `clone failed: ${head(reportable(clone.stderr || "").trim(), CLONE_DETAIL)}`];
+    }
+    setSyncIdentity(run, workdir); // Python lines 1541-1542
+    const preMergeSha = (
+      run(["rev-parse", "HEAD"], workdir, REV_PARSE_TIMEOUT_SEC).stdout || ""
+    ).trim(); // Python line 1543
+
+    const upstreamRef = `refs/remotes/upstream/${upstreamBranch}`; // Python line 1545
+    const fetch = run(
+      [
+        "fetch",
+        "--no-tags",
+        syncFetchUrl(parent, deps.fetchGhToken()),
+        `${upstreamBranch}:${upstreamRef}`,
+      ],
+      workdir,
+      FETCH_TIMEOUT_SEC,
+    );
+    if (fetch.code !== 0) {
+      entry.last_sync_ts = deps.now(); // Python line 1549
+      persist();
+      return [
+        "error",
+        `upstream fetch failed: ${head(reportable(fetch.stderr || "").trim(), CLONE_DETAIL)}`,
+      ];
+    }
+
+    const merge = run(["merge", upstreamRef, "--no-edit"], workdir, MERGE_TIMEOUT_SEC);
+    const conflicted = syncUnmergedFiles(run, workdir); // Python line 1554
+    if (merge.code !== 0 && conflicted.length === 0) {
+      entry.last_sync_ts = deps.now(); // Python line 1556
+      persist();
+      const combined = `${merge.stderr || ""}${merge.stdout || ""}`;
+      return ["error", `merge error: ${head(reportable(combined).trim(), MERGE_ERROR_DETAIL)}`];
+    }
+
+    let resolution: string;
+    if (conflicted.length) {
+      if (!cfg.resolve_conflicts) {
+        // Python lines 1561-1569: abort, and record a skip that is NOT
+        // retried until upstream moves.
+        run(["merge", "--abort"], workdir, ABORT_TIMEOUT_SEC);
+        const note =
+          `${conflicted.length} conflicting file(s) and conflict resolution is disabled: ` +
+          `${conflicted.slice(0, 5).join(", ")}`;
+        return [
+          "conflict-failed",
+          skipNote(deps, entry, state, dry, upstreamSha, note),
+        ];
+      }
+
+      deps.report?.push(RESOLVING_LINE(conflicted.length)); // Python line 1570
+      const agentRun = await agent.runSync({
+        workdir,
+        prompt: conflictPrompt(fork, parent, upstreamBranch, localBranch, conflicted),
+        label: "hermes_sync_conflicts",
+        fork,
+        dry,
+      });
+
+      if (!agentRun.ok) {
+        // SALVAGE (lines 1576-1594). The agent call failed — but a timeout or
+        // a gateway hiccup says nothing about the WORKDIR. Re-read the real
+        // unmerged state now and let `syncFinishMerge` decide; a refusal there
+        // is the only thing that aborts. `why_salvage` is unused in the Python
+        // and is dropped rather than threaded.
+        const salvaged = syncFinishMerge(run, workdir);
+        if (salvaged.ok) {
+          deps.report?.push(SALVAGE_LINE);
+          resolution =
+            `Hermes resolved ${conflicted.length} conflict(s); ` +
+            `agent call ended early (${head(reportable(agentRun.snippet), SALVAGE_SNIPPET)}) ` +
+            "— merge salvaged";
+        } else {
+          run(["merge", "--abort"], workdir, ABORT_TIMEOUT_SEC);
+          return [
+            "conflict-failed",
+            skipNote(deps, entry, state, dry, upstreamSha, `conflict resolution failed — ${head(reportable(agentRun.snippet), SNIPPET)}`),
+          ];
+        }
+      } else {
+        const done = syncFinishMerge(run, workdir);
+        if (!done.ok) {
+          run(["merge", "--abort"], workdir, ABORT_TIMEOUT_SEC);
+          return [
+            "conflict-failed",
+            skipNote(
+              deps,
+              entry,
+              state,
+              dry,
+              upstreamSha,
+              `conflict resolution incomplete — ${done.detail}`,
+            ),
+          ];
+        }
+        resolution = `Hermes resolved ${conflicted.length} conflict(s)`;
+      }
+    } else {
+      resolution = "clean merge"; // Python line 1607
+      if (cfg.ai_fix_after_merge) {
+        const diff = run(
+          ["diff", "--name-only", `${preMergeSha}..HEAD`],
+          workdir,
+          MERGE_DIFF_TIMEOUT_SEC,
+        );
+        const mergedFiles = (diff.stdout || "")
+          .split("\n")
+          .map((f) => f.trim())
+          .filter((f) => f.length > 0);
+        if (mergedFiles.length) {
+          deps.report?.push(QUALITY_LINE(mergedFiles.length));
+          const quality = await agent.runSync({
+            workdir,
+            prompt: qualityPrompt(fork, parent, upstreamBranch, mergedFiles),
+            label: "hermes_sync_quality",
+            fork,
+            dry,
+          });
+          if (quality.ok) {
+            const committed = syncCommitIfDirty(
+              run,
+              workdir,
+              "fix: auto-fix code quality [skip ci]",
+            );
+            resolution += committed
+              ? " + Hermes quality pass committed"
+              : " + quality pass made no changes";
+          } else {
+            // The quality pass is OPTIONAL, so its failure only annotates the
+            // resolution — a merge that is already correct is still pushed.
+            resolution += ` (quality pass skipped: ${head(reportable(quality.snippet), SHORT_SNIPPET)})`;
+          }
+        }
+      }
+    }
+
+    // Python lines 1624-1631. A second unmerged read AFTER the agent, because
+    // the agent may have left a path unresolved while the first read (before
+    // it ran) was clean. Never push an unresolved merge.
+    const stillUnmerged = syncUnmergedFiles(run, workdir);
+    if (stillUnmerged.length) {
+      return [
+        "conflict-failed",
+        skipNote(
+          deps,
+          entry,
+          state,
+          dry,
+          upstreamSha,
+          `unmerged paths remain: ${stillUnmerged.slice(0, 5).join(", ")}`,
+        ),
+      ];
+    }
+
+    const mergedSha = (
+      run(["rev-parse", "HEAD"], workdir, REV_PARSE_TIMEOUT_SEC).stdout || ""
+    ).trim(); // Python line 1633
+
+    if (dry) {
+      // Python lines 1634-1636. The workdir is deliberately LEFT IN PLACE: the
+      // dry run's whole output is "prepared in <dir>", and a caller that wants
+      // to inspect the merge needs the clone to still be there.
+      return [
+        "dry",
+        `prepared in ${workdir} — pre_merge ${preMergeSha.slice(0, 8)}, ` +
+          `upstream ${upstreamSha.slice(0, 8)}, head ${mergedSha.slice(0, 8)}, ${resolution}`,
+      ];
+    }
+
+    const pushed = pushRef(workdir, fork, "HEAD", `refs/heads/${localBranch}`, token, false, {
+      pat: deps.fetchGhToken(),
+      run,
+    });
+
+    if (pushed.ok) {
+      // Python lines 1641-1654. `pending_verify` is what arms the CI watch, and
+      // `pre_merge_sha` is the revert target — both must be recorded BEFORE the
+      // save, or a crash between push and save leaves a merge nobody watches.
+      entry.last_sync_ts = deps.now();
+      entry.last_attempt_sha = upstreamSha;
+      entry.last_merged_upstream_sha = upstreamSha;
+      entry.skip_reason = "";
+      entry.notified = false;
+      entry.pending_verify = {
+        sha: mergedSha,
+        pre_merge_sha: preMergeSha,
+        branch: localBranch,
+        pushed_at: deps.now(),
+      };
+      deps.saveState(state);
+      return [
+        "synced",
+        `${req.mergeCount} upstream commit(s) merged into ${localBranch} ` +
+          `(${resolution}); head ${mergedSha.slice(0, 8)}; ${pushed.detail}`,
+      ];
+    }
+
+    if (pushed.protected) {
+      // Python lines 1656-1667: the App gets 403 (not 404) on the
+      // branch-protection endpoint, so "protected" is learned FROM THE PUSH —
+      // which is why this branch exists at all.
+      const prNum = await openSyncPr(
+        run,
+        deps.api,
+        token,
+        workdir,
+        fork,
+        parent,
+        localBranch,
+        upstreamBranch,
+        upstreamSha,
+        req.mergeCount,
+        req.divergence,
+        resolution,
+        { now: deps.now, fetchGhToken: deps.fetchGhToken, workdirs: deps.workdirs },
+      );
+      if (prNum) {
+        // A PR-path sync merged NOTHING into the branch, so no CI watch is
+        // armed and the merged sha is cleared — otherwise `verifyPendingSyncs`
+        // would be watching a commit that does not exist.
+        entry.last_sync_ts = deps.now();
+        entry.last_attempt_sha = upstreamSha;
+        entry.last_merged_upstream_sha = "";
+        entry.skip_reason = "";
+        entry.notified = false;
+        deps.saveState(state);
+        return [
+          "pr-opened",
+          `${localBranch} is protected — opened PR #${prNum} ` +
+            `(${req.mergeCount} upstream commit(s), ${resolution})`,
+        ];
+      }
+      entry.last_sync_ts = deps.now();
+      persist();
+      return [
+        "push-failed",
+        `protected branch and PR creation failed: ${head(pushed.detail, PUSH_DETAIL)}`,
+      ];
+    }
+
+    entry.last_sync_ts = deps.now(); // Python lines 1677-1681
+    entry.last_attempt_sha = upstreamSha;
+    entry.skip_reason = head(pushed.detail, PUSH_DETAIL);
+    entry.notified = false;
+    deps.saveState(state);
+    return ["push-failed", head(pushed.detail, PUSH_REPORT)];
+  } catch (err) {
+    // Python lines 1683-1684: "a sync must never take the whole tick down".
+    return ["error", `${err instanceof Error ? err.name : typeof err}: ${err instanceof Error ? err.message : String(err)}`];
+  } finally {
+    if (!dry) workdirs.remove(workdir); // Python lines 1686-1687
+  }
+}
+
+/**
+ * Record a skip and return its note. The Python repeats this five-line block at
+ * five call sites (lines 1565-1568, 1589-1592, 1600-1603, 1627-1630), and each
+ * repetition is the whole "skip ONCE per upstream tip" contract: `last_sync_ts`
+ * moves, `last_attempt_sha` names the tip so `run_upstream_sync` will not retry
+ * it, and `notified: false` lets the caller post a single Discord alert.
+ */
+function skipNote(
+  deps: SyncForkDeps,
+  entry: Record<string, unknown>,
+  state: SyncState,
+  dry: boolean,
+  upstreamSha: string,
+  note: string,
+): string {
+  if (dry) return note;
+  entry.last_sync_ts = deps.now();
+  entry.last_attempt_sha = upstreamSha;
+  entry.skip_reason = note;
+  entry.notified = false;
+  deps.saveState(state);
+  return note;
+}
+
+// ── open_sync_pr ─────────────────────────────────────────────────────────────
+
+/** `openSyncPr`'s injected extras, so the timestamp and PAT are testable. */
+export type OpenPrOpts = {
+  now: () => number;
+  fetchGhToken?: () => string;
+  workdirs?: Workdirs;
+};
+
+/**
+ * Python `open_sync_pr(...)` (lines 1690-1720): "Push the merged workdir as a
+ * `upstream-sync-<ts>` branch and open a PR against base_branch. The normal
+ * worker pipeline (review → CI → approve → merge) finishes the job. Returns the
+ * PR number, or 0 on failure."
+ *
+ * The timestamp is `time.strftime("%Y%m%d-%H%M%S")` (line 1695), which is LOCAL
+ * time in the Python; this renders UTC. The value is a unique-enough branch
+ * name, and using UTC keeps a cron tick's naming deterministic instead of
+ * depending on the host's TZ.
+ *
+ * The BRANCH is pushed before the PR is created, and a failed push returns 0
+ * WITHOUT creating a PR (lines 1699-1700) — a PR with a missing head is a
+ * confusing 422 rather than a clean "push failed".
+ *
+ * The BODY is transcribed verbatim, including the numbers an operator needs to
+ * judge the merge: how many upstream commits came in, and how many fork-only
+ * commits survived (the divergence this feature exists to preserve).
+ */
+export async function openSyncPr(
+  run: GitRunner,
+  api: GhAppClient,
+  token: string,
+  workdir: string,
+  fork: string,
+  parent: string,
+  baseBranch: string,
+  upstreamBranch: string,
+  upstreamSha: string,
+  mergeCount: number,
+  divergence: number,
+  resolution: string,
+  opts: OpenPrOpts,
+): Promise<number> {
+  const syncBranch = `${SYNC_PR_PREFIX}${syncBranchStamp(opts.now())}`;
+  const checkout = run(["checkout", "-b", syncBranch], workdir, CHECKOUT_TIMEOUT_SEC);
+  if (checkout.code !== 0) return 0;
+
+  const pushed = pushRef(
+    workdir,
+    fork,
+    "HEAD",
+    `refs/heads/${syncBranch}`,
+    token,
+    false,
+    { pat: opts.fetchGhToken?.() ?? "", run },
+  );
+  if (!pushed.ok) return 0; // Python line 1700
+
+  const body =
+    `⬆️ Automated upstream sync from \`${parent}\` (branch \`${upstreamBranch}\`).\n\n` +
+    `- upstream commits merged: **${mergeCount}**\n` +
+    `- fork-only commits preserved: **${divergence}**\n` +
+    `- upstream tip: \`${upstreamSha}\`\n` +
+    `- merge: ${resolution}\n\n` +
+    `Opened by pr-queue-worker because \`${baseBranch}\` is a protected branch, so the\n` +
+    "merge goes through the normal pipeline (PR-Agent review → AI fix → CI → approve → merge).\n\n" +
+    `Compare: https://github.com/${fork}/compare/${baseBranch}...${parent}:${upstreamBranch}`;
+
+  const { status, data } = await api.request("POST", `/repos/${fork}/pulls`, {
+    token,
+    json: {
+      title: `⬆️ upstream-sync: merge ${parent}@${upstreamSha.slice(0, 8)} into ${baseBranch}`,
+      head: syncBranch,
+      base: baseBranch,
+      body,
+    },
+  });
+  if (status === 200 || status === 201) {
+    const n = Number(data?.number);
+    return Number.isFinite(n) ? n : 0; // Python line 1719
+  }
+  return 0;
+}
+
+// ── run_upstream_sync ────────────────────────────────────────────────────────
+
+/** Python `run_upstream_sync(only=None, dry=False)`'s keyword arguments. */
+export type RunUpstreamSyncOptions = { only?: string; dry?: boolean };
+
+/**
+ * Python `run_upstream_sync(only=None, dry=False)` (lines 1723-1829): "Sync
+ * every fork in the installation (bounded per tick), verify merges we pushed
+ * earlier, and return the report lines. Never raises."
+ *
+ * ORDER MATTERS AND IS THE PYTHON'S: state → fork list → `verify_pending_syncs`
+ * FIRST (so a red merge is reverted before new work is layered on top) → then
+ * the per-fork loop, stalest-first, bounded by `max_per_tick`.
+ *
+ * GATES, in the Python's order (lines 1766-1778), each of which must be SILENT
+ * (no report line) so a quiet worker stays quiet:
+ *   1. `merge_count <= 0` → in sync. Also CLEARS a stale `skip_reason` (the
+ *      upstream recovered, so the old note is no longer true).
+ *   2. `last_attempt_sha == upstream_sha` → this tip was already handled.
+ *   3. `now - last_sync_ts < interval_h * 3600` → not due yet.
+ *   4. an upstream-sync PR is already open for the branch → wait.
+ * `only` BYPASSES the budget (line 1752-1753), so a manual
+ * `--sync-only <repo> --dry` always runs even when the budget is spent.
+ */
+export async function runUpstreamSync(
+  deps: RunUpstreamSyncDeps,
+  opts: RunUpstreamSyncOptions = {},
+): Promise<string[]> {
+  const lines: string[] = [];
+  const only = opts.only;
+  // `dry` lives in `opts` only. The Python's `run_upstream_sync(only=None,
+  // dry=False)` has exactly one place to say it, and a `deps.dry` alongside it
+  // would be a second source of truth that can disagree with the first.
+  const dry = opts.dry ?? false;
+  const enabled = upstreamSyncEnabled();
+
+  // Python lines 1732-1733: disabled means disabled, EXCEPT for an explicit
+  // `only`, which is a human asking for one specific fork right now.
+  if (!enabled && !only) return lines;
+
+  try {
+    // Python lines 1735-1737: a dry run gets a throwaway state so the gating
+    // `_sync_entry` calls cannot touch the real /tmp file.
+    const state: SyncState = dry ? {} : deps.loadState();
+
+    let forks = await listForkRepos(deps.api);
+    if (only) forks = forks.filter((f) => f[1] === only);
+    const tokenByRepo: Record<string, string> = {};
+    for (const [token, fork] of forks) tokenByRepo[fork] = token;
+
+    // Python line 1742: verification first.
+    lines.push(
+      ...(await verifyPendingSyncs(
+        {
+          api: deps.api,
+          enabled,
+          repoOverrides: deps.repoOverrides,
+          now: deps.now,
+          saveState: deps.saveState,
+          revertMerge: (args: RevertArgs): Promise<RevertOutcome> =>
+            Promise.resolve(
+              syncRevertMerge(deps.run, deps.workdirs, {
+                ...args,
+                fetchGhToken: deps.fetchGhToken,
+              }),
+            ),
+          postDiscord: deps.postDiscord,
+        },
+        state,
+        tokenByRepo,
+        dry,
+      )),
+    );
+
+    const now = deps.now();
+    // Python line 1746: "oldest attempt first so the per-tick budget rotates
+    // fairly across forks". A fork never synced sorts as 0 — oldest.
+    const ordered = [...forks].sort(
+      (a, b) => num(syncEntry(state, a[1]).last_sync_ts) - num(syncEntry(state, b[1]).last_sync_ts),
+    );
+
+    const baseCfg = syncConfig("", deps.repoOverrides, enabled);
+    // Python line 1747 reads `UPSTREAM_SYNC["max_per_tick"]` — worker-wide, NOT
+    // the per-repo config, so a per-repo override cannot raise the budget.
+    let budget = baseCfg.max_per_tick;
+    const syncOne = deps.syncForkRepo ?? syncForkRepo;
+
+    for (const [token, fork, parent, branch] of ordered) {
+      const cfg = syncConfig(fork, deps.repoOverrides, enabled);
+      if (!cfg.enabled) continue; // Python line 1750
+      if (budget <= 0 && !only) break; // Python lines 1752-1753
+
+      // Python lines 1754-1759: an override pins the branch pair; otherwise
+      // the fork's default branch, and upstream's, default to the parent's.
+      const meta = await deps.api.request("GET", `/repos/${fork}`, { token });
+      const parentMeta =
+        meta.data !== null && typeof meta.data === "object" && !Array.isArray(meta.data)
+          ? ((meta.data as any).parent ?? {})
+          : {};
+      const localBranch = cfg.branches?.local || branch;
+      const upstreamBranch =
+        cfg.branches?.upstream || parentMeta.default_branch || localBranch;
+
+      const info = await upstreamStatus(
+        deps.api,
+        token,
+        fork,
+        parent,
+        localBranch,
+        upstreamBranch,
+        { fetchGhToken: deps.fetchGhToken },
+      );
+      if (!info) {
+        lines.push(`🔁 ${fork}: upstream comparison unavailable — will retry`);
+        continue; // Python lines 1762-1763
+      }
+      const [mergeCount, divergence, upstreamSha] = info;
+      const entry = syncEntry(state, fork);
+
+      // (1) already in sync — and the stale skip note goes away (1766-1770).
+      if (mergeCount <= 0) {
+        if (entry.skip_reason) {
+          entry.skip_reason = "";
+          if (!dry) deps.saveState(state);
+        }
+        continue;
+      }
+      // (2) this exact upstream tip was already handled (1771-1772).
+      if (entry.last_attempt_sha === upstreamSha) continue;
+      // (3) the per-repo interval has not elapsed (1773-1774).
+      if (now - num(entry.last_sync_ts) < cfg.interval_h * 3600) continue;
+
+      // (4) an upstream-sync PR is already open for this branch (1775-1778).
+      const openPr = await syncOpenPr(deps.api, token, fork, localBranch);
+      if (openPr) {
+        lines.push(`🔁 ${fork}: upstream-sync PR #${openPr} already open — waiting`);
+        continue;
+      }
+
+      lines.push(
+        `🔁 ${fork}: \`${parent}\` has ${mergeCount} commit(s) the fork lacks ` +
+          `(fork divergence ${divergence}) — syncing into ${localBranch}...`,
+      );
+
+      const [res, detail] = await syncOne(
+        deps,
+        {
+          fork,
+          token,
+          parent,
+          localBranch,
+          upstreamBranch,
+          upstreamSha,
+          mergeCount,
+          divergence,
+        },
+        state,
+        cfg,
+        dry,
+      );
+      await reportOutcome(deps, lines, state, res, detail, {
+        fork,
+        parent,
+        localBranch,
+        mergeCount,
+        upstreamSha,
+        dry,
+        // Re-read: the fork flow may have created the entry, and the skip arm
+        // below reads `notified` off the SAME object it writes to (Python line
+        // 1784 re-reads the entry after the call for exactly this reason).
+        entry: syncEntry(state, fork),
+      });
+      budget -= 1; // Python lines 1795, 1803, 1805, 1809, 1822, 1825
+    }
+
+    if (!dry) deps.saveState(state); // Python line 1826
+  } catch (err) {
+    // Python lines 1827-1828: a sync error is a REPORT LINE, never an exception.
+    const name = err instanceof Error ? err.name : typeof err;
+    const msg = err instanceof Error ? err.message : String(err);
+    lines.push(`⚠️  Upstream sync error: ${name}: ${msg}`);
+  }
+  return lines;
+}
+
+/** What the outcome reporter needs to build its line and its Discord post. */
+type OutcomeCtx = {
+  fork: string;
+  parent: string;
+  localBranch: string;
+  mergeCount: number;
+  upstreamSha: string;
+  dry: boolean;
+  entry: Record<string, unknown>;
+};
+
+/**
+ * The Python's if/elif chain over `sync_fork_repo`'s status (lines 1785-1825).
+ *
+ * Every arm spends the budget EXCEPT none of them — all six decrement — and
+ * every arm posts to Discord only when not dry. The skip arm is the one with
+ * state: it flips `notified` to true and SAVES, so a fork stuck on one upstream
+ * tip alerts once and then stays quiet across ticks.
+ *
+ * `dry` reports two extra statuses with a 🧪 marker and NO side effects, so an
+ * operator reading the channel can tell a rehearsal from a real sync.
+ */
+async function reportOutcome(
+  deps: RunUpstreamSyncDeps,
+  lines: string[],
+  state: SyncState,
+  res: SyncStatus,
+  detail: string,
+  ctx: OutcomeCtx,
+): Promise<void> {
+  const { fork, parent, localBranch, mergeCount, upstreamSha, dry, entry } = ctx;
+  if (res === "synced") {
+    const mergedSha = (pendingVerify(entry)?.sha ?? "").slice(0, 8);
+    lines.push(`   ✅ merged + pushed: ${detail}`);
+    if (!dry) {
+      await deps.postDiscord(`🔁 Fork synced: ${fork}`, [
+        `⬆️ ${mergeCount} upstream commit(s) from \`${parent}\` merged into \`${localBranch}\`.`,
+        `merge head \`${mergedSha}\` (CI-verified on the next ticks; reverted automatically if red).`,
+        `https://github.com/${fork}`,
+      ], DISCORD_COLOR);
+    }
+  } else if (res === "pr-opened") {
+    lines.push(`   📬 ${detail}`);
+    if (!dry) {
+      await deps.postDiscord(
+        `📬 Fork sync PR opened: ${fork}`,
+        [detail, `https://github.com/${fork}/pulls`],
+        DISCORD_COLOR,
+      );
+    }
+  } else if (res === "dry") {
+    lines.push(`   🧪 dry run: ${detail}`);
+  } else if (res === "pr-path") {
+    lines.push(`   🧪 dry run (protected): ${detail}`);
+  } else if (res === "conflict-failed") {
+    lines.push(`   ⏭️  ${detail}`);
+    if (!dry && !entry.notified) {
+      entry.notified = true;
+      deps.saveState(state);
+      await deps.postDiscord(
+        `⏭️ Fork sync skipped: ${fork}`,
+        [
+          `❗ ${detail}`,
+          `upstream \`${parent}@${upstreamSha.slice(0, 8)}\` — retried when upstream moves or the state file is cleared.`,
+          `https://github.com/${fork}`,
+        ],
+        SKIP_COLOR,
+      );
+    }
+  } else {
+    lines.push(`   ⚠️  ${res}: ${detail}`);
+  }
+}
+
+// ── Production wiring seam ───────────────────────────────────────────────────
+
+/**
+ * The state-file seam, so the production caller keeps state.ts's exact
+ * serializer (indent=1) and the path it has always used. Kept here rather
+ * than in config.ts because a state FILE is a side effect, and config.ts is
+ * pure resolution.
+ */
+export function fileSyncState(file: string = SYNC_STATE_FILE): {
+  load: () => SyncState;
+  save: (state: SyncState) => void;
+} {
+  return {
+    load: () => loadSyncState(file),
+    save: (state) => saveSyncState(file, state),
+  };
+}
