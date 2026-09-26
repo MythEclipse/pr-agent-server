@@ -17,7 +17,7 @@
  * 2. THE AGENT'S FAILURE TEXT IS THE SUMMARY (line 924). The `[INFRA]` prefix is
  *    the skip-once contract the pipeline keys on, so the snippet is passed
  *    through unworded — only its http(s) credential userinfo is rewritten (see
- *    the `reportable` call at line 370).
+ *    the `reportable` call at line 363).
  * 3. A PID FILE TRACKS THE RUNNING WORKER (`kill_orphaned_claude`, deleted on
  *    every exit path of `run_ai_fix` at lines 922-923, 949-950, 955-956). It is
  *    a LEASE: a tick that dies mid-fix leaves its pid behind, and the next tick
@@ -359,7 +359,7 @@ export async function runAiFix(
     // credentialed clone URL, and quoting a remote is a natural thing to do.
     // `reportable` is narrow (http(s) userinfo only), so an ordinary `[INFRA]`
     // line is byte-identical and the skip-once pipeline still matches. See
-    // :399 for the same wrap on the other snippet site.
+    // :398 for the same wrap on the other snippet site.
     return { ok: false, summary: reportable(snippet) };
   }
 
