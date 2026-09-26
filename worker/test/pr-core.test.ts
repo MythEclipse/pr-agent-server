@@ -138,10 +138,43 @@ describe("safety — detail beyond the brief table", () => {
     expect(r.safe).toBe(false);
     expect(r.score).toBe(1);
   });
-  test("the score is clamped to 0..10", () => {
-    // -1 is the floor the Python's max(0, ...) binds on: 5 -1 -1 -1 -1 = 1
-    // here, so drive it further down with a second missing-tests hit.
+  test("the reachable score range is 1..10, so neither clamp in safety.ts can bind", () => {
+    // WHAT THIS PINS, precisely. `Math.max(0, Math.min(10, score))` is a
+    // byte-for-byte port of Python line 390 and stays in safety.ts. This test
+    // does NOT claim to exercise the floor — it proves the floor is
+    // unreachable, and pins the real bounds:
+    //   * every body that REACHES the clamp scores in 1..10, so `max(0, ·)` is
+    //     dead defensive code against the current scoring and
+    //   * 10 is the maximum, reached at the all-clear body, so `min(10, ·)`
+    //     passes that value through unchanged.
+    // The two clamping-zero paths (a security concern, a major issue) are the
+    // EARLY RETURNS at lines 97 / 107 — they never reach line 137, which is
+    // why they are excluded from the enumeration below.
+    const SEC = { clear: "🔒 No security concerns identified", unclear: "🔒 ?" };
+    const ISS = { clear: "⚡ No major issues detected", unclear: "⚡ ?" };
+    const TST = { absent: null, missing: "🧪 tests missing", irrelevant: "🧪 No relevant tests" };
+    const EFF = { absent: null, small: "⏱️ effort: 1", large: "⏱️ effort: 4" };
+
+    const reached: number[] = [];
+    for (const s of Object.values(SEC))
+      for (const i of Object.values(ISS))
+        for (const t of Object.values(TST))
+          for (const e of Object.values(EFF)) {
+            const body = [s, i, t, e].filter(Boolean).join("\n");
+            reached.push(analyzeReviewSafety(body).score);
+          }
+    // The bound itself. Run against the REAL Python (line 390) this array is
+    // [1..10] there too — see the task-12 fix report for the cross-check.
+    expect([...new Set(reached)].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+    // Every all-negative path converges on 1: 5 −1 (security) −1 (issues)
+    // −1 (tests) −1 (effort). The rating is 5 vs 9, and it makes NO difference,
+    // which is the fact the old "second missing-tests hit" comment invented a
+    // mechanism for and never had.
+    expect(analyzeReviewSafety("🔒 ?\n⚡ ?\n🧪 Test required\n⏱️ effort: 5").score).toBe(1);
     expect(analyzeReviewSafety("🔒 ?\n⚡ ?\n🧪 Test required\n⏱️ effort: 9").score).toBe(1);
+
+    // The ceiling: 5 +2 (security clean) +2 (issues clear) +1 (small effort).
     expect(
       analyzeReviewSafety("🔒 No security concerns identified\n⚡ No major issues detected\n⏱️ effort: 1")
         .score,
