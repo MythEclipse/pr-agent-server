@@ -38,6 +38,9 @@ import {
 } from "../src/sync/config";
 import { listForkRepos, syncOpenPr, upstreamStatus } from "../src/sync/repos";
 import {
+  QUALITY_LINE,
+  RESOLVING_LINE,
+  SALVAGE_LINE,
   SYNC_PR_PREFIX,
   SYNC_TMP_BASE,
   conflictPrompt,
@@ -57,6 +60,7 @@ import {
   runUpstreamSync,
   syncForkRepo,
   type PostDiscord,
+  type ReportPort,
   type RunUpstreamSyncDeps,
   type SyncAgentPort,
   type SyncRequest,
@@ -100,7 +104,14 @@ type FakeGit = {
   run: GitRunner;
   /** Mutable, because the agent fake flips the unmerged list mid-run. */
   unmerged: string[];
-  state: { head: string; aborts: number; pushes: string[]; commits: string[][] };
+  state: {
+    head: string;
+    aborts: number;
+    pushes: string[];
+    commits: string[][];
+    /** Every argv's full text, so `--dry-run` can be asserted on. */
+    argvs: string[][];
+  };
   /** Every argv the flow issued, verb only — for "must not happen" assertions. */
   verbs: string[];
 };
@@ -109,12 +120,19 @@ function fakeGit(opts: FakeGitOpts = {}): FakeGit {
   const mergeCode = opts.mergeCode ?? 0;
   const unmerged = [...(opts.unmerged ?? [])];
   const markers = [...(opts.markers ?? [])];
-  const state = { head: PRE_HEAD, aborts: 0, pushes: [] as string[], commits: [] as string[][] };
+  const state = {
+    head: PRE_HEAD,
+    aborts: 0,
+    pushes: [] as string[],
+    commits: [] as string[][],
+    argvs: [] as string[][],
+  };
   const verbs: string[] = [];
   const run: GitRunner = (args) => {
     const a = args.map(String);
     const verb = a[0];
     verbs.push(verb);
+    state.argvs.push(a);
     switch (verb) {
       case "clone": {
         const c = opts.clone;
@@ -260,12 +278,25 @@ const request = (over: Partial<SyncRequest> = {}): SyncRequest => ({
   ...over,
 });
 
+/**
+ * The buffered report port — `Report` (report.ts) satisfies this structurally,
+ * and so does this recorder. It is REQUIRED on `SyncForkDeps`, so every harness
+ * supplies one: the three BUFFER lines (resolving / salvage / quality) are the
+ * only record an operator gets that a merge was recovered from a dead agent
+ * call, and a silently dropped line is the failure this port must not have.
+ */
+function recordingReport(): { report: ReportPort; lines: string[] } {
+  const lines: string[] = [];
+  return { lines, report: { push: (line: string) => void lines.push(line) } };
+}
+
 type ForkOpts = {
   git?: FakeGit;
   agent?: { agent: SyncAgentPort; calls: AgentCall[] };
   discord?: { post: PostDiscord; posts: { title: string; lines: string[] }[] };
   now?: number;
   api?: GhAppClient;
+  report?: ReportPort;
 };
 
 function forkDeps(opts: ForkOpts = {}) {
@@ -273,21 +304,29 @@ function forkDeps(opts: ForkOpts = {}) {
   const agent = opts.agent ?? fakeAgent(() => ({ ok: true, snippet: "ok" }));
   const discord = opts.discord ?? recordingDiscord();
   const fs = fakeWorkdirs();
+  const rep = recordingReport();
   const state: { saved: SyncState[] } = { saved: [] };
   const deps = {
     run: git.run,
     workdirs: fs.workdirs,
     agent: agent.agent,
-    api: opts.api ?? fakeApi(() => ({ data: {} })).api,
+    // A dry run asks the protection endpoint whether the branch is protected.
+    // The default branch here is UNPROTECTED, so the endpoint must answer 404
+    // ("no rules") — an unqualified 200 would make every dry run claim the
+    // protected/PR path. Tests that want `pr-path` route it themselves.
+    api: opts.api ?? fakeApi((_m, path) =>
+      path.includes("/protection") ? { status: 404, data: {} } : { data: {} },
+    ).api,
     fetchGhToken: () => "pat-tok",
     postDiscord: discord.post,
+    report: opts.report ?? rep.report,
     saveState: (s: SyncState) => {
       state.saved.push(JSON.parse(JSON.stringify(s)) as SyncState);
     },
     loadState: () => ({}) as SyncState,
     now: () => opts.now ?? 1_700_000_000,
   };
-  return { deps, git, agent, discord, fs, state };
+  return { deps, git, agent, discord, fs, state, report: rep };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -408,6 +447,10 @@ describe("group 2 · runUpstreamSync gating", () => {
     saveState: () => {},
     now: () => 1_700_000_000,
     repoOverrides: {},
+    // Required since fix round 1: a missing report port is a compile error, so
+    // every factory must supply one. These tests are about the sync decisions,
+    // not the report text, so the port discards.
+    report: { push: () => {} },
     // The Python replaced the module global; an optional override is the
     // equivalent seam, and the fake mirrors what the real one records. It also
     // honours the dry flag, because the real one returns "dry"/"pr-path"
@@ -578,6 +621,26 @@ describe("group 3 · clean merge", () => {
     expect(fs[1]).toContain("4 upstream commit(s) merged into main");
   });
 
+  test("the quality pass emits its line through the report port", async () => {
+    // The third of the three BUFFER lines. It tells an operator a second agent
+    // call is about to start, which is the difference between "the worker is
+    // idle" and "the worker is spending another up-to-3600s on this fork".
+    const git = fakeGit({ mergeCode: 0, unmerged: [], mergedFiles: "src/a.ts\nsrc/b.ts\n" });
+    const rep = recordingReport();
+    const { deps } = forkDeps({ git, report: rep.report });
+    await syncForkRepo(deps, request(), {} as SyncState, baseConfig());
+    expect(rep.lines).toEqual([QUALITY_LINE(2)]);
+  });
+
+  test("a merge with no changed files runs no quality pass and reports nothing", async () => {
+    const git = fakeGit({ mergeCode: 0, unmerged: [], mergedFiles: "" });
+    const rep = recordingReport();
+    const { deps, agent } = forkDeps({ git, report: rep.report });
+    await syncForkRepo(deps, request(), {} as SyncState, baseConfig());
+    expect(agent.calls).toHaveLength(0);
+    expect(rep.lines).toEqual([]);
+  });
+
   test("the workdir is removed on the way out", async () => {
     const git = fakeGit({ mergeCode: 0 });
     const { deps, fs } = forkDeps({ git });
@@ -606,6 +669,50 @@ describe("group 3 · clean merge", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("group 4 · dry run", () => {
+  test("a dry run on a protected branch reaches pr-path and says so", async () => {
+    // The rehearsal's whole point: "this branch is protected, a PR would be
+    // opened" is the fact a dry run exists to surface. It is learned from a
+    // READ-ONLY `GET /repos/{fork}/branches/{branch}/protection`, and
+    // deliberately NOT from a push: `git push --dry-run` does not run the
+    // remote's pre-receive hook, so it exits 0 on a protected branch and cannot
+    // classify. The test pins both halves of that contract — pr-path IS
+    // returned, and NOT ONE push is issued.
+    const api = fakeApi((method, path) => {
+      if (method === "GET" && path.includes("/protection")) return { status: 200, data: {} };
+      return { data: {} };
+    });
+    const git = fakeGit({ mergeCode: 0, unmerged: [] });
+    const { deps } = forkDeps({ git, api: api.api });
+    const sync: SyncState = {};
+    const [status, detail] = await syncForkRepo(deps, request(), sync, baseConfig(), true);
+
+    expect(status).toBe("pr-path");
+    expect(detail).toContain("protected branch detected");
+    expect(detail).toContain("would open an upstream-sync PR");
+    // No push at all — not even `git push --dry-run` — and no PR is opened.
+    expect(git.state.pushes).toEqual([]);
+    expect(api.calls.some((c) => c.path.includes("/pulls"))).toBe(false);
+    expect(sync).toEqual({});
+  });
+
+  test("an unprotected branch in dry mode reports dry, not pr-path", async () => {
+    // The App gets 403 (not 404) on the protection endpoint for repos it
+    // cannot read the rules of. That is "unknown", and an unknown must NOT be
+    // reported as protected — a false pr-path would send an operator looking
+    // for a PR that would never be opened.
+    const api = fakeApi((method, path) => {
+      if (method === "GET" && path.includes("/protection")) return { status: 404, data: {} };
+      return { data: {} };
+    });
+    const git = fakeGit({ mergeCode: 0, unmerged: [] });
+    const { deps } = forkDeps({ git, api: api.api });
+    const [status, detail] = await syncForkRepo(deps, request(), {} as SyncState, baseConfig(), true);
+
+    expect(status).toBe("dry");
+    expect(detail).toContain(`prepared in ${SYNC_TMP_BASE}/f_x`);
+    expect(git.state.pushes).toEqual([]);
+  });
+
   test("returns dry, never pushes, never writes state", async () => {
     const git = fakeGit({ mergeCode: 0, unmerged: [] });
     const { deps, state } = forkDeps({ git });
@@ -760,8 +867,36 @@ describe("group 6 · the conflict-marker guard", () => {
   });
 
   test("a real commit failure is reported from stderr, then stdout", () => {
-    const git = fakeGit({ unmerged: [], markers: [], commit: { code: 1, stderr: "hook failed" } });
+    // The fixture is PADDED on purpose. A real git hook writes "  <message>\n"
+    // to stderr, and the detail feeds the `conflict resolution incomplete — …`
+    // skip note and a Discord post. Python line 1351 is
+    // `((r.stderr or r.stdout) or "").strip()[:200]`, so the leading spaces and
+    // the trailing newline must be gone. An unpadded fixture ("hook failed")
+    // would pass against untrimmed code and prove nothing.
+    const git = fakeGit({
+      unmerged: [],
+      markers: [],
+      commit: { code: 1, stderr: "  hook failed\n" },
+    });
     expect(syncFinishMerge(git.run, "/w")).toEqual({ ok: false, detail: "hook failed" });
+  });
+
+  test("the commit detail is trimmed BEFORE the [:200] slice, and falls back to stdout", () => {
+    // Order matters and is the Python's: strip first, THEN slice. A long
+    // padded message that gets sliced first would keep leading whitespace and
+    // lose 200 characters of tail; stripping first caps the CONTENT at 200.
+    const padded = `  ${"x".repeat(250)}  \n`;
+    const git = fakeGit({ unmerged: [], markers: [], commit: { code: 1, stderr: padded } });
+    const detail = syncFinishMerge(git.run, "/w").detail;
+    expect(detail).toBe("x".repeat(200));
+    expect(detail).toHaveLength(200);
+    // stdout is the fallback when stderr is empty, and is trimmed the same way.
+    const viaStdout = fakeGit({
+      unmerged: [],
+      markers: [],
+      commit: { code: 1, stdout: "\n  from stdout  \n" },
+    });
+    expect(syncFinishMerge(viaStdout.run, "/w")).toEqual({ ok: false, detail: "from stdout" });
   });
 
   test("git grep's exit 1 (no matches) and exit 2 (git failed) are different cases", () => {
@@ -814,6 +949,45 @@ describe("group 7 · salvage", () => {
     expect(git.state.pushes).toEqual(["HEAD:refs/heads/main"]);
     expect(git.state.aborts).toBe(0);
     expect(pendingVerify(state["f/x"])?.sha).toBe(git.state.head);
+  });
+
+  test("a salvaged sync emits the ♻️ line through the report port", async () => {
+    // The salvage line is the one an operator most needs: the merge was
+    // recovered from an agent call that ended early (a 3600s timeout after the
+    // agent had already committed), and the push that follows looks like an
+    // ordinary one. Without this line, nothing says the merge was salvaged.
+    const git = fakeGit({ mergeCode: 1, unmerged: ["src/tools.ts"] });
+    const rep = recordingReport();
+    const { deps } = forkDeps({
+      git,
+      report: rep.report,
+      agent: fakeAgent(() => {
+        git.unmerged.length = 0; // the agent finished before it was cut off
+        return { ok: false, snippet: "[INFRA] Hermes API server timed out after 3600s" };
+      }),
+    });
+    const [status] = await syncForkRepo(deps, request(), {} as SyncState, baseConfig());
+
+    expect(status).toBe("synced");
+    expect(rep.lines).toEqual([RESOLVING_LINE(1), SALVAGE_LINE]);
+  });
+
+  test("an unfinished merge after a timeout emits no salvage line", async () => {
+    // The mirror of the test above: when `syncFinishMerge` refuses, the merge
+    // is aborted and NOTHING is claimed. Emitting ♻️ here would be a false
+    // recovery report for a merge that was thrown away.
+    const git = fakeGit({ mergeCode: 1, unmerged: ["src/tools.ts"] });
+    const rep = recordingReport();
+    const { deps } = forkDeps({
+      git,
+      report: rep.report,
+      agent: fakeAgent(() => ({ ok: false, snippet: "[INFRA] timed out" })),
+    });
+    const [status] = await syncForkRepo(deps, request(), {} as SyncState, baseConfig());
+
+    expect(status).toBe("conflict-failed");
+    expect(rep.lines).toEqual([RESOLVING_LINE(1)]);
+    expect(rep.lines).not.toContain(SALVAGE_LINE);
   });
 
   test("an unfinished merge after a timeout still fails and aborts", async () => {

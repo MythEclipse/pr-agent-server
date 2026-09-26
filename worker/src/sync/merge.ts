@@ -153,8 +153,14 @@ export function syncFinishMerge(run: GitRunner, workdir: string): MergeOutcome {
   if (r.code !== 0) {
     const combined = `${r.stdout || ""}${r.stderr || ""}`.toLowerCase();
     if (combined.includes("nothing to commit")) return { ok: true, detail: "" };
-    // Python line 1351: `(r.stderr or r.stdout) or ""`, then [:200].
-    return { ok: false, detail: head(r.stderr || r.stdout || "", COMMIT_DETAIL) };
+    // Python line 1351, byte for byte: `((r.stderr or r.stdout) or "").strip()[:200]`.
+    // THE `.strip()` IS NOT COSMETIC and the ORDER is not interchangeable. A real
+    // git hook writes "  <message>\n" to stderr, and this detail becomes the
+    // `conflict resolution incomplete — …` skip note AND a Discord post, so the
+    // untrimmed form carries leading whitespace and a trailing newline into a
+    // user-visible string. Trim-then-slice, never slice-then-trim: with 200+ of
+    // padding in front, slicing first would cap the wrong 200 characters.
+    return { ok: false, detail: head((r.stderr || r.stdout || "").trim(), COMMIT_DETAIL) };
   }
   return { ok: true, detail: "" };
 }

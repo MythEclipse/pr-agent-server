@@ -98,7 +98,13 @@ export interface SyncRequest {
   divergence: number;
 }
 
-/** The report buffer (report.ts). Optional, so a caller can drop the line. */
+/**
+ * The buffered run report. `Report` (report.ts) satisfies this structurally,
+ * and so does any `{ push(line) }` — the port stays structural so a sync module
+ * never imports a filesystem- or global-state-bearing report module at module
+ * scope. The Python's `BUFFER` is module-global; this is the injection point
+ * that keeps the same behaviour testable.
+ */
 export type ReportPort = { push(line: string): void };
 
 /** `AgentClient` satisfies this structurally. */
@@ -128,7 +134,17 @@ export type SyncForkDeps = {
   saveState: (state: SyncState) => void;
   /** Python `time.time()`. */
   now: () => number;
-  report?: ReportPort;
+  /**
+   * REQUIRED, and this is the whole point. The three BUFFER lines below — the
+   * resolving line, the SALVAGE line and the quality line — are the operator's
+   * only record that a merge was recovered from an agent call that ended early,
+   * and the following push looks like any other push. With `report?` optional,
+   * `deps.report?.push(...)` was a silent no-op at every one of those sites and
+   * nothing in `worker/src` ever constructed a port, so the salvage line could
+   * never reach a report. A required port fails at WIRING time instead, which
+   * is what caught it here.
+   */
+  report: ReportPort;
 };
 
 /** Everything `runUpstreamSync` needs on top of the fork flow. */
@@ -305,7 +321,7 @@ export async function syncForkRepo(
         ];
       }
 
-      deps.report?.push(RESOLVING_LINE(conflicted.length)); // Python line 1570
+      deps.report.push(RESOLVING_LINE(conflicted.length)); // Python line 1570
       const agentRun = await agent.runSync({
         workdir,
         prompt: conflictPrompt(fork, parent, upstreamBranch, localBranch, conflicted),
@@ -322,7 +338,7 @@ export async function syncForkRepo(
         // and is dropped rather than threaded.
         const salvaged = syncFinishMerge(run, workdir);
         if (salvaged.ok) {
-          deps.report?.push(SALVAGE_LINE);
+          deps.report.push(SALVAGE_LINE); // Python line 1583
           resolution =
             `Hermes resolved ${conflicted.length} conflict(s); ` +
             `agent call ended early (${head(reportable(agentRun.snippet), SALVAGE_SNIPPET)}) ` +
@@ -365,7 +381,7 @@ export async function syncForkRepo(
           .map((f) => f.trim())
           .filter((f) => f.length > 0);
         if (mergedFiles.length) {
-          deps.report?.push(QUALITY_LINE(mergedFiles.length));
+          deps.report.push(QUALITY_LINE(mergedFiles.length)); // Python line 1612
           const quality = await agent.runSync({
             workdir,
             prompt: qualityPrompt(fork, parent, upstreamBranch, mergedFiles),
@@ -417,6 +433,39 @@ export async function syncForkRepo(
       // Python lines 1634-1636. The workdir is deliberately LEFT IN PLACE: the
       // dry run's whole output is "prepared in <dir>", and a caller that wants
       // to inspect the merge needs the clone to still be there.
+      //
+      // DIVERGENCE FROM THE PYTHON, and it is a repair. In the Python this
+      // `return` sits ABOVE the push (line 1634 vs 1638), so the `if protected:
+      // if dry: return "pr-path"` at 1657-1659 is DEAD — a dry run can never
+      // reach it, and the `pr-path` arm in the reporter is dead code. The
+      // rehearsal therefore cannot tell an operator the one fact it exists to
+      // surface: that this branch is protected and a PR would be opened.
+      //
+      // A REAL PUSH IS NOT THE ANSWER and never will be. Classification is
+      // learned from the push's failure only because GitHub's App surface
+      // answers 403 on the branch-protection endpoint for many installs — but a
+      // dry run must have NO remote effect, so the push is off the table
+      // entirely. (`git push --dry-run` is not a way out either: it does not
+      // run the remote's pre-receive hook, so it exits 0 on a protected branch
+      // and cannot classify. Verified against a local bare repo with a
+      // GH006-emitting pre-receive hook — the real push failed, the dry-run
+      // push returned 0, and the remote ref was unchanged.)
+      //
+      // So the classification is a READ-ONLY `GET` on the protection endpoint.
+      // 200 → protected → `pr-path`. Anything else (404 no rules, 403 no admin
+      // scope) is UNKNOWN, and unknown is reported as the plain `dry`: a false
+      // pr-path would send an operator hunting for a PR that would never open.
+      const protection = await deps.api.request(
+        "GET",
+        `/repos/${fork}/branches/${localBranch}/protection`,
+        { token },
+      );
+      if (protection.status === 200) {
+        return [
+          "pr-path",
+          `protected branch detected (${localBranch}) — would open an upstream-sync PR`,
+        ];
+      }
       return [
         "dry",
         `prepared in ${workdir} — pre_merge ${preMergeSha.slice(0, 8)}, ` +
@@ -469,7 +518,7 @@ export async function syncForkRepo(
         req.mergeCount,
         req.divergence,
         resolution,
-        { now: deps.now, fetchGhToken: deps.fetchGhToken, workdirs: deps.workdirs },
+        { now: deps.now, fetchGhToken: deps.fetchGhToken },
       );
       if (prNum) {
         // A PR-path sync merged NOTHING into the branch, so no CI watch is
@@ -535,11 +584,15 @@ function skipNote(
 
 // ── open_sync_pr ─────────────────────────────────────────────────────────────
 
-/** `openSyncPr`'s injected extras, so the timestamp and PAT are testable. */
+/**
+ * `openSyncPr`'s injected extras, so the timestamp and the PAT are testable.
+ * Deliberately NOT carrying `workdirs`: `openSyncPr` takes the workdir as a
+ * path and does no filesystem work of its own, so an injected fs port here was
+ * dead weight the caller had to supply for no effect.
+ */
 export type OpenPrOpts = {
   now: () => number;
   fetchGhToken?: () => string;
-  workdirs?: Workdirs;
 };
 
 /**
