@@ -539,6 +539,24 @@ const expectedPrompt = (title: string, baseRef: string, files: string[]) => {
 describe("runAiFix", () => {
   const DIFF = { "diff --name-only": { code: 0, stdout: "src/a.ts\nsrc/b.ts\n" } };
 
+  test("the workdir comes from the shared TMP_BASE, and the three flows cannot collide", async () => {
+    // Python line 831: NO infix on the AI-fix workdir, where the lockfix sites
+    // add `_lockfix_` / `_bunfix_` (634, 723). If `runAiFix` re-typed the base
+    // path instead of importing TMP_BASE, a change to one would silently point
+    // the three flows at the same directory — so this asserts the constant, not
+    // just a path that happens to work today.
+    expect(AI_WD).toBe(`${TMP_BASE}/owner_repo_${PR}`);
+    expect(BUN_WD).toBe(`${TMP_BASE}/owner_repo_bunfix_${PR}`);
+    expect(UV_WD).toBe(`${TMP_BASE}/owner_repo_lockfix_${PR}`);
+    expect(new Set([AI_WD, BUN_WD, UV_WD]).size).toBe(3);
+
+    const proc = fakeProc({ ...DIFF, "rev-list --count": { code: 0, stdout: "0\n" } });
+    const fs = fakeWorkdirs();
+    const { agent } = fakeAgent({ ok: true, snippet: "" });
+    await runAiFix(aiFixDeps(proc, fs, agent), REPO, PR, "t", "abc123def456", "dep/x", "main", "tok");
+    expect(fs.removed).toContain(`${TMP_BASE}/owner_repo_${PR}`);
+  });
+
   test("a committed fix is pushed by the worker and counted", async () => {
     const proc = fakeProc({ ...DIFF, "rev-list --count": { code: 0, stdout: "2\n" } });
     const fs = fakeWorkdirs();

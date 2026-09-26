@@ -24,7 +24,7 @@
  *    effect of that is injected, so a test signals nothing.
  */
 import { statSync } from "node:fs";
-import { clonePr, head, reportable, type Workdirs } from "./lockfix";
+import { clonePr, head, reportable, TMP_BASE, type Workdirs } from "./lockfix";
 import type { GhClient } from "./scan";
 import type { GitRunner } from "../git";
 import type { PostResult } from "../agent";
@@ -296,8 +296,9 @@ export async function runAiFix(
 ): Promise<{ ok: boolean; summary: string }> {
   const { run, workdirs, agent, api } = deps;
   // NOTE: no `_lockfix_`/`_bunfix_` infix here (Python line 831), so the three
-  // flows' workdirs cannot collide in /tmp.
-  const workdir = `/tmp/pr-queue-work/${String(repo).replace(/\//g, "_")}_${pr}`;
+  // flows' workdirs cannot collide in /tmp. `TMP_BASE` is the shared constant,
+  // not a re-typed literal, so the two paths cannot drift apart.
+  const workdir = `${TMP_BASE}/${String(repo).replace(/\//g, "_")}_${pr}`;
   const pidFile = pidFileFor(repo, pr);
 
   if (workdirs.exists(workdir)) workdirs.remove(workdir); // Python lines 833-835
