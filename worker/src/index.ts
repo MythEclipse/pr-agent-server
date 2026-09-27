@@ -99,9 +99,24 @@ const runProc: ProcRunner = (args, cwd, timeoutSec = 180) => {
  * import-time construction is genuinely inconvenient.
  */
 function buildDeps(opts: { dry: boolean; report: Report }): WorkerDeps {
+  // The key is the one thing that cannot be faked, so read it with a message
+  // an operator can act on. A bare `readFileSync` here surfaced as a raw ENOENT
+  // stack pointing at `readFileSync`, which reads like a bug in the worker
+  // rather than a missing deployment credential. Every other external effect
+  // below is a function or a client and fails on use; only this one is read
+  // eagerly, so only this one needs the guard.
+  let privateKeyPem: string;
+  try {
+    privateKeyPem = readFileSync(KEY_PATH, "utf8");
+  } catch {
+    throw new Error(
+      `GitHub App private key not found at ${KEY_PATH}. Set PR_AGENT_KEY_PATH ` +
+        `(and PR_AGENT_APP_ID), or run --sync-status, which needs no credential.`,
+    );
+  }
   const api = new GitHubApi({
     appId: APP_ID,
-    privateKeyPem: readFileSync(KEY_PATH, "utf8"), // Python line 161
+    privateKeyPem, // Python line 161
   });
   const workdirs = nodeWorkdirs();
   const syncState = fileSyncState();
@@ -232,4 +247,18 @@ async function main(): Promise<number> {
   return 0;
 }
 
-process.exitCode = await main();
+try {
+  process.exitCode = await main();
+} catch (err) {
+  // A missing credential is an operator-actionable configuration error, not a
+  // crash: report it as one line on stderr with a non-zero exit, instead of a
+  // stack trace that buries the cause. Anything else is a real defect and keeps
+  // its stack for debugging.
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes("private key not found")) {
+    console.error(`pr-queue-worker: ${message}`);
+    process.exitCode = 1;
+  } else {
+    throw err;
+  }
+}

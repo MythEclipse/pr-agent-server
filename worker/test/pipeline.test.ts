@@ -736,7 +736,7 @@ describe("--dry walks the same gates and suppresses every effect", () => {
     let saved = 0;
     h.deps.saveFixState = () => void (saved += 1);
     let flushed = 0;
-    h.deps.flushReport = () => void (flushed += 1);
+    h.deps.flushReport = async () => void (flushed += 1);
     h.deps.notify = () => Promise.resolve();
     h.deps.loadFixState = () => ({ [REPO]: { [String(PR_NUM)]: { sha: HEAD } } });
 
