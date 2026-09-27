@@ -62,6 +62,7 @@ import {
 } from "./merge";
 import { verifyPendingSyncs } from "./verify";
 import { resolveMerge } from "./resolve";
+import { sweepForks } from "./sweep";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -162,7 +163,7 @@ export type RunUpstreamSyncDeps = SyncForkDeps & {
     req: SyncRequest,
     state: SyncState,
     cfg: SyncConfig,
-    dry: boolean,
+    dry?: boolean,
   ) => Promise<SyncResult>;
 };
 
@@ -668,93 +669,14 @@ export async function runUpstreamSync(
     let budget = baseCfg.max_per_tick;
     const syncOne = deps.syncForkRepo ?? syncForkRepo;
 
-    for (const [token, fork, parent, branch] of ordered) {
-      const cfg = syncConfig(fork, deps.repoOverrides, enabled);
-      if (!cfg.enabled) continue; // Python line 1750
-      if (budget <= 0 && !only) break; // Python lines 1752-1753
-
-      // Python lines 1754-1759: an override pins the branch pair; otherwise
-      // the fork's default branch, and upstream's, default to the parent's.
-      const meta = await deps.api.request("GET", `/repos/${fork}`, { token });
-      const parentMeta =
-        meta.data !== null && typeof meta.data === "object" && !Array.isArray(meta.data)
-          ? ((meta.data as any).parent ?? {})
-          : {};
-      const localBranch = cfg.branches?.local || branch;
-      const upstreamBranch =
-        cfg.branches?.upstream || parentMeta.default_branch || localBranch;
-
-      const info = await upstreamStatus(
-        deps.api,
-        token,
-        fork,
-        parent,
-        localBranch,
-        upstreamBranch,
-        { fetchGhToken: deps.fetchGhToken },
-      );
-      if (!info) {
-        lines.push(`🔁 ${fork}: upstream comparison unavailable — will retry`);
-        continue; // Python lines 1762-1763
-      }
-      const [mergeCount, divergence, upstreamSha] = info;
-      const entry = syncEntry(state, fork);
-
-      // (1) already in sync — and the stale skip note goes away (1766-1770).
-      if (mergeCount <= 0) {
-        if (entry.skip_reason) {
-          entry.skip_reason = "";
-          if (!dry) deps.saveState(state);
-        }
-        continue;
-      }
-      // (2) this exact upstream tip was already handled (1771-1772).
-      if (entry.last_attempt_sha === upstreamSha) continue;
-      // (3) the per-repo interval has not elapsed (1773-1774).
-      if (now - num(entry.last_sync_ts) < cfg.interval_h * 3600) continue;
-
-      // (4) an upstream-sync PR is already open for this branch (1775-1778).
-      const openPr = await syncOpenPr(deps.api, token, fork, localBranch);
-      if (openPr) {
-        lines.push(`🔁 ${fork}: upstream-sync PR #${openPr} already open — waiting`);
-        continue;
-      }
-
-      lines.push(
-        `🔁 ${fork}: \`${parent}\` has ${mergeCount} commit(s) the fork lacks ` +
-          `(fork divergence ${divergence}) — syncing into ${localBranch}...`,
-      );
-
-      const [res, detail] = await syncOne(
-        deps,
-        {
-          fork,
-          token,
-          parent,
-          localBranch,
-          upstreamBranch,
-          upstreamSha,
-          mergeCount,
-          divergence,
-        },
-        state,
-        cfg,
-        dry,
-      );
-      await reportOutcome(deps, lines, state, res, detail, {
-        fork,
-        parent,
-        localBranch,
-        mergeCount,
-        upstreamSha,
-        dry,
-        // Re-read: the fork flow may have created the entry, and the skip arm
-        // below reads `notified` off the SAME object it writes to (Python line
-        // 1784 re-reads the entry after the call for exactly this reason).
-        entry: syncEntry(state, fork),
-      });
-      budget -= 1; // Python lines 1795, 1803, 1805, 1809, 1822, 1825
-    }
+    await sweepForks(
+      deps,
+      deps.syncForkRepo ?? syncForkRepo,
+      ordered,
+      state,
+      lines,
+      { only, dry, enabled, now, budget: baseCfg.max_per_tick },
+    );
 
     if (!dry) deps.saveState(state); // Python line 1826
   } catch (err) {
@@ -766,92 +688,14 @@ export async function runUpstreamSync(
   return lines;
 }
 
-/** What the outcome reporter needs to build its line and its Discord post. */
-type OutcomeCtx = {
-  fork: string;
-  parent: string;
-  localBranch: string;
-  mergeCount: number;
-  upstreamSha: string;
-  dry: boolean;
-  entry: Record<string, unknown>;
-};
 
-/**
- * The Python's if/elif chain over `sync_fork_repo`'s status (lines 1785-1825).
- *
- * Every arm spends the budget EXCEPT none of them — all six decrement — and
- * every arm posts to Discord only when not dry. The skip arm is the one with
- * state: it flips `notified` to true and SAVES, so a fork stuck on one upstream
- * tip alerts once and then stays quiet across ticks.
- *
- * `dry` reports two extra statuses with a 🧪 marker and NO side effects, so an
- * operator reading the channel can tell a rehearsal from a real sync.
- */
-async function reportOutcome(
-  deps: RunUpstreamSyncDeps,
-  lines: string[],
-  state: SyncState,
-  res: SyncStatus,
-  detail: string,
-  ctx: OutcomeCtx,
-): Promise<void> {
-  const { fork, parent, localBranch, mergeCount, upstreamSha, dry, entry } = ctx;
-  if (res === "synced") {
-    const mergedSha = (pendingVerify(entry)?.sha ?? "").slice(0, 8);
-    lines.push(`   ✅ merged + pushed: ${detail}`);
-    if (!dry) {
-      await deps.postDiscord(`🔁 Fork synced: ${fork}`, [
-        `⬆️ ${mergeCount} upstream commit(s) from \`${parent}\` merged into \`${localBranch}\`.`,
-        `merge head \`${mergedSha}\` (CI-verified on the next ticks; reverted automatically if red).`,
-        `https://github.com/${fork}`,
-      ], DISCORD_COLOR);
-    }
-  } else if (res === "pr-opened") {
-    lines.push(`   📬 ${detail}`);
-    if (!dry) {
-      await deps.postDiscord(
-        `📬 Fork sync PR opened: ${fork}`,
-        [detail, `https://github.com/${fork}/pulls`],
-        DISCORD_COLOR,
-      );
-    }
-  } else if (res === "dry") {
-    lines.push(`   🧪 dry run: ${detail}`);
-  } else if (res === "pr-path") {
-    lines.push(`   🧪 dry run (protected): ${detail}`);
-  } else if (res === "conflict-failed") {
-    lines.push(`   ⏭️  ${detail}`);
-    if (!dry && !entry.notified) {
-      entry.notified = true;
-      deps.saveState(state);
-      await deps.postDiscord(
-        `⏭️ Fork sync skipped: ${fork}`,
-        [
-          `❗ ${detail}`,
-          `upstream \`${parent}@${upstreamSha.slice(0, 8)}\` — retried when upstream moves or the state file is cleared.`,
-          `https://github.com/${fork}`,
-        ],
-        SKIP_COLOR,
-      );
-    }
-  } else {
-    lines.push(`   ⚠️  ${res}: ${detail}`);
-  }
-}
-
-// ── Production wiring seam ───────────────────────────────────────────────────
-
-/**
- * The state-file seam, so the production caller keeps state.ts's exact
- * serializer (indent=1) and the path it has always used. Kept here rather
- * than in config.ts because a state FILE is a side effect, and config.ts is
- * pure resolution.
- */
-export function fileSyncState(file: string = SYNC_STATE_FILE): {
+export type FileSyncState = {
   load: () => SyncState;
   save: (state: SyncState) => void;
-} {
+};
+
+/** Read/write the sync state against a real file, not the module singleton. */
+export function fileSyncState(file: string = SYNC_STATE_FILE): FileSyncState {
   return {
     load: () => loadSyncState(file),
     save: (state) => saveSyncState(file, state),
