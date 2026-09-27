@@ -1,0 +1,59 @@
+# Auto-merge for Dependabot PRs — installed on EVERY repo, GMW included.
+#
+# WHY THIS EXISTS BESIDE `dependabot.yml`: Dependabot opens the PR, but nothing
+# in a plain dependabot config ever merges it. Without this file each bump waits
+# for a human, and the fleet accumulates the backlog this sync is meant to drain.
+#
+# THE SAFETY CONDITIONS ARE NOT DECORATIVE — the workflow runs unattended, so each
+# one is the line between "bumps land" and "a broken bump lands by itself":
+#   1. `github.actor == 'dependabot[bot]'` — only Dependabot's own PRs are
+#      eligible. A human PR that merely mentions a dependency is never merged
+#      by this workflow.
+#   2. CI must have SUCCEEDED on the exact head — `github.event.pull_request`
+#      is the PR the event is about, so a green run on some other commit cannot
+#      satisfy it.
+#   3. The `dependabot-auto-merge` label must be applied. The label is the
+#      operator's opt-in per PR, and it is the only condition here that a human
+#      controls.
+#
+# FAIL-CLOSED: every `if` is a positive requirement, so an unknown actor, a
+# missing label or a skipped check leaves the PR open. A merge that half-happens
+# is worse than a bump that waits.
+name: Dependabot auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge dependency PR
+    # Runs from the BASE branch's copy of this file — `pull_request_target` does
+    # not check out the PR head, which is what makes an unattended write to
+    # `contents: write` safe here. A `pull_request` trigger would execute the
+    # PR's own workflow file and this would be a remote-code-execution hole.
+    runs-on: ubuntu-latest
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'dependabot-auto-merge')
+
+    steps:
+      - name: Require all checks to have passed
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Merge
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          # `merge` is the repository's own merge-commit policy, so the
+          # protection rules this fleet already has keep applying. `MERGE`
+          # would queue instead of merging, which is not what this job is for.
+          merge-method: merge
+          github-token: ${{ secrets.GITHUB_TOKEN }}

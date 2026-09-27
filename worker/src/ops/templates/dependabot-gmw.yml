@@ -1,0 +1,43 @@
+# Dependabot v2 — the GMW variant.
+#
+# GMW IS THE ONE FORK WITH A LOCKFILE-ONLY DEPENDENCY SHAPE, so it gets its own
+# file rather than the shared `dependabot.yml`. Two differences, both load-bearing:
+#
+# 1. A LOWER `open-pull-requests-limit` (2 vs 5). GMW is where the duplicate
+#    review-comment spam incident happened, and Dependabot's limit is the
+#    upstream bound on how many bumps can be in flight at once.
+# 2. `versioning-strategy: increase-if-necessary`. In a lockfile-only repo a
+#    caret-range bump produces a commit that changes nothing installable, which
+#    is exactly the PR the review pipeline then has to burn a cycle explaining.
+#
+# `applies-to: version-updates` is explicit: without it Dependabot would also
+# open security PRs, which merge the whole range and undo this file's intent.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Jakarta"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 2
+    versioning-strategy: increase-if-necessary
+    groups:
+      production:
+        dependency-type: "production"
+      development:
+        dependency-type: "development"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Jakarta"
+    labels: ["dependencies"]
+    groups:
+      actions:
+        dependency-type: "production"
