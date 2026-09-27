@@ -128,6 +128,10 @@ type Options = {
   checkRuns?: any[];
   /** The repo `GET /repos/:r` reports (used by the sync fan-out). */
   repoMeta?: Route;
+  /** `repoHasBunLock` reads `GET /repos/:r/git/trees/:s?recursive=1` and looks for
+   *  a `bun.lock` entry; the harness serves a Bun tree by default. Set false for
+   *  a repo with no `bun.lock` (a uv repo) — see the `stepLockPrefix` matrix. */
+  hasBunLock?: boolean;
   /** `runAiFix`'s verdict, in call order; the last one repeats. */
   agent?: PostResult[];
   /** Fixed `now()`, in seconds; a tick reads it for elapsed + sync. */
@@ -188,6 +192,12 @@ function harness(opts: Options = {}): Harness {
       if (path === `/repos/${REPO}`) return repoMeta;
       if (/\/issues\/\d+\/comments$/.test(path)) return { status: 200, data: comments };
       if (/\/check-runs$/.test(path)) return { status: 200, data: { check_runs: checkRuns } };
+      if (/\/git\/trees\/.*recursive/.test(path)) {
+        const tree = opts.hasBunLock === false
+          ? [{ path: "package.json" }, { path: "uv.lock" }]
+          : [{ path: "package.json" }, { path: "bun.lock" }];
+        return { status: 200, data: { tree } };
+      }
       if (/\/pulls\/\d+\/merge$/.test(path)) return merge;
       if (/\/pulls\/\d+$/.test(path)) {
         return pullReply ?? { status: 200, data: { state: "open", merged: false, head: { sha: HEAD }, mergeable: true } };
@@ -310,8 +320,10 @@ describe("case 1 — a PR with no review triggers one and stops for this tick", 
     expect(h.agentPosts).toEqual([]);
     expect(h.lines).toContain("   📡 No review → triggering PR-Agent...");
     expect(h.lines).toContain("   ✅ PR-Agent triggered (HTTP 200)");
-    // Python `continue`s at line 1934 WITHOUT touching skipped_count.
-    expect(h.lines).not.toContain("   ⏭️  Skipping (conflict, already attempted at this SHA)");
+    // Python `continue`s at line 1934 WITHOUT touching skipped_count, which the
+    // `toEqual` above already pins. An extra negative assertion here would be
+    // tautological: that conflict line is only reachable from the resolver,
+    // which needs a review to exist and this PR has none.
   });
 
   test("a non-2xx trigger is reported verbatim and still not 'triggered'", async () => {
@@ -383,7 +395,12 @@ describe("case 3 — a permanent skip at this SHA skips without calling the agen
     expect(approves(h.calls)).toBe(0);
     expect(merges(h.calls)).toBe(0);
     expect(h.lines).toContain("   ⏭️  Permanently skipped: Hermes API server unreachable (until head SHA changes)");
-    expect(h.lines).toContain("   🔔 Skip notified: Hermes API server unreachable");
+    // Python 1947 calls `notify_skip_once` as a bare statement: the notification
+    // DOES fire (asserted below), but no `🔔 Skip notified` line is appended.
+    // Only the three `if notify_skip_once(...):` sites report it — on those,
+    // this line would appear in the ops channel on every single cron tick of
+    // every permanently-skipped PR. Asserting its ABSENCE is the whole point.
+    expect(h.lines).not.toContain("   🔔 Skip notified: Hermes API server unreachable");
     expect(h.notifies).toEqual([
       {
         repo: REPO,
@@ -770,6 +787,68 @@ describe("--dry walks the same gates and suppresses every effect", () => {
     );
     expect(h.lines).toContain("   🧪 dry run: would close #7 (pin violation)");
     expect(closes(h.calls)).toEqual([]);
+  });
+});
+
+/**
+ * The `stepLockPrefix` guard matrix (Python 1961-1973).
+ *
+ *   if has_bun:                    -> fix_bun_lock
+ *   elif "uv.lock" not in ci_msg:  -> fix_uv_lock
+ *   else                           -> change nothing
+ *
+ * The third arm is the one that was wrong once. Rewriting the `elif` as a
+ * two-way disjunction (`has_bun || msg.includes("uv.lock")`) inverts the guard:
+ * on a non-Bun repo whose failing check already names `uv.lock`, the port
+ * re-resolves and PUSHES a `bun.lock` the repo does not use, on a PR the Python
+ * left untouched. These four cases exist so that inversion cannot come back —
+ * the last one fails if the negative guard is dropped again.
+ */
+describe("the lockfile pre-fix guard (Python 1961-1973)", () => {
+  const typecheck = (names: string[]) => [
+    { name: "typecheck", status: "completed", conclusion: "failure" },
+    ...names.map((name) => ({ name, status: "completed", conclusion: "failure" })),
+  ];
+  const run = async (opts: { hasBunLock: boolean; extraCheck: string }) => {
+    const h = harness({
+      prs: [makePr({ ...LOCKFILE_BUMP })],
+      comments: [reviewComment(SAFE_REVIEW)],
+      checkRuns: typecheck([opts.extraCheck]),
+      hasBunLock: opts.hasBunLock,
+      dry: true,
+    });
+    // `processPr` takes the OPEN PR, not the harness queue — the pre-fix only
+    // runs for a trivial title (Python 1953: `is_trivial_pr(title, author)`),
+    // so passing the default non-trivial fixture would silently skip the step
+    // and make all four cases pass for the wrong reason.
+    await processPr(h.deps, { token: "install-token", repo: REPO, pr: makePr({ ...LOCKFILE_BUMP }) });
+    return h;
+  };
+
+  test("a Bun repo takes the bun arm regardless of what CI names", async () => {
+    const h = await run({ hasBunLock: true, extraCheck: "uv.lock" });
+    expect(h.lines).toContain("   🔧 CI failing: bun.lock stale — pre-fixing...");
+  });
+
+  test("a non-Bun repo whose CI does NOT name uv.lock takes the uv arm", async () => {
+    const h = await run({ hasBunLock: false, extraCheck: "lint" });
+    expect(h.lines).toContain("   🔧 CI failing: uv.lock stale — pre-fixing...");
+  });
+
+  test("a non-Bun repo whose CI ALREADY names uv.lock is left alone", async () => {
+    // Python 1973's comment: re-resolving the file uv just complained about
+    // costs a clone and changes nothing.
+    const h = await run({ hasBunLock: false, extraCheck: "uv.lock" });
+    expect(h.lines).not.toContain("   🔧 CI failing: bun.lock stale — pre-fixing...");
+    expect(h.lines).not.toContain("   🔧 CI failing: uv.lock stale — pre-fixing...");
+    // And the decisive one: neither toolchain was run.
+    expect(h.execCalls).toEqual([]);
+  });
+
+  test("a Bun repo that already names uv.lock still pre-fixes bun.lock", async () => {
+    // The guard lives on the uv arm only, so a Bun repo is unaffected.
+    const h = await run({ hasBunLock: true, extraCheck: "uv.lock" });
+    expect(h.lines).toContain("   🔧 CI failing: bun.lock stale — pre-fixing...");
   });
 });
 

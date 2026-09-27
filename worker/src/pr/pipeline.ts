@@ -203,8 +203,12 @@ export function ctime(epochSec: number): string {
   const p = (n: number) => String(n).padStart(2, "0");
   const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  // `time.ctime` pads HOURS/MINUTES/SECONDS to two digits but NOT the day, and
+  // the space it leaves makes single-digit days render as "Jan  1" (two spaces).
+  // Probed against the interpreter: time.ctime(0) == 'Thu Jan  1 07:00:00 1970'.
+  // Padding the day too would diverge on ~24% of runs in the report header.
   return (
-    `${days[d.getDay()]} ${months[d.getMonth()]} ${p(d.getDate())} ` +
+    `${days[d.getDay()]} ${months[d.getMonth()]} ${String(d.getDate()).padStart(2, " ")} ` +
     `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${d.getFullYear()}`
   );
 }
@@ -377,7 +381,22 @@ async function stepReview(deps: WorkerDeps, c: Ctx): Promise<string | null> {
 async function stepLockPrefix(deps: WorkerDeps, c: Ctx): Promise<void> {
   const early = await checkCiPassed(deps.api, c.token, c.repo, c.headSha);
   if (early.ok || !early.msg.includes("typecheck")) return;
-  const useBun = (await repoHasBunLock(deps.api, c.token, c.repo, c.headSha)) || early.msg.includes("uv.lock");
+  // Python 1961-1973 is a THREE-way, not a two-way with a default:
+  //   if has_bun:                    -> fix_bun_lock
+  //   elif "uv.lock" not in ci_msg:  -> fix_uv_lock
+  //   (else)                         -> fall through, change nothing
+  //
+  // The third arm is the load-bearing one: a CI message that already names
+  // uv.lock is complaining about the file uv would re-resolve, so re-resolving
+  // costs a clone, changes nothing, and in a non-Bun repo the naive two-way
+  // rewrite ends up PUSHING a regenerated bun.lock the repo does not use, on a
+  // PR the Python left untouched. It cannot be a disjunction at all: `has_bun`
+  // alone must select bun (a Bun repo is unaffected by what CI names), and the
+  // negative guard belongs on the uv arm only.
+  const hasBun = await repoHasBunLock(deps.api, c.token, c.repo, c.headSha);
+  const uvBlocked = early.msg.includes("uv.lock");
+  if (!hasBun && uvBlocked) return; // Python 1973's implicit else.
+  const useBun = hasBun;
 
   deps.report.push(
     useBun ? "   🔧 CI failing: bun.lock stale — pre-fixing..." : "   🔧 CI failing: uv.lock stale — pre-fixing...",
@@ -657,7 +676,13 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
     // Respect the recorded reason until the head changes; re-running every cron
     // tick is exactly what the skip exists to prevent (1942-1949).
     deps.report.push(`   ⏭️  Permanently skipped: ${skipReason} (until head SHA changes)`);
-    await reportSkipNotice(deps, c, skipReason);
+    // Python line 1947 calls `notify_skip_once(...)` as a BARE statement — the
+    // notification fires, but no `🔔 Skip notified` line is appended. Only the
+    // three `if notify_skip_once(...):` sites (2028, 2102, 2158) report it, so
+    // routing this through `reportSkipNotice` would put a line in the ops
+    // channel on every tick of every permanently-skipped PR. This is the single
+    // site in the port that must notify silently.
+    await notifySkipOnce(deps, c, skipReason);
     c.out.skipped = true;
     return c.out;
   }
