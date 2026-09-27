@@ -31,6 +31,17 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      - name: Typecheck + tests (worker)
+        # The 5-minute PR worker runs on the cron timer, NOT in this binary, so
+        # nothing else in this workflow would ever catch a break in it. Before
+        # the cut-over the worker had no CI at all; this is the gate that keeps
+        # the code the timer actually executes honest.
+        working-directory: worker
+        run: |
+          bun install --frozen-lockfile
+          bunx tsc --noEmit
+          bun test
+
       - name: Typecheck + tests
         working-directory: server
         run: |
