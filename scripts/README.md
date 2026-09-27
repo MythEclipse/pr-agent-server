@@ -60,6 +60,32 @@ bun test
 bun src/index.ts --sync-status                    # read-only, needs no credentials
 bun src/index.ts --sync-only --dry                # stops before any push
 bun src/index.ts                                  # one full tick
+bun src/index.ts --sync-hooks                     # refused unless gated, see below
+```
+
+### `--sync-hooks` is gated, and stays that way
+
+`--sync-hooks` writes the pr-agent webhook and three Dependabot files to **every
+repo the GitHub token can see**. It refuses to run unless
+`PR_AGENT_SYNC_HOOKS=1` is set — any other value, including `true` or `yes`, is
+rejected, and the check happens before a key file is read or a request is made.
+
+That gate is not a placeholder. The Dependabot templates in
+`worker/src/ops/templates/` were written from scratch during the TypeScript
+migration, because the Python that previously managed fleet config was already
+deleted. Nothing in the repo or in git history records what the previous
+operator wanted written to every fork.
+
+**Read those three files before enabling the gate.** Turning it on is a
+configuration decision with fleet-wide consequences, not a code change.
+
+Once enabled, `pr-agent-sync-hooks.timer` runs it daily at 03:17 (plus up to 15
+minutes of randomised delay, because every other timer on this host fires near
+the top of the hour).
+
+```bash
+sudo systemctl start pr-agent-sync-hooks.service        # run once, now
+sudo journalctl -u pr-agent-sync-hooks.service -n 40
 ```
 
 ## Deployment
@@ -74,6 +100,10 @@ The worker is **deployed as a systemd timer on the VPS**, not as a cron job.
 | Entrypoint | `/opt/pr-agent-worker/run-worker.sh` |
 | User | `pr-agent` |
 | Logs | `journalctl -u pr-agent-worker.service` |
+
+A second pair, `pr-agent-sync-hooks.{service,timer}`, runs the daily fork-config
+sync and is gated — see `--sync-hooks` above. Both pairs are in `deploy/` so the
+deployment can be rebuilt from the repo alone.
 
 ```bash
 sudo systemctl list-timers pr-agent-worker.timer
