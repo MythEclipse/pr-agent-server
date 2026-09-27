@@ -27,6 +27,19 @@ for f in package.json bun.lock tsconfig.json; do
   [[ -f "$SRC/$f" ]] && sudo install -m 0644 "$SRC/$f" "$DEST/$f"
 done
 
+# run-worker.sh is the ExecStart of BOTH units (pr-agent-worker.service and
+# pr-agent-sync-hooks.service) and it carries the $GITHUB_APP_ID mapping that both
+# unit files' comments call load-bearing. It was previously absent from git
+# entirely, so a rebuild from the repo produced two units pointing at a file that
+# did not exist. Install it with a hard failure if the source is missing, rather
+# than a deploy that looks fine and breaks on the next tick.
+if [[ -f "$SRC/run-worker.sh" ]]; then
+  sudo install -m 0755 "$SRC/run-worker.sh" "$DEST/run-worker.sh"
+else
+  echo "deploy-worker: $SRC/run-worker.sh is missing and BOTH units ExecStart it" >&2
+  exit 1
+fi
+
 # Bun must live somewhere pr-agent can execute, and /home/code is not.
 if [[ ! -x "$DEST/bin/bun" ]]; then
   echo "==> installing bun into $DEST/bin (pr-agent cannot read ~/.bun)"
@@ -34,6 +47,21 @@ if [[ ! -x "$DEST/bin/bun" ]]; then
 fi
 sudo chmod 0755 "$DEST" "$DEST/bin" "$DEST/bin/bun"
 sudo chown -R pr-agent:pr-agent "$DEST"
+
+# The worker runs as pr-agent, and every state path it owns is an absolute /tmp
+# path inherited from the Python. A file there owned by anyone else is
+# UNWRITABLE, and the failure is silent: the save throws, is caught by the
+# error-swallowing tick, and the next tick redoes the same work forever. This
+# actually happened -- /tmp/pr-queue-sync-state.json was left owned by `code` at
+# mode 0644, so pr-agent could read it and never write it.
+echo "==> checking state paths are writable by pr-agent"
+for f in /tmp/pr-queue-sync-state.json /tmp/pr-queue-fix-state.json; do
+  if [[ -e "$f" ]] && ! sudo -u pr-agent test -w "$f"; then
+    echo "==> $f is not writable by pr-agent; handing it over"
+    sudo chown pr-agent:pr-agent "$f"
+    sudo chmod 0664 "$f"
+  fi
+done
 
 echo "==> typechecking + testing the DEPLOYED copy (not the checkout)"
 ( cd "$DEST" && sudo -u pr-agent ./bin/bun test ) 2>&1 | tail -5

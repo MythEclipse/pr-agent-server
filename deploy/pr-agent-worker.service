@@ -32,7 +32,20 @@ Environment=PR_AGENT_WEBHOOK_URL=https://pr-agent.asepharyana.my.id/api/v1/githu
 # `systemd-run`-style hardening: this job holds a GitHub App key and a webhook
 # secret in its environment, so nothing it spawns may gain privileges.
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
+# PrivateTmp=false IS LOAD-BEARING, do not 'harden' this to true.
+# Every state path this worker owns is an absolute /tmp path inherited
+# from the Python (state.ts, lock.ts, autofix.ts, lockfix.ts, merge.ts).
+# With PrivateTmp=true each invocation gets its own namespace that is
+# DISCARDED on exit, so every tick started from nothing: the sync state
+# read 0 entries where the host view reads 3, the fix state never
+# persisted so the same SHA was re-fixed every tick, `pending_verify`
+# never survived so verifyPendingSyncs had nothing to watch and the
+# CI-revert safety net was dead, and the two units did not actually
+# share the lock file they rely on for mutual exclusion.
+# The correct hardening is to move the state under /var/lib/pr-agent-server,
+# which changes the on-disk contract with the old Python reader -- an
+# operator decision, not something to do silently here.
 # Bun writes its cache/transpile output; keep it out of the read-only tree.
 Environment=BUN_INSTALL_CACHE_DIR=/var/lib/pr-agent-server/.bun-cache
 ExecStart=/usr/local/bin/bws-exec pr-agent env PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem /opt/pr-agent-worker/run-worker.sh

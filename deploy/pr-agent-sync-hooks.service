@@ -20,3 +20,16 @@ Nice=10
 
 # The tick and this share one lock file, so overlap is already impossible; this
 # only stops systemd from starting a second copy after a slow one finishes.
+
+# Spelled out rather than left to the systemd default, because the OTHER unit's
+# default is what broke this. pr-agent-worker.service carried PrivateTmp=true,
+# which gave every tick its own /tmp namespace, discarded on exit: the state
+# files were never read and never written, so the interval gate, the
+# already-attempted gate and the CI-revert watch were all inert. Set explicitly
+# here so this unit cannot drift into the same failure if a global default is
+# ever added.
+PrivateTmp=false
+
+# The tick and this share ONE lock file at /tmp/pr-queue-worker.lock, so overlap
+# is impossible -- but only while both units can see the same /tmp. See the
+# PrivateTmp note above and the matching one in pr-agent-worker.service.
