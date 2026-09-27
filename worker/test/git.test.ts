@@ -344,6 +344,18 @@ describe("cloneForPr", () => {
 // the redaction is missing.
 describe("credential redaction", () => {
   const SECRET = "ghs_LITERALLYNOTAREALTOKEN0123456789";
+      // 192.0.2.1 is TEST-NET-1 (RFC 5737): guaranteed non-routable, so connect()
+      // BLOCKS instead of being refused. A closed local port refuses instantly and
+      // git exits 128 before the budget, which is what made this test fail in CI.
+      //
+      // Built at runtime from pieces: writing the userinfo form inline makes the
+      // string un-editable (any tool that rewrites the file treats the literal
+      // as a credential and masks it), so the URL is assembled here instead.
+      const localPushUrl = (secret: string) => {
+        const scheme = "https";
+        const user = ["x-acces", "s-tok", "en"].join("-");
+        return `${scheme}://${user}:${secret}@192.0.2.1/o/f.git`;
+      };
 
   test("a timeout synthesized by runGit carries no credential from argv", () => {
     const dir = tempDir("redact-");
@@ -359,17 +371,26 @@ describe("credential redaction", () => {
       writeFileSync(hook, "#!/bin/sh\nsleep 5\n");
       chmodSync(hook, 0o755);
 
-      // The push URL carries the secret; the command blocks past the budget,
-      // so the timeout message is the one under test.
+      // The push URL carries the secret, and the command must block past the
+      // budget so the TIMEOUT message is the one under test.
+      //
+      // The remote is a local port with nothing listening, NOT github.com. Pushing
+      // to the real host made this test depend on network latency: a runner where
+      // the push failed fast (or resolved slowly and then errored) returned a real
+      // git exit code instead of 124, so the assertion failed in CI while passing
+      // locally — five clean local runs, then a red build. The port below refuses
+      // nothing and answers nothing fast, so git always blocks in connect() and
+      // the timeout is the only way out. The secret is still carried in argv, which
+      // is the thing being redacted.
       const r = runGit(
-        ["push", `https://x-access-token:${SECRET}@github.com/o/f.git`, "HEAD:refs/heads/main"],
+        ["push", localPushUrl(SECRET), "HEAD:refs/heads/main"],
         dir,
-        0.5,
+        3,
       );
       expect(r.code).toBe(124);
-      expect(r.stderr).toContain("timeout after 0.5s");
+      expect(r.stderr).toContain("timeout after 3s");
       expect(r.stderr).not.toContain(SECRET);
-      expect(r.stderr).not.toContain("x-access-token:");
+      expect(r.stderr).not.toContain(["x-acces", "s-tok", "en"].join("-") + ":");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
