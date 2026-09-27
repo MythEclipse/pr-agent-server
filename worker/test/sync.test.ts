@@ -65,6 +65,8 @@ import {
   type SyncAgentPort,
   type SyncRequest,
 } from "../src/sync/run";
+import type { SyncStatus } from "../src/sync/types";
+import { reportOutcomeForTest } from "../src/sync/sweep";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Fakes
@@ -1438,5 +1440,110 @@ describe("group 13 · fetch URL, quality prompt, revert, state file", () => {
     } finally {
       tmp.cleanup();
     }
+  });
+});
+
+describe("group 9 · the sync reporter", () => {
+  /**
+   * Drive one status through the reporter and return what it emitted.
+   *
+   * Self-contained on purpose: the other groups' `depsFor` is scoped inside its
+   * own describe, and borrowing a shared factory here is how a test ends up
+   * asserting against whatever that factory happened to configure.
+   */
+  async function report(
+    res: SyncStatus,
+    opts: { dry?: boolean; entry?: Record<string, unknown> } = {},
+  ) {
+    const posts: { title: string; lines: string[]; color?: number }[] = [];
+    const lines: string[] = [];
+    const entry = opts.entry ?? {};
+    const deps = {
+      run: fakeGit().run,
+      workdirs: fakeWorkdirs().workdirs,
+      agent: fakeAgent(() => ({ ok: true, snippet: "ok" })).agent,
+      api: fakeApi(() => ({ data: {} })),
+      fetchGhToken: () => "",
+      postDiscord: async (title: string, ls: string[], color?: number) => {
+        posts.push({ title, lines: ls, color });
+        return true;
+      },
+      loadState: (): SyncState => ({}),
+      saveState: () => {},
+      now: () => 1_700_000_000,
+      repoOverrides: {},
+      report: { push: () => {} },
+    } as unknown as Parameters<typeof reportOutcomeForTest>[0];
+    await reportOutcomeForTest(deps, lines, {}, res, "the detail", {
+      fork: "acme/site",
+      parent: "upstream/site",
+      localBranch: "main",
+      mergeCount: 3,
+      upstreamSha: "abcdef1234567890",
+      dry: opts.dry ?? false,
+      entry,
+    });
+    return { posts, lines, entry };
+  }
+
+  test("synced posts the merge head from pending_verify (Python 1786-1794)", async () => {
+    const { posts, lines } = await report("synced", {
+      entry: { pending_verify: { sha: "1234567890abcdef" } },
+    });
+    expect(lines[0]).toBe("   ✅ merged + pushed: the detail");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].title).toBe("🔁 Fork synced: acme/site");
+    expect(posts[0].lines[0]).toBe(
+      "⬆️ 3 upstream commit(s) from `upstream/site` merged into `main`.",
+    );
+    expect(posts[0].lines[1]).toBe(
+      "merge head `12345678` (CI-verified on the next ticks; reverted automatically if red).",
+    );
+  });
+
+  test("pr-opened POSTS to Discord with the pulls link (Python 1796-1803)", async () => {
+    // THE REGRESSION. This arm shipped with the post deleted and 389 tests
+    // still passed. Opening an upstream-sync PR is the one outcome that needs a
+    // human to review and merge, so losing it means an operator never learns a
+    // PR is waiting on them.
+    const { posts, lines } = await report("pr-opened");
+    expect(lines[0]).toBe("   📬 the detail");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].title).toBe("📬 Fork sync PR opened: acme/site");
+    expect(posts[0].lines).toEqual(["the detail", "https://github.com/acme/site/pulls"]);
+  });
+
+  test("pr-path is a normal outcome, not a warning (Python 1807-1808)", async () => {
+    const { posts, lines } = await report("pr-path");
+    expect(lines[0]).toBe("   🧪 dry run (protected): the detail");
+    expect(lines[0]).not.toContain("⚠️");
+    expect(posts).toHaveLength(0);
+  });
+
+  test("dry is plain; pr-path is the one that says protected (Python 1805)", async () => {
+    const { lines } = await report("dry");
+    expect(lines[0]).toBe("   🧪 dry run: the detail");
+  });
+
+  test("a dry run posts nothing at all, for any status (Python 1788, 1798)", async () => {
+    for (const res of ["synced", "pr-opened", "conflict-failed"] as SyncStatus[]) {
+      const { posts } = await report(res, { dry: true });
+      expect(posts).toHaveLength(0);
+    }
+  });
+
+  test("conflict-failed posts once and sets notified (Python 1810-1822)", async () => {
+    const { posts, entry } = await report("conflict-failed", {
+      entry: { notified: false },
+    });
+    expect(posts).toHaveLength(1);
+    expect(posts[0].title).toBe("⏭️ Fork sync skipped: acme/site");
+    // The flag the Python sets, so the next tick does not re-alert.
+    expect(entry.notified).toBe(true);
+  });
+
+  test("an already-notified skip stays silent (Python 1812)", async () => {
+    const { posts } = await report("conflict-failed", { entry: { notified: true } });
+    expect(posts).toHaveLength(0);
   });
 });

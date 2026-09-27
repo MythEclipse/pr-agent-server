@@ -1,12 +1,22 @@
 /**
  * The per-fork sweep and the outcome reporter.
  *
- * Extracted verbatim from `runUpstreamSync` in `./run` so that file comes back
- * under the 400-line cap. THIS IS A MOVE, NOT A REWRITE. The gating order, the
- * four `continue` arms, every line string, the budget decrement and the
- * reportOutcome dispatch are unchanged; the Python (1742-1826) is the reference.
- * A line-by-line diff of the loop against the original, ignoring indentation,
- * shows no hunks at all.
+ * Extracted from `runUpstreamSync` in `./run` so that file comes back under the
+ * 400-line cap. The Python (1742-1826) is the reference, not the previous
+ * TypeScript.
+ *
+ * The loop itself is a move and the diff proves it: zero hunks. The REPORTER was
+ * not, and this header used to claim otherwise. A whole-branch review caught
+ * three arms that had been rewritten rather than carried over:
+ *   - `pr-opened` had lost its Discord post entirely. That is the one outcome
+ *     needing a human to review and merge, so losing it means an operator never
+ *     learns a PR is waiting on them.
+ *   - `synced` had lost the `merge head` line, and with it the only reader of
+ *     `pending_verify` in the port.
+ *   - `pr-path` had been folded into the `else` arm and rendered as a WARNING.
+ * All three are back to the Python's text, and all three now have tests that
+ * assert the strings and the posts -- the reason they drifted is that nothing
+ * did.
  *
  * `sweepForks` takes the sync implementation as an argument instead of importing
  * it, because the real one lives in `./run` — importing it here would make the
@@ -183,6 +193,23 @@ export async function sweepForks(
  * `dry` reports two extra statuses with a 🧪 marker and NO side effects, so an
  * operator reading the channel can tell a rehearsal from a real sync.
  */
+/**
+ * Exported for the test suite. The reporter is private to `sweepForks` in
+ * production, but its strings and its Discord posts are the contract with the
+ * Python, and the pr-opened post was silently deleted once already with a fully
+ * green suite -- because nothing drove this function directly.
+ */
+export async function reportOutcomeForTest(
+  deps: SweepDeps,
+  lines: string[],
+  state: SyncState,
+  res: SyncResult[0],
+  detail: string,
+  ctx: OutcomeCtx,
+): Promise<void> {
+  return reportOutcome(deps, lines, state, res, detail, ctx);
+}
+
 async function reportOutcome(
   deps: SweepDeps,
   lines: string[],
@@ -193,24 +220,43 @@ async function reportOutcome(
 ): Promise<void> {
   const { fork, parent, localBranch, mergeCount, upstreamSha, dry, entry } = ctx;
   if (res === "synced") {
-    lines.push(
-      `✅ ${fork}: merged ${mergeCount} commit(s) into \`${localBranch}\`` +
-        (detail ? ` — ${detail}` : ""),
-    );
+    // Python line 1786 reads the sha back out of pending_verify, which the fork
+    // flow just wrote. It is the ONLY reader of that field in the port, and it
+    // is what makes the Discord message useful: it tells the operator which
+    // commit to watch for CI on.
+    const mergedSha = ((entry.pending_verify as { sha?: string } | undefined)?.sha ?? "").slice(0, 8);
+    lines.push(`   ✅ merged + pushed: ${detail}`); // Python line 1787
     if (!dry) {
+      // Python lines 1789-1794. Title, three lines, default colour.
       await deps.postDiscord(
-        `✅ Fork synced: ${fork}`,
+        `🔁 Fork synced: ${fork}`,
         [
-          `${mergeCount} upstream commit(s) merged into \`${localBranch}\``,
-          detail ? `— ${detail}` : "",
+          `⬆️ ${mergeCount} upstream commit(s) from \`${parent}\` merged into \`${localBranch}\`.`,
+          `merge head \`${mergedSha}\` (CI-verified on the next ticks; reverted automatically if red).`,
           `https://github.com/${fork}`,
         ],
         DISCORD_COLOR,
       );
     }
   } else if (res === "pr-opened") {
-    lines.push(`🔁 ${fork}: opened ${detail}`);
+    // Python lines 1796-1803. This arm posts to Discord: opening an upstream-sync
+    // PR on a protected fork is the one outcome that needs a human to review and
+    // merge, so an operator who never sees the alert has no way to know a PR is
+    // waiting on them. It was missing from this port and no test caught it --
+    // the pr-opened test asserts syncForkRepo's return value, never the reporter.
+    lines.push(`   📬 ${detail}`); // Python line 1797
+    if (!dry) {
+      await deps.postDiscord(
+        `📬 Fork sync PR opened: ${fork}`,
+        [detail, `https://github.com/${fork}/pulls`],
+        DISCORD_COLOR,
+      );
+    }
   } else if (res === "dry") {
+    lines.push(`   🧪 dry run: ${detail}`); // Python line 1805
+  } else if (res === "pr-path") {
+    // Python lines 1807-1808. It was folded into the `else` arm, which rendered
+    // it as a warning -- wrong, pr-path is a normal outcome, not a fault.
     lines.push(`   🧪 dry run (protected): ${detail}`);
   } else if (res === "conflict-failed") {
     lines.push(`   ⏭️  ${detail}`);
