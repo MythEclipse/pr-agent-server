@@ -29,6 +29,7 @@ import { runGit } from "./git";
 import { LOCK_FILE, WorkerLock } from "./lock";
 import { nodeProcessDeps } from "./pr/autofix";
 import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix";
+import { runSyncHooks } from "./ops/syncHooks";
 import { runTick, type WorkerDeps } from "./pr/pipeline";
 import { Report } from "./report";
 import { FIX_STATE_FILE, loadFixState, loadSyncState, saveFixState } from "./state";
@@ -45,6 +46,27 @@ const WEBHOOK_SECRET = process.env.PR_AGENT_WEBHOOK_SECRET || "";
 /** Python `PR_AGENT_WEBHOOK_URL` (line 62). */
 const WEBHOOK_URL =
   process.env.PR_AGENT_WEBHOOK_URL || "https://pr-agent.asepharyana.my.id/api/v1/github_webhooks";
+
+/**
+ * `GITHUB_WEBHOOK_SECRET` for the fork-config sync (Task 16). Read here, in the
+ * one module allowed to touch the environment, and handed to `runSyncHooks` as
+ * an explicit dep so the ops module never has to reach for `process.env`
+ * itself. Empty is meaningful: it makes the webhook step skip entirely, leaving
+ * the Dependabot files to be synced on their own.
+ */
+const OPS_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
+
+/**
+ * Whether the daily fork-config sync runs. OPT-IN, and it stays that way until
+ * someone has read `worker/src/ops/templates/` and agreed with what it writes.
+ *
+ * Those templates are the one genuinely greenfield artefact in this migration:
+ * the Python they replace was already gone, so nothing states what fleet-wide
+ * Dependabot config the previous operator wanted. Turning this on is a config
+ * decision with fleet-wide consequences, not a code change, so it is gated
+ * rather than defaulted. Set it to a truthy value to enable.
+ */
+const SYNC_HOOKS = process.env.PR_AGENT_SYNC_HOOKS === "1";
 
 // ── The collaborators the Python held as module globals ─────────────────────
 
@@ -216,6 +238,46 @@ async function syncOnly(argv: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `--sync-hooks` (Task 16): the daily fork-config sync — the pr-agent webhook
+ * plus the three Dependabot files, across every repo the token can see.
+ *
+ * A SEPARATE CLI MODE, not a step inside the tick, and that placement is the
+ * point. The tick runs every five minutes; this writes fleet-wide config, and
+ * the Dependabot templates were authored from scratch during the migration with
+ * no surviving record of the previous fleet config. Firing that on a five-minute
+ * cadence would mean the first accidental run rewrites every fork at once. A
+ * daily mode is something a scheduler can be pointed at deliberately.
+ *
+ * It takes the same lock the tick takes, so the two cannot interleave and
+ * half-apply a fleet.
+ */
+async function syncHooks(argv: string[]): Promise<number> {
+  const lock = WorkerLock.acquire(LOCK_FILE);
+  if (!lock) {
+    console.log("another pr-queue-worker run holds the lock — try again shortly");
+    return 1;
+  }
+  releaseHeld = () => lock.release();
+  try {
+    const deps = buildDeps({ dry: argv.includes("--dry"), report: new Report() });
+    const res = await runSyncHooks({
+      api: deps.api,
+      // The PAT push path is a different credential from the App's JWT; the ops
+      // module asks the client for it, exactly as the Python's
+      // `_fetch_gh_token()` did.
+      ghToken: deps.fetchGhToken(),
+      webhookSecret: OPS_WEBHOOK_SECRET,
+    });
+    for (const line of res.lines) console.log(line);
+    console.log(`sync-hooks: ${res.ok} updated, ${res.skip} skipped`);
+    return res.ok > 0 || res.skip === 0 ? 0 : 1;
+  } finally {
+    lock.release();
+    releaseHeld = null;
+  }
+}
+
 // ── main ───────────────────────────────────────────────────────────────────
 
 /**
@@ -226,13 +288,36 @@ async function syncOnly(argv: string[]): Promise<number> {
  * read-only mode, and it has to stay answerable while a tick is running, which
  * is exactly when an operator most wants to ask it.
  */
-async function main(): Promise<number> {
-  const argv = process.argv.slice(2);
+/**
+ * Exported for the test suite ONLY. Importing this module runs `main()` at the
+ * bottom, so a test cannot call `main()` without that side effect firing; the
+ * gate tests need to exercise the argument parsing and the gate itself without
+ * a live tick, a lock file or a credential.
+ *
+ * Named to be obvious at every call site that this is not an internal API.
+ */
+export async function runCliForTest(argv: string[]): Promise<number> {
+  return main(argv);
+}
+
+async function main(argvIn?: string[]): Promise<number> {
+  const argv = argvIn ?? process.argv.slice(2);
   if (argv.includes("--sync-status")) {
     console.log(JSON.stringify(loadSyncState(), null, 2));
     return 0;
   }
   if (argv.includes("--sync-only")) return syncOnly(argv);
+  if (argv.includes("--sync-hooks")) {
+    if (!SYNC_HOOKS) {
+      console.error(
+        "pr-queue-worker: --sync-hooks is gated. Set PR_AGENT_SYNC_HOOKS=1 after " +
+          "reviewing worker/src/ops/templates/ — it rewrites Dependabot config " +
+          "across every repo this token can see.",
+      );
+      return 1;
+    }
+    return syncHooks(argv);
+  }
 
   const report = new Report();
   await runTick({
@@ -247,18 +332,23 @@ async function main(): Promise<number> {
   return 0;
 }
 
-try {
-  process.exitCode = await main();
-} catch (err) {
+// Only run when executed as the program. Without this guard every test that
+// imports the CLI — which the `--sync-hooks` gate tests must do to reach `main`
+// — would fire a real tick, take the real lock and touch the real API.
+if (import.meta.main) {
+  try {
+    process.exitCode = await main();
+  } catch (err) {
   // A missing credential is an operator-actionable configuration error, not a
   // crash: report it as one line on stderr with a non-zero exit, instead of a
   // stack trace that buries the cause. Anything else is a real defect and keeps
   // its stack for debugging.
-  const message = err instanceof Error ? err.message : String(err);
-  if (message.includes("private key not found")) {
-    console.error(`pr-queue-worker: ${message}`);
-    process.exitCode = 1;
-  } else {
-    throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("private key not found")) {
+      console.error(`pr-queue-worker: ${message}`);
+      process.exitCode = 1;
+    } else {
+      throw err;
+    }
   }
 }

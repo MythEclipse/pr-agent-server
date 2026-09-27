@@ -10,7 +10,7 @@
  * must not reach the assertions in group 4, and the real one must not be
  * readable by a suite that has no business reading it.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runSyncHooks, type SyncHooksDeps } from "../src/ops/syncHooks";
@@ -386,5 +386,63 @@ describe("runSyncHooks > the summary", () => {
     const res = await runSyncHooks({ api, ghToken: "pat" });
     expect(of(calls, "GET", "/users/asepharyana/repos?per_page=100")).toHaveLength(1);
     expect(res.ok).toBe(2);
+  });
+});
+
+
+/**
+ * The CLI wiring for `--sync-hooks` (Task 16), in `src/index.ts`.
+ *
+ * What matters here is the GATE, not the sync. `runSyncHooks` is already proven
+ * by the tests above; what was untested until now is whether an operator can
+ * trigger fleet-wide Dependabot writes by accident. These assert they cannot:
+ * the mode is refused unless `PR_AGENT_SYNC_HOOKS=1` is set, and the refusal
+ * happens BEFORE any credential is read or any request is made.
+ */
+describe("the --sync-hooks CLI gate", () => {
+  const KEY = "PR_AGENT_SYNC_HOOKS";
+  let real: string | undefined;
+  let runIndex: (argv: string[]) => Promise<number>;
+
+  beforeAll(async () => {
+    real = process.env[KEY];
+    // Imported lazily: src/index.ts calls bootstrapEnv() at module scope, so
+    // it must not be imported while other suites hold a staged environment.
+    const mod = await import("../src/index");
+    runIndex = (argv) => mod.runCliForTest(argv);
+  });
+
+  afterEach(() => {
+    if (real === undefined) delete process.env[KEY];
+    else process.env[KEY] = real;
+  });
+
+  test("refuses when the gate is unset, and explains why", async () => {
+    delete process.env[KEY];
+    const code = await runIndex(["--sync-hooks"]);
+    expect(code).toBe(1);
+  });
+
+  test("refuses for a value that is not exactly \"1\"", async () => {
+    for (const v of ["", "0", "true", "yes", "TRUE"]) {
+      process.env[KEY] = v;
+      expect(await runIndex(["--sync-hooks"])).toBe(1);
+    }
+  });
+
+  test("the refusal needs no credential: no key file, no token, no request", async () => {
+    // PATH points at an empty dir and the key path at a file that cannot exist,
+    // so ANY attempt to build deps would throw before returning 1.
+    process.env[KEY] = "0";
+    const oldPath = process.env.PATH;
+    const oldKey = process.env.PR_AGENT_KEY_PATH;
+    process.env.PR_AGENT_KEY_PATH = "/nonexistent/pr-agent-key.pem";
+    try {
+      expect(await runIndex(["--sync-hooks"])).toBe(1);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldKey === undefined) delete process.env.PR_AGENT_KEY_PATH;
+      else process.env.PR_AGENT_KEY_PATH = oldKey;
+    }
   });
 });
