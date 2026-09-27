@@ -35,6 +35,21 @@ import { join } from "node:path";
 export const AI_FIX_MAX_TURNS = 100;
 /** Python `API_SERVER_URL` (line 80), overridable per call by the env var. */
 export const DEFAULT_API_SERVER_URL = "http://127.0.0.1:8642/v1";
+/**
+ * The provider slug sent on every AI-fix turn.
+ *
+ * Hermes resolves a `custom:<name>` slug against the `custom_providers` entries
+ * in ~/.hermes/config.yaml, where <name> must match that entry's `name:` field
+ * exactly. It used to be hardcoded as "custom:9router", which resolves to
+ * nothing: the entry is named after its HOSTNAME, so the gateway answered
+ * "Unknown provider 'custom:9router'" and every AI-fix turn failed.
+ *
+ * The hostname is per-install configuration, not a constant, so it comes from
+ * the environment with a default that matches this host's config. A wrong value
+ * here is loud — the gateway returns 200 with an error string in `content`, not
+ * a non-2xx — so it is also logged in the infra snippet by the caller.
+ */
+export const DEFAULT_API_PROVIDER = "custom:9router.asepharyana.my.id";
 /** Python `SYNC_CLAUDE_TIMEOUT` (line 988) — conflict resolution + verification. */
 export const SYNC_CLAUDE_TIMEOUT = 3600;
 /** Python `r.text[:300]` on the non-200 branch (line 1240). */
@@ -66,6 +81,9 @@ export type AgentClientOptions = {
   baseUrl?: string;
   /** Falls back to `API_SERVER_KEY` then the dotenv scan. */
   key?: string;
+  /** Provider slug for the request body. Falls back to `API_SERVER_PROVIDER`
+   *  then `DEFAULT_API_PROVIDER`. */
+  provider?: string;
   /** Overrides `SYNC_CLAUDE_TIMEOUT` for every call. */
   timeoutSec?: number;
   /** Overrides `AI_FIX_MAX_TURNS` in the request body. */
@@ -147,6 +165,7 @@ export function apiServerKey(): string {
 export class AgentClient {
   private readonly baseUrl?: string;
   private readonly key?: string;
+  private readonly provider?: string;
   private readonly timeoutSec: number;
   private readonly maxTurns: number;
   private readonly fetchImpl: FetchLike;
@@ -154,6 +173,7 @@ export class AgentClient {
   constructor(opts: AgentClientOptions = {}) {
     this.baseUrl = opts.baseUrl;
     this.key = opts.key;
+    this.provider = opts.provider;
     this.timeoutSec = opts.timeoutSec ?? SYNC_CLAUDE_TIMEOUT;
     this.maxTurns = opts.maxTurns ?? AI_FIX_MAX_TURNS;
     this.fetchImpl =
@@ -176,6 +196,9 @@ export class AgentClient {
     const base = process.env.API_SERVER_URL || this.baseUrl || DEFAULT_API_SERVER_URL;
     // Python line 1214: env first, dotenv scan second.
     const key = this.key || process.env.API_SERVER_KEY || apiServerKey();
+    // Resolved per call, like the key and the URL, so a test can pin it and a
+    // different install can point at a different custom provider.
+    const provider = this.provider || process.env.API_SERVER_PROVIDER || DEFAULT_API_PROVIDER;
     // Python lines 1215-1216: refused before any socket is opened.
     if (!key) {
       return { ok: false, snippet: "[INFRA] Hermes API server API_SERVER_KEY not configured" };
@@ -194,7 +217,7 @@ export class AgentClient {
     // Python lines 1223-1235. Field order matches the Python dict.
     const body = {
       model: "hermes-agent",
-      provider: "custom:9router",
+      provider,
       messages: [
         { role: "system", content: AGENT_SYSTEM_PROMPT },
         { role: "user", content: prompt },

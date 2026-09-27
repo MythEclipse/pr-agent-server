@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   AGENT_SYSTEM_PROMPT,
   AI_FIX_MAX_TURNS,
+  DEFAULT_API_PROVIDER,
   AgentClient,
   apiServerKey,
   DEFAULT_API_SERVER_URL,
@@ -108,12 +109,41 @@ describe("AgentClient.post — HTTP contract", () => {
       expect(call.headers.authorization).toBe(`Bearer ${KEY}`);
       expect(call.headers["content-type"]).toBe("application/json");
       expect(call.body.model).toBe("hermes-agent");
-      expect(call.body.provider).toBe("custom:9router");
+      // The slug must name a real `custom_providers` entry. The old value
+      // "custom:9router" matched nothing and every AI-fix turn came back as
+      // "Unknown provider" inside a 200 response, so it never failed loudly.
+      expect(call.body.provider).toBe(DEFAULT_API_PROVIDER);
+      expect(call.body.provider.startsWith("custom:")).toBe(true);
       expect(call.body.stream).toBe(false);
       expect(call.body.model_options).toEqual({ max_turns: AI_FIX_MAX_TURNS });
       expect(call.body.messages).toHaveLength(2);
       expect(call.body.messages[0].role).toBe("system");
       expect(call.body.messages[1]).toEqual({ role: "user", content: "resolve these conflicts" });
+    } finally {
+      gw.stop();
+    }
+  });
+
+  test("the provider slug is overridable, so a different install can point elsewhere", async () => {
+    // A wrong slug is the failure mode that motivated this: the gateway answers
+    // 200 with "Unknown provider" inside `content`, so nothing upstream can tell
+    // a broken run from a successful one.
+    const gw = fakeGateway(() => choices("ok"));
+    try {
+      await client(gw.baseUrl, { provider: "custom:elsewhere.example" }).post("hi");
+      expect(gw.seen[0].body.provider).toBe("custom:elsewhere.example");
+
+      const gw2 = fakeGateway(() => choices("ok"));
+      const prev = process.env.API_SERVER_PROVIDER;
+      process.env.API_SERVER_PROVIDER = "custom:from-env.example";
+      try {
+        await client(gw2.baseUrl).post("hi");
+      } finally {
+        if (prev === undefined) delete process.env.API_SERVER_PROVIDER;
+        else process.env.API_SERVER_PROVIDER = prev;
+        gw2.stop();
+      }
+      expect(gw2.seen[0].body.provider).toBe("custom:from-env.example");
     } finally {
       gw.stop();
     }
