@@ -61,6 +61,7 @@ import {
   type RevertOutcome,
 } from "./merge";
 import { verifyPendingSyncs } from "./verify";
+import { resolveMerge } from "./resolve";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -306,106 +307,16 @@ export async function syncForkRepo(
       return ["error", `merge error: ${head(reportable(combined).trim(), MERGE_ERROR_DETAIL)}`];
     }
 
-    let resolution: string;
-    if (conflicted.length) {
-      if (!cfg.resolve_conflicts) {
-        // Python lines 1561-1569: abort, and record a skip that is NOT
-        // retried until upstream moves.
-        run(["merge", "--abort"], workdir, ABORT_TIMEOUT_SEC);
-        const note =
-          `${conflicted.length} conflicting file(s) and conflict resolution is disabled: ` +
-          `${conflicted.slice(0, 5).join(", ")}`;
-        return [
-          "conflict-failed",
-          skipNote(deps, entry, state, dry, upstreamSha, note),
-        ];
-      }
+    const outcome = await resolveMerge(run, workdir, conflicted, {
+      report: deps.report,
+      agent,
+      cfg,
+      skip: (note: string) => skipNote(deps, entry, state, dry, upstreamSha, note),
 
-      deps.report.push(RESOLVING_LINE(conflicted.length)); // Python line 1570
-      const agentRun = await agent.runSync({
-        workdir,
-        prompt: conflictPrompt(fork, parent, upstreamBranch, localBranch, conflicted),
-        label: "hermes_sync_conflicts",
-        fork,
-        dry,
-      });
-
-      if (!agentRun.ok) {
-        // SALVAGE (lines 1576-1594). The agent call failed — but a timeout or
-        // a gateway hiccup says nothing about the WORKDIR. Re-read the real
-        // unmerged state now and let `syncFinishMerge` decide; a refusal there
-        // is the only thing that aborts. `why_salvage` is unused in the Python
-        // and is dropped rather than threaded.
-        const salvaged = syncFinishMerge(run, workdir);
-        if (salvaged.ok) {
-          deps.report.push(SALVAGE_LINE); // Python line 1583
-          resolution =
-            `Hermes resolved ${conflicted.length} conflict(s); ` +
-            `agent call ended early (${head(reportable(agentRun.snippet), SALVAGE_SNIPPET)}) ` +
-            "— merge salvaged";
-        } else {
-          run(["merge", "--abort"], workdir, ABORT_TIMEOUT_SEC);
-          return [
-            "conflict-failed",
-            skipNote(deps, entry, state, dry, upstreamSha, `conflict resolution failed — ${head(reportable(agentRun.snippet), SNIPPET)}`),
-          ];
-        }
-      } else {
-        const done = syncFinishMerge(run, workdir);
-        if (!done.ok) {
-          run(["merge", "--abort"], workdir, ABORT_TIMEOUT_SEC);
-          return [
-            "conflict-failed",
-            skipNote(
-              deps,
-              entry,
-              state,
-              dry,
-              upstreamSha,
-              `conflict resolution incomplete — ${done.detail}`,
-            ),
-          ];
-        }
-        resolution = `Hermes resolved ${conflicted.length} conflict(s)`;
-      }
-    } else {
-      resolution = "clean merge"; // Python line 1607
-      if (cfg.ai_fix_after_merge) {
-        const diff = run(
-          ["diff", "--name-only", `${preMergeSha}..HEAD`],
-          workdir,
-          MERGE_DIFF_TIMEOUT_SEC,
-        );
-        const mergedFiles = (diff.stdout || "")
-          .split("\n")
-          .map((f) => f.trim())
-          .filter((f) => f.length > 0);
-        if (mergedFiles.length) {
-          deps.report.push(QUALITY_LINE(mergedFiles.length)); // Python line 1612
-          const quality = await agent.runSync({
-            workdir,
-            prompt: qualityPrompt(fork, parent, upstreamBranch, mergedFiles),
-            label: "hermes_sync_quality",
-            fork,
-            dry,
-          });
-          if (quality.ok) {
-            const committed = syncCommitIfDirty(
-              run,
-              workdir,
-              "fix: auto-fix code quality [skip ci]",
-            );
-            resolution += committed
-              ? " + Hermes quality pass committed"
-              : " + quality pass made no changes";
-          } else {
-            // The quality pass is OPTIONAL, so its failure only annotates the
-            // resolution — a merge that is already correct is still pushed.
-            resolution += ` (quality pass skipped: ${head(reportable(quality.snippet), SHORT_SNIPPET)})`;
-          }
-        }
-      }
-    }
+      dry,
+    }, { fork, parent, upstreamBranch, localBranch, preMergeSha });
+    if (outcome.kind === "conflict-failed") return ["conflict-failed", outcome.detail];
+    const resolution = outcome.resolution;
 
     // Python lines 1624-1631. A second unmerged read AFTER the agent, because
     // the agent may have left a path unresolved while the first read (before
@@ -474,8 +385,8 @@ export async function syncForkRepo(
     }
 
     const pushed = pushRef(workdir, fork, "HEAD", `refs/heads/${localBranch}`, token, false, {
-      pat: deps.fetchGhToken(),
       run,
+      pat: deps.fetchGhToken(),
     });
 
     if (pushed.ok) {
