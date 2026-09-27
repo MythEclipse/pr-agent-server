@@ -1,0 +1,22 @@
+[Unit]
+Description=pr-agent fork-config sync (Dependabot files + pr-agent webhook)
+Documentation=file:///opt/pr-agent-worker/run-worker.sh
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pr-agent-worker
+# `env -i` so the service inherits nothing but what this file names. The
+# secrets come from Bitwarden through bws-exec, which does its own mapping
+# INSIDE the process -- see the note in run-worker.sh. Putting a mapping here
+# would be expanded by systemd from ITS OWN empty environment and arrive as the
+# literal string "$GITHUB_APP_ID", which is how the App JWT ended up with a
+# non-integer `iss` and every request 401'd.
+ExecStart=/usr/local/bin/bws-exec pr-agent /opt/pr-agent-worker/run-worker.sh --sync-hooks
+User=pr-agent
+Group=pr-agent
+TimeoutStartSec=900
+Nice=10
+
+# The tick and this share one lock file, so overlap is already impossible; this
+# only stops systemd from starting a second copy after a slow one finishes.

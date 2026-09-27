@@ -1,0 +1,17 @@
+# 5-minute PR queue loop, matching the interval the Python worker ran at.
+#
+# OnBootSec 2min so a reboot does not immediately fire a tick against GitHub
+# while the network is still settling; OnUnitActiveSec is measured from the END
+# of the last run, which is what keeps a slow tick from stacking up behind itself
+# (Persistent=false, so a machine that was off just waits for the next window).
+[Unit]
+Description=Run the PR-Agent queue worker every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=pr-agent-worker.service
+
+[Install]
+WantedBy=timers.target

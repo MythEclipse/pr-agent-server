@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily pr-agent fork-config sync
+
+[Timer]
+# 03:17, not 03:00: every other timer on this host fires near the top of the
+# hour and there is no reason to join that stampede.
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=900
+# If the machine was off at 03:17, run on the next boot rather than skipping a
+# day of fleet config.
+Persistent=true
+Unit=pr-agent-sync-hooks.service
+
+[Install]
+WantedBy=timers.target

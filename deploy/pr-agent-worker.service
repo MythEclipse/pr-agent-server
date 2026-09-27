@@ -1,0 +1,38 @@
+# PR-Agent queue worker — the 5-minute PR loop, Bun/TypeScript.
+#
+# TIMER, NOT SERVICE: this is a periodic job, not a daemon. The unit below is
+# `oneshot` and the .timer is what drives it. A long-running service would be the
+# wrong shape entirely — the worker has no server socket and no reason to be up
+# between ticks.
+#
+# DEPLOY TARGET: /opt/pr-agent-worker, NOT the repo worktree. The pr-agent user
+# cannot read /home/code (mode 750), so running it from a checkout is impossible.
+# `deploy-worker.sh` rsyncs the worker's src/ + test/ here on every change.
+#
+# SECRETS: bws-exec `pr-agent` is the same app the webhook server uses. The
+# worker needs the App id and the App private key, which already exist there under
+# different names, so they are mapped rather than duplicated:
+#   GITHUB_APP_ID   -> PR_AGENT_APP_ID
+#   GITHUB_WEBHOOK_SECRET -> PR_AGENT_WEBHOOK_SECRET
+# The key path is a fixed location in the pr-agent home, not a secret.
+[Unit]
+Description=PR-Agent queue worker (Bun/TypeScript, re-implementation)
+After=network-online.target
+Requires=network-online.target
+
+[Service]
+Type=oneshot
+User=pr-agent
+Group=pr-agent
+WorkingDirectory=/opt/pr-agent-worker
+Environment=HOME=/var/lib/pr-agent-server
+Environment=PR_AGENT_APP_DIR=/var/lib/pr-agent-server
+Environment=PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem
+Environment=PR_AGENT_WEBHOOK_URL=https://pr-agent.asepharyana.my.id/api/v1/github_webhooks
+# `systemd-run`-style hardening: this job holds a GitHub App key and a webhook
+# secret in its environment, so nothing it spawns may gain privileges.
+NoNewPrivileges=true
+PrivateTmp=true
+# Bun writes its cache/transpile output; keep it out of the read-only tree.
+Environment=BUN_INSTALL_CACHE_DIR=/var/lib/pr-agent-server/.bun-cache
+ExecStart=/usr/local/bin/bws-exec pr-agent env PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem /opt/pr-agent-worker/run-worker.sh
