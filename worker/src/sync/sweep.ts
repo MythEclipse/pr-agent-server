@@ -21,7 +21,16 @@ import type { RepoOverrides, SyncConfig, SyncState } from "./config";
 import { syncOpenPr, upstreamStatus } from "./repos";
 import type { SyncRequest, SyncResult, SyncForkDeps } from "./run";
 
-/** Discord colour for a skip alert; matches `run.ts`. */
+/**
+ * Python's `post_sync_discord(title, lines, color=0x5865F2)` default (line 1036).
+ * The Python had it as a DEFAULT PARAMETER, not a named constant, so the port
+ * spells it at the call site; naming it here is for the reader, and the two
+ * uses in this file are the two Python call sites that pass it explicitly
+ * (lines 1789 and 1815).
+ */
+const DISCORD_COLOR = 0x5865f2;
+
+/** Python line 1820's amber for a skipped fork. */
 const SKIP_COLOR = 0xe67e22;
 
 /** What the outcome reporter needs to build its line and its Discord post. */
@@ -196,7 +205,7 @@ async function reportOutcome(
           detail ? `— ${detail}` : "",
           `https://github.com/${fork}`,
         ],
-        0x5865f2,
+        DISCORD_COLOR,
       );
     }
   } else if (res === "pr-opened") {
