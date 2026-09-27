@@ -1,8 +1,17 @@
 name: Build & Deploy (Bun)
 
+# Deploy is MANUAL-ONLY while the Python-to-Bun worker cut-over is in flight.
+#
+# This host IS the deploy target ($VPS_HOST == this machine, root-owned
+# /opt/pr-agent-server, sudo without a password), so an automatic push-to-main
+# deploy would overwrite the LIVE pr-agent-bun binary and restart the running
+# GitHub webhook receiver. The worker's own state is on disk, not in that
+# binary, so the worker cut-over does not require deploying the server.
+#
+# To restore automatic deploys after the cut-over settles, add back:
+#     push:
+#       branches: [main]
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
