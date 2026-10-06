@@ -84,6 +84,12 @@ export async function mergePr(
       // not be reported as the App's 403.
       return api.request("PUT", path, { token: pat, json });
     }
+    // No PAT means the returned 403 is the App's refusal alone, and the caller
+    // cannot tell that from a 403 the owner token also received — which is how
+    // a missing `gh auth token` reads as a GitHub policy block.
+    console.error(
+      `[merge] ${repo}#${pr}: HTTP 403 and \`gh auth token\` returned nothing — the owner retry did not run, so this is the App's refusal alone`,
+    );
   }
   return { status: first.status, data: first.data };
 }

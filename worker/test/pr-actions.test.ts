@@ -1013,6 +1013,24 @@ describe("mergePr — the non-403 paths", () => {
     expect(calls).toHaveLength(1);
   });
 
+  // With no owner token the retry cannot run, so the caller is shown the App's
+  // refusal alone. That distinction is invisible in the returned pair — say it
+  // in the journal, where the next person diagnosing a 403 will find it.
+  test("a 403 with no PAT states that the owner retry could not run", async () => {
+    const { api } = fakeApi(() => ({ status: 403, data: { message: "denied" } }));
+    const logged: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => logged.push(args);
+    try {
+      await mergePr({ fetchGhToken: () => "" }, api, "appTok", REPO, PR, "sha");
+    } finally {
+      console.error = originalError;
+    }
+    const message = logged.flat().map(String).join(" ");
+    expect(message).toContain(`${REPO}#${PR}`);
+    expect(message).toContain("gh auth token");
+  });
+
   test("a 405 is never retried", async () => {
     const { api, calls } = fakeApi(() => ({ status: 405, data: { message: "not mergeable" } }));
     let asked = 0;
