@@ -79,9 +79,26 @@ jobs:
             sudo chown root:root /opt/pr-agent-server/bin/pr-agent-bun
             sudo chmod 755 /opt/pr-agent-server/bin/pr-agent-bun
             sudo systemctl restart pr-agent-bun.service
-            sleep 3
-            systemctl is-active pr-agent-bun.service
-            curl -fsS http://127.0.0.1:4023/health
+
+            # systemd says "active" as soon as the process is up; the socket
+            # comes later (config load, provider calls, a cold 40MB binary).
+            # One sleep + one curl measured the wrong thing and let a slow start
+            # read as a broken deploy. Poll instead, then say exactly what is
+            # listening so the next failure diagnoses itself.
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:4023/health; then
+                echo " health ok after ${i}s"
+                exit 0
+              fi
+              sleep 1
+            done
+
+            echo "=== health never answered on :4023 ==="
+            systemctl is-active pr-agent-bun.service || true
+            ss -ltnp 2>/dev/null | grep -E ":(4023|3000) " || echo "(nothing listening on 4023 or 3000)"
+            systemctl show pr-agent-bun.service -p Environment -p MainPID -p ExecMainStatus || true
+            journalctl -u pr-agent-bun.service --no-pager -n 60 || true
+            exit 1
           '
           echo "✅ pr-agent-bun deployed"
 
