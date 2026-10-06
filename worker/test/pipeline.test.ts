@@ -860,8 +860,12 @@ describe("the lock is released on every exit", () => {
     const deps = {
       ...harness({ throwOn: (p) => p.includes("/pulls?") }).deps,
       lock: {
-        acquire: (path: string) => {
-          const lock = WorkerLock.acquire(path);
+        // Claim THIS test's lock file, never the `LOCK_FILE` the tick passes in:
+        // /tmp/pr-queue-worker.lock belongs to the live worker, so claiming it
+        // races the 5-minute timer — and the two assertions below then check a
+        // file nothing ever created.
+        acquire: () => {
+          const lock = WorkerLock.acquire(lockPath);
           if (!lock) return null;
           return {
             release: () => {
