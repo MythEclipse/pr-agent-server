@@ -304,9 +304,23 @@ describe("ci gate — messages and guard", () => {
     );
     expect(r).toEqual({ ok: true, msg: "✅ 2 checks green" });
   });
-  test("a transport failure (status 0, empty data) is treated as no CI", async () => {
+  test("a transport failure is reported as unknown, never as 'no CI'", async () => {
     const r = await checkCiPassed({ request: async () => ({ status: 0, data: {} }) }, "t", "o/r", "sha");
-    expect(r).toEqual({ ok: true, msg: "✅ No CI configured — skipping CI gate" });
+    expect(r).toEqual({ ok: false, unknown: true, msg: "⚠️ CI status unavailable (HTTP 0)" });
+  });
+  test("a 500 with an unparseable body is reported as unknown", async () => {
+    const r = await checkCiPassed({ request: async () => ({ status: 500, data: {} }) }, "t", "o/r", "sha");
+    expect(r).toEqual({ ok: false, unknown: true, msg: "⚠️ CI status unavailable (HTTP 500)" });
+  });
+  test("an error envelope never reaches the 'no CI configured' pass", async () => {
+    const r = await checkCiPassed(
+      { request: async () => ({ status: 403, data: { message: "Bad credentials" } }) },
+      "t",
+      "o/r",
+      "sha",
+    );
+    expect(r.ok).toBe(false);
+    expect(r.unknown).toBe(true);
   });
   test("a non-object body is treated as no CI", async () => {
     const r = await checkCiPassed({ request: async () => ({ status: 200, data: null }) }, "t", "o/r", "sha");

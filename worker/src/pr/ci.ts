@@ -22,8 +22,13 @@ import type { GhClient } from "./scan";
 /** Python `STALE_CI_CLOSE_DAYS` (line 586) — used in the close comment. */
 export const STALE_CI_CLOSE_DAYS = 2;
 
-/** Python's `(ok, msg)` pair, as an object. */
-export type CiResult = { ok: boolean; msg: string };
+/**
+ * Python's `(ok, msg)` pair, as an object. `unknown` is the port's addition: it
+ * separates "CI is red" from "we could not read CI", which the Python collapsed
+ * into one `ok` and which the caller must branch on — `unknown` waits, red
+ * closes a stale Dependabot PR.
+ */
+export type CiResult = { ok: boolean; msg: string; unknown?: boolean };
 
 /**
  * Python's `(status, comment_status)` pair from `close_stale_ci_pr` (line 580).
@@ -47,9 +52,15 @@ const joinNames = (checks: any[]): string =>
  *
  * No CI CONFIGURED is a pass, not a failure: a repo with no checks has nothing
  * to wait for, and blocking it would wedge the worker on a PR that can never
- * turn green. That also means a failed `request` (status 0, `data: {}` per
- * github.ts) reads as "no CI configured" — the Python behaves the same way,
- * because it keys off the data, not the status.
+ * turn green. That reading is only safe for a request that SUCCEEDED. The
+ * Python answered a failed `request` (status 0, `data: {}` per github.ts) the
+ * same way as an empty one — it keyed off the data, not the status — and this
+ * port copied that, until GitHub's 2026-10-07 incident made the aliasing
+ * expensive: every `/check-runs` call came back 500, `check_runs` read empty,
+ * the gate said "No CI configured", and two red Dependabot PRs walked all the
+ * way to `stepMerge`. A non-200 now returns `unknown` instead, which the caller
+ * treats as "we do not know" — never as green, and never as a reason to close
+ * the PR either, because the CI verdict is the very thing that is missing.
  *
  * The check list is read defensively: `data.get("check_runs", [])` only works
  * on a dict, and the Python guards that with `isinstance(data, dict)`. The
@@ -62,13 +73,19 @@ export async function checkCiPassed(
   repo: string,
   sha: string,
 ): Promise<CiResult> {
-  const { data } = await api.request("GET", `/repos/${repo}/commits/${sha}/check-runs`, { token });
+  const { status, data } = await api.request("GET", `/repos/${repo}/commits/${sha}/check-runs`, { token });
   const checks =
     data !== null && typeof data === "object" && Array.isArray((data as any).check_runs)
       ? ((data as any).check_runs as any[])
       : [];
 
-  if (!checks.length) return { ok: true, msg: "✅ No CI configured — skipping CI gate" }; // line 399
+  if (!checks.length) {
+    // Only a 200 proves "this repo has no checks". A non-200 — the transport
+    // sentinel, a 5xx, an error envelope — means we could not read the gate,
+    // and green would be a guess.
+    if (status !== 200) return { ok: false, unknown: true, msg: `⚠️ CI status unavailable (HTTP ${status})` };
+    return { ok: true, msg: "✅ No CI configured — skipping CI gate" }; // line 399
+  }
 
   // Python lines 400-405. `conclusion === "failure"` only — a cancelled or
   // timed-out run is NOT a failure here, it is pending, and the two produce
