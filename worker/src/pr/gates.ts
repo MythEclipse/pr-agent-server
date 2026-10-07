@@ -108,6 +108,13 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 
   const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha);
   deps.report.push(`   🧪 CI: ${ci.msg}`);
+  // An unreadable gate is not a green one, and it must stop BEFORE the stale
+  // branch below — otherwise "we do not know" gets answered with a close.
+  if (ci.unknown) {
+    deps.report.push("   ⏳ CI unknown — not merging on an unverified gate; will retry next tick");
+    c.out.skipped = true;
+    return true;
+  }
   if (ci.ok) return false;
 
   // A dependabot bump stuck on red CI for days will never pass (it is
@@ -137,6 +144,15 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 }
 
 // ── STEP E — approve + merge (2110-2170) ────────────────────────────────────
+
+/**
+ * The cause of a RETRYABLE merge failure — GitHub's own 5xx, or no answer at
+ * all (`0`) — or `null` when the answer is a refusal the next tick cannot fix.
+ */
+const transientMergeCause = (status: number): string | null => {
+  if (status === 0) return "no response from GitHub";
+  return status >= 500 ? `GitHub HTTP ${status}` : null;
+};
 
 /** True when the PR merged. */
 export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Promise<boolean> {
@@ -172,6 +188,22 @@ export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Pro
     // one-attempt resolve as the 2066 gate, and equally not retried.
     deps.report.push("   ⚠️  Merge conflict");
     await resolveConflict(deps, c, already, "   🔄 Will re-merge next tick after CI settles", false);
+    return false;
+  }
+  // An outage is not a refusal: the next tick retries it, so calling this a
+  // failed review — what GitHub's 2026-10-07 incident produced four times over —
+  // would tell the operator that work was rejected when nothing was decided.
+  const cause = transientMergeCause(status);
+  if (cause) {
+    deps.report.push(`   ⚠️  Merge deferred: ${cause} — will retry next tick`);
+    await deps.notify(
+      c.repo,
+      c.prNum,
+      "retry",
+      `Merge deferred: ${cause} (transient) — will retry next tick`,
+      c.score,
+      url,
+    );
     return false;
   }
   deps.report.push(`   ⚠️  Merge: HTTP ${status}`);

@@ -142,6 +142,9 @@ type Options = {
   throwOn?: (path: string) => boolean;
   /** `POST /pulls/:n/merge` reply. */
   merge?: Route;
+  /** `GET /repos/:r/commits/:s/check-runs` reply — set it to a non-200 to
+   *  model an API that cannot answer the gate. */
+  checkRunsReply?: Route;
   /** `GET /pulls/:n` (the re-validation + head re-fetch) reply. */
   pullReply?: Route;
   /** `--dry`: start the deps in dry mode, so the effects are suppressed. */
@@ -175,6 +178,7 @@ function harness(opts: Options = {}): Harness {
   const checkRuns = opts.checkRuns ?? [{ name: "build", status: "completed", conclusion: "success" }];
   const repoMeta = opts.repoMeta ?? { status: 200, data: { full_name: REPO, fork: false, default_branch: "main" } };
   const merge = opts.merge ?? { status: 200, data: { sha: "c0ffee" } };
+  const checkRunsReply = opts.checkRunsReply;
   const pullReply = opts.pullReply;
   const agentReplies = [...(opts.agent ?? [{ ok: true, snippet: "done" }])];
   const fixState: FixState = opts.fixState ?? {};
@@ -191,7 +195,7 @@ function harness(opts: Options = {}): Harness {
       if (/\/pulls\?/.test(path)) return { status: 200, data: prs };
       if (path === `/repos/${REPO}`) return repoMeta;
       if (/\/issues\/\d+\/comments$/.test(path)) return { status: 200, data: comments };
-      if (/\/check-runs$/.test(path)) return { status: 200, data: { check_runs: checkRuns } };
+      if (/\/check-runs$/.test(path)) return checkRunsReply ?? { status: 200, data: { check_runs: checkRuns } };
       if (/\/git\/trees\/.*recursive/.test(path)) {
         const tree = opts.hasBunLock === false
           ? [{ path: "package.json" }, { path: "uv.lock" }]
@@ -729,6 +733,55 @@ describe("runTick frames the report and counts the four booleans", () => {
     const h = harness({ prs: [] });
     const lines = await runTick(h.deps);
     expect(lines).toEqual([]);
+  });
+});
+
+describe("the gate fails closed when GitHub cannot answer, and a 5xx merge retries", () => {
+  test("a 500 on /check-runs stops the PR without approving or merging", async () => {
+    const h = harness({
+      prs: [makePr()],
+      comments: [reviewComment(SAFE_REVIEW)],
+      fixState: { [REPO]: { [String(PR_NUM)]: { sha: HEAD, notified: false } } },
+      checkRunsReply: { status: 500, data: {} },
+    });
+
+    const out = await processPr(h.deps, ctx);
+
+    expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true });
+    expect(approves(h.calls)).toBe(0);
+    expect(merges(h.calls)).toBe(0);
+    expect(h.lines).toContain("   🧪 CI: ⚠️ CI status unavailable (HTTP 500)");
+    expect(h.lines).toContain("   ⏳ CI unknown — not merging on an unverified gate; will retry next tick");
+    expect(h.notifies).toEqual([]);
+  });
+
+  test("a merge answered with 500 notifies as a retry, not as a review failure", async () => {
+    const h = harness({
+      comments: [reviewComment(SAFE_REVIEW)],
+      fixState: { [REPO]: { [String(PR_NUM)]: { sha: HEAD } } },
+      merge: { status: 500, data: {} },
+    });
+
+    const out = await processPr(h.deps, ctx);
+
+    expect(out.merged).toBe(false);
+    expect(h.lines).toContain("   ⚠️  Merge deferred: GitHub HTTP 500 — will retry next tick");
+    expect(h.notifies.map((n) => n.status)).toEqual(["retry"]);
+    expect(h.notifies[0].summary).toContain("transient");
+  });
+
+  test("a real refusal still notifies as a failure", async () => {
+    const h = harness({
+      comments: [reviewComment(SAFE_REVIEW)],
+      fixState: { [REPO]: { [String(PR_NUM)]: { sha: HEAD } } },
+      merge: { status: 403, data: { message: "refusing to allow a GitHub App to update a workflow" } },
+    });
+
+    const out = await processPr(h.deps, ctx);
+
+    expect(out.merged).toBe(false);
+    expect(h.notifies.map((n) => n.status)).toEqual(["failed"]);
+    expect(h.notifies[0].summary).toContain("Merge failed HTTP 403");
   });
 });
 
