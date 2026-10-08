@@ -160,6 +160,11 @@ jobs:
         run: |
           scp -o StrictHostKeyChecking=accept-new /tmp/pkg-api.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-api.tar.gz"
           scp -o StrictHostKeyChecking=accept-new /tmp/pkg-worker.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-worker.tar.gz"
+          # The unit is a plain file, not part of either tarball, so it needs its
+          # own scp. Without this the `if [ -f … ]` install below never matched
+          # and the restart was skipped with a warning that read like a
+          # non-event rather than a missing file.
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-pr-agent-server.service "$VPS_USER@$VPS_HOST:/tmp/pkg-pr-agent-server.service"
           ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" <<'REMOTE'
           set -euo pipefail
 
@@ -253,17 +258,24 @@ jobs:
           fi
 
           # --- the PR worker -------------------------------------------------
-          # Deliberately NOT sudo'd: /opt/pr-agent-worker is pr-agent-owned and
-          # the unprivileged deploy user writes it directly.
+          # sudo, against the earlier comment on this block that said not to:
+          # /opt/pr-agent-worker is pr-agent-owned 0755 and the deploy user is
+          # `code`, so unprivileged `rm` of package.json and run-worker.sh fails
+          # with "Permission denied" and `set -e` kills the deploy. sudo is the
+          # fix; chown'ing to the deploy user would be worse, since the worker
+          # units run as pr-agent and would then lose write access.
           cd /opt/pr-agent-worker
-          rm -rf dist package.json run-worker.sh
+          sudo -n rm -rf dist package.json run-worker.sh
           mkdir -p /tmp/pkg-worker.new
           tar -xzf /tmp/pkg-worker.tar.gz -C /tmp/pkg-worker.new
           for item in dist package.json run-worker.sh; do
-            mv "/tmp/pkg-worker.new/$item" ./"$item"
+            sudo -n mv "/tmp/pkg-worker.new/$item" ./"$item"
           done
-          chmod +x /opt/pr-agent-worker/run-worker.sh
+          # Back to pr-agent, matching User= in the worker units.
+          sudo -n chown -R pr-agent:pr-agent /opt/pr-agent-worker
+          sudo -n chmod +x /opt/pr-agent-worker/run-worker.sh
           rm -rf /tmp/pkg-worker.new /tmp/pkg-worker.tar.gz
+          rm -f /tmp/pkg-pr-agent-server.service
 
           sudo -n systemctl restart pr-agent-worker.timer
           sudo -n systemctl restart pr-agent-sync-hooks.timer
