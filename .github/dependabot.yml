@@ -1,39 +1,25 @@
 version: 2
 updates:
-  - package-ecosystem: "npm"
-    directory: "/"
+  # The old config pointed at `directory: "/"` with no root package.json, and
+  # at three /services/* directories that have never existed here — so
+  # Dependabot was silently updating nothing. It now covers the workspace.
+  - package-ecosystem: npm
+    directory: /
     schedule:
-      interval: "daily"
-    labels: ["dependencies"]
+      interval: daily
+    labels: [dependencies]
     groups:
-      production:
-        dependency-type: "production"
-      development:
-        dependency-type: "development"
+      production-dependencies:
+        dependency-type: production
+      development-dependencies:
+        dependency-type: development
+    open-pull-requests-limit: 10
 
-  - package-ecosystem: "npm"
-    directory: "/services/backend"
+  - package-ecosystem: github-actions
+    directory: /
     schedule:
-      interval: "daily"
-    labels: ["dependencies"]
+      interval: weekly
+    labels: [dependencies]
     groups:
-      production:
-        dependency-type: "production"
-
-  - package-ecosystem: "npm"
-    directory: "/services/discord-gateway"
-    schedule:
-      interval: "daily"
-    labels: ["dependencies"]
-    groups:
-      production:
-        dependency-type: "production"
-
-  - package-ecosystem: "npm"
-    directory: "/services/frontend"
-    schedule:
-      interval: "daily"
-    labels: ["dependencies"]
-    groups:
-      production:
-        dependency-type: "production"
+      actions:
+        patterns: ['*']

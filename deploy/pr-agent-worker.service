@@ -1,4 +1,4 @@
-# PR-Agent queue worker — the 5-minute PR loop, Bun/TypeScript.
+# PR-Agent queue worker — the 5-minute PR loop, Node/TypeScript.
 #
 # TIMER, NOT SERVICE: this is a periodic job, not a daemon. The unit below is
 # `oneshot` and the .timer is what drives it. A long-running service would be the
@@ -7,7 +7,7 @@
 #
 # DEPLOY TARGET: /opt/pr-agent-worker, NOT the repo worktree. The pr-agent user
 # cannot read /home/code (mode 750), so running it from a checkout is impossible.
-# `deploy-worker.sh` rsyncs the worker's src/ + test/ here on every change.
+# `deploy.yml` ships the compiled dist/ here on every change.
 #
 # SECRETS: bws-exec `pr-agent` is the same app the webhook server uses. The
 # worker needs the App id and the App private key, which already exist there under
@@ -16,7 +16,7 @@
 #   GITHUB_WEBHOOK_SECRET -> PR_AGENT_WEBHOOK_SECRET
 # The key path is a fixed location in the pr-agent home, not a secret.
 [Unit]
-Description=PR-Agent queue worker (Bun/TypeScript, re-implementation)
+Description=PR-Agent queue worker (Node/TypeScript, re-implementation)
 After=network-online.target
 Requires=network-online.target
 
@@ -47,5 +47,5 @@ PrivateTmp=false
 # which changes the on-disk contract with the old Python reader -- an
 # operator decision, not something to do silently here.
 # Bun writes its cache/transpile output; keep it out of the read-only tree.
-Environment=BUN_INSTALL_CACHE_DIR=/var/lib/pr-agent-server/.bun-cache
+Environment=NODE_ENV=production
 ExecStart=/usr/local/bin/bws-exec pr-agent env PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem /opt/pr-agent-worker/run-worker.sh

@@ -1,4 +1,13 @@
-name: Build & Deploy (Bun)
+name: Build & Deploy
+
+# Ships node dist/ instead of the old `bun build --compile` binary, and keeps
+# the deploy mechanics that already worked: SSH, a systemd unit, and a health
+# poll on :4023. The previous tree is kept as `.prev` so a bad deploy can be
+# rolled back by hand.
+#
+# The first Node deploy is manual-only (workflow_dispatch). Re-enable the push
+# trigger in the commented block below once the box has run node dist/ through
+# a few clean restarts.
 
 on:
   push:
@@ -9,114 +18,138 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
-permissions:
-  contents: read
-  id-token: write
-
-env:
-  VPS_HOST: ${{ secrets.VPS_HOST }}
-  VPS_USER: ${{ secrets.VPS_USER }}
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
         with:
-          bun-version: 1.3.14
+          version: 10.33.2
 
-      - name: Typecheck + tests (worker)
-        # The 5-minute PR worker runs on the cron timer, NOT in this binary, so
-        # nothing else in this workflow would ever catch a break in it. Before
-        # the cut-over the worker had no CI at all; this is the gate that keeps
-        # the code the timer actually executes honest.
-        working-directory: worker
-        run: |
-          bun install --frozen-lockfile
-          bunx tsc --noEmit
-          bun test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          cache: pnpm
 
-      - name: Typecheck + tests
-        working-directory: server
-        run: |
-          bun install --frozen-lockfile
-          bunx tsc --noEmit
-          bun test
+      - name: Install
+        run: pnpm install --frozen-lockfile
 
-      - name: Build single binary
-        working-directory: server
+      # The same gates ci.yml runs, so a red build never reaches the VPS.
+      - name: Lint
+        run: pnpm exec biome check .
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm -C apps/api test && pnpm -C apps/worker test
+
+      - name: Build
+        run: pnpm run build
+
+      # `pnpm deploy` writes a self-contained node_modules, so the box needs no
+      # pnpm and the installed tree is exactly what CI resolved.
+      - name: Package the API
+        run: pnpm -C apps/api deploy --prod /tmp/pkg-api
+
+      - name: Add the API runtime files
         run: |
-          bun build --compile src/main.ts --outfile pr-agent-bun
-          ls -lh pr-agent-bun
+          cp -r apps/api/drizzle /tmp/pkg-api/drizzle
+          cp -r apps/web/dist /tmp/pkg-api/web-dist
+
+      - name: Package the worker
+        run: |
+          mkdir -p /tmp/pkg-worker
+          cp -r apps/worker/dist /tmp/pkg-worker/dist
+          cp apps/worker/package.json /tmp/pkg-worker/package.json
+          cp apps/worker/run-worker.sh /tmp/pkg-worker/run-worker.sh
+          chmod +x /tmp/pkg-worker/run-worker.sh
 
       - name: Setup SSH key
         env:
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          sed -i 's/\r$//' ~/.ssh/id_ed25519
-          ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1 || { echo "SSH key invalid"; exit 1; }
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
 
-      - name: Deploy to VPS
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          echo "=== Uploading pr-agent-bun binary ==="
-          scp server/pr-agent-bun "$VPS_USER@$VPS_HOST:/tmp/pr-agent-bun.new"
+          scp -r /tmp/pkg-api "$VPS_USER@$VPS_HOST:/tmp/pkg-api.new"
+          scp -r /tmp/pkg-worker "$VPS_USER@$VPS_HOST:/tmp/pkg-worker.new"
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" <<'REMOTE'
+          set -euo pipefail
 
-          echo "=== Staging swap + restart ==="
-          ssh "$VPS_USER@$VPS_HOST" '
-            set -e
-            sudo cp /opt/pr-agent-server/bin/pr-agent-bun /opt/pr-agent-server/bin/pr-agent-bun.prev
-            sudo mv /tmp/pr-agent-bun.new /opt/pr-agent-server/bin/pr-agent-bun
-            sudo chown root:root /opt/pr-agent-server/bin/pr-agent-bun
-            sudo chmod 755 /opt/pr-agent-server/bin/pr-agent-bun
-            sudo systemctl restart pr-agent-bun.service
+          # --- the webhook server -------------------------------------------
+          cd /opt/pr-agent-server
+          rm -rf .prev && mkdir -p .prev
+          for item in dist node_modules drizzle web-dist package.json; do
+            [ -e "$item" ] && cp -r "$item" .prev/ || true
+          done
+          rm -rf dist node_modules drizzle web-dist package.json
+          for item in dist node_modules drizzle web-dist package.json; do
+            mv "/tmp/pkg-api.new/$item" ./"$item"
+          done
+          chmod -R a+rX /opt/pr-agent-server
+          rm -rf /tmp/pkg-api.new
 
-            # systemd says "active" as soon as the process is up; the socket
-            # comes later (config load, provider calls, a cold 40MB binary).
-            # One sleep + one curl measured the wrong thing and let a slow start
-            # read as a broken deploy. Poll instead, then say exactly what is
-            # listening so the next failure diagnoses itself.
-            for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:4023/health; then
-                echo " health ok after ${i}s"
-                exit 0
-              fi
-              sleep 1
-            done
+          # Migrations run as their own step, decoupled from application boot,
+          # so a schema rollback and a code rollback stay independent.
+          /opt/node/bin/node /opt/pr-agent-server/dist/migrate.js
 
-            echo "=== health never answered on :4023 ==="
-            systemctl is-active pr-agent-bun.service || true
-            ss -ltnp 2>/dev/null | grep -E ":(4023|3000) " || echo "(nothing listening on 4023 or 3000)"
-            systemctl show pr-agent-bun.service -p Environment -p MainPID -p ExecMainStatus || true
-            journalctl -u pr-agent-bun.service --no-pager -n 60 || true
-            exit 1
-          '
-          echo "✅ pr-agent-bun deployed"
+          systemctl restart pr-agent-server.service
+
+          # --- the PR worker -------------------------------------------------
+          cd /opt/pr-agent-worker
+          rm -rf dist package.json run-worker.sh
+          for item in dist package.json run-worker.sh; do
+            mv "/tmp/pkg-worker.new/$item" ./"$item"
+          done
+          chmod +x /opt/pr-agent-worker/run-worker.sh
+          rm -rf /tmp/pkg-worker.new
+
+          systemctl restart pr-agent-worker.timer
+          systemctl restart pr-agent-sync-hooks.timer
+          REMOTE
+
+      # Same poll the old workflow used, on the same port: the health watchdog
+      # and the systemd unit both expect :4023/health.
+      - name: Wait for health
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          for i in $(seq 1 30); do
+            if ssh "$VPS_USER@$VPS_HOST" "curl -fsS -m 2 http://127.0.0.1:4023/health" 2>/dev/null; then
+              echo "healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::service did not become healthy; diagnostics follow"
+          ssh "$VPS_USER@$VPS_HOST" 'systemctl is-active pr-agent-server.service || true; ss -ltnp | grep -E ":(4023|3000)" || true; systemctl show -p Environment -p MainPID -p ExecMainStatus pr-agent-server.service || true; journalctl -u pr-agent-server.service -n 60 || true'
+          exit 1
 
   cleanup:
-    # Bersihkan sampah Nix di VPS SETELAH deploy: hapus generasi profile lama
-    # + nix store gc. Profil yang sedang dipakai tidak disentuh.
     needs: build-and-deploy
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Nix GC on VPS
+      - uses: actions/checkout@v7
+      - name: Reap leftover Nix store entries
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          ssh "$VPS_USER@$VPS_HOST" "sudo /usr/local/bin/nix-gc-vps.sh" || echo "⚠️ Nix GC gagal (non-fatal)"
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          # Non-fatal: the runtime no longer depends on Nix.
+          ssh "$VPS_USER@$VPS_HOST" 'sudo /usr/local/bin/nix-gc-vps.sh' || true

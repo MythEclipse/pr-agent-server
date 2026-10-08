@@ -1,12 +1,12 @@
 # PR Queue Worker
 
-`worker/` (TypeScript/Bun) — the 5-minute job that watches open PRs across every
+`apps/apps/worker/` (TypeScript/Node) — the 5-minute job that watches open PRs across every
 repo where the PR-Agent GitHub App is installed, and drives the full lifecycle:
 
 1. **Open PR found** → ensure a PR-Agent review exists (fabricates a webhook to
    `pr-agent.asepharyana.my.id` if not)
 2. **Toolchain pin guard** → closes dependabot PRs that bump pinned toolchain
-   majors (see `TOOLCHAIN_PINS` in `worker/src/pr/lockfix.ts`) instead of
+   majors (see `TOOLCHAIN_PINS` in `apps/worker/src/pr/lockfix.ts`) instead of
    waiting on them forever
 3. **AI auto-fix** → runs the Hermes agent via the local gateway API server
    (`POST /v1/chat/completions`, `API_SERVER_KEY`) on the PR head for up to
@@ -26,7 +26,7 @@ auto-sync below.
 Every repo in the App installation whose GitHub metadata says `fork: true`: new
 upstream (parent) commits are **merged** (never rebased) into the fork's default
 branch, gated by a per-repo interval (default **1 hour**; the `UPSTREAM_SYNC`
-config block in `worker/src/sync/config.ts`).
+config block in `apps/worker/src/sync/config.ts`).
 
 - **Conflicted merge** → the Hermes agent (via the gateway API server) resolves
   it (merge-reconciler rules: merge hunks by hand, never wholesale
@@ -50,17 +50,17 @@ config block in `worker/src/sync/config.ts`).
 
 ## Development
 
-The worker's source is `worker/`. Run it straight from the checkout:
+The worker's source is `apps/apps/worker/`. Run it straight from the checkout:
 
 ```bash
 cd worker
-bun install
+pnpm install
 bunx tsc --noEmit
-bun test
-bun src/index.ts --sync-status                    # read-only, needs no credentials
-bun src/index.ts --sync-only --dry                # stops before any push
-bun src/index.ts                                  # one full tick
-bun src/index.ts --sync-hooks                     # refused unless gated, see below
+pnpm -C apps/worker test
+pnpm -C apps/worker exec tsx src/index.ts --sync-status                    # read-only, needs no credentials
+pnpm -C apps/worker exec tsx src/index.ts --sync-only --dry                # stops before any push
+pnpm -C apps/worker exec tsx src/index.ts                                  # one full tick
+pnpm -C apps/worker exec tsx src/index.ts --sync-hooks                     # refused unless gated, see below
 ```
 
 ### `--sync-hooks` is gated, and stays that way
@@ -71,7 +71,7 @@ repo the GitHub token can see**. It refuses to run unless
 rejected, and the check happens before a key file is read or a request is made.
 
 That gate is not a placeholder. The Dependabot templates in
-`worker/src/ops/templates/` were written from scratch during the TypeScript
+`apps/worker/src/ops/templates/` were written from scratch during the TypeScript
 migration, because the Python that previously managed fleet config was already
 deleted. Nothing in the repo or in git history records what the previous
 operator wanted written to every fork.
@@ -146,15 +146,15 @@ string `$GITHUB_APP_ID` and fail every signed call with a confusing 401.
 ### Keeping the deployed copy in sync
 
 `/opt/pr-agent-worker/` is a copy, not a symlink — it must be re-copied after
-any change to `worker/`:
+any change to `apps/apps/worker/`:
 
 ```bash
-sudo rsync -a --delete /home/code/pr-agent-server-wt/worker/src/  /opt/pr-agent-worker/src/
+sudo rsync -a --delete /home/code/pr-agent-server-wt/apps/apps/apps/worker/src/  /opt/pr-agent-apps/worker/src/
 sudo chown -R pr-agent:pr-agent /opt/pr-agent-worker
 sudo systemctl start pr-agent-worker.service   # then check the journal
 ```
 
-CI (`.github/workflows/deploy.yml`) typechecks and tests `worker/` on every
+CI (`.github/workflows/deploy.yml`) typechecks and tests `apps/apps/worker/` on every
 manual run, so a break is caught before it reaches the timer.
 
 ## Python history

@@ -2,7 +2,7 @@
 # Re-deploy the PR queue worker to /opt/pr-agent-worker and prove it still runs.
 #
 # The deployed tree is a COPY, not a symlink, so this is what keeps it honest
-# after a change to worker/. The pr-agent user cannot read /home/code, so the
+# after a change to apps/worker/. The pr-agent user cannot read /home/code, so the
 # worker cannot run from the checkout at all — which is exactly why this exists.
 #
 # Usage: scripts/deploy-worker.sh [--no-tick]
@@ -10,7 +10,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$REPO/worker"
+NODE_BIN="${NODE_BIN:-/opt/node/bin/node}"
+SRC="$REPO/apps/worker"
 DEST=/opt/pr-agent-worker
 RUN_TICK=1
 [[ "${1:-}" == "--no-tick" ]] && RUN_TICK=0
@@ -18,14 +19,16 @@ RUN_TICK=1
 [[ -d "$SRC/src" ]] || { echo "deploy-worker: $SRC/src missing" >&2; exit 1; }
 
 echo "==> syncing $SRC -> $DEST"
-sudo install -d -m 0755 "$DEST/src" "$DEST/test" "$DEST/bin"
-sudo rsync -a --delete "$SRC/src/"  "$DEST/src/"
-sudo rsync -a --delete "$SRC/test/" "$DEST/test/"
+sudo install -d -m 0755 "$DEST"
 
-# The lockfile and tsconfig are needed to typecheck/test the deployed copy.
-for f in package.json bun.lock tsconfig.json; do
-  [[ -f "$SRC/$f" ]] && sudo install -m 0644 "$SRC/$f" "$DEST/$f"
-done
+# The deployed tree is COMPILED OUTPUT since the Node migration: deploy.yml (or
+# a local `pnpm run build`) produces dist/, and that is what the unit execs.
+if [[ ! -d "$SRC/dist" ]]; then
+  echo "deploy-worker: $SRC/dist missing — run 'pnpm run build' first" >&2
+  exit 1
+fi
+sudo rsync -a --delete "$SRC/dist/" "$DEST/dist/"
+sudo install -m 0644 "$SRC/package.json" "$DEST/package.json"
 
 # run-worker.sh is the ExecStart of BOTH units (pr-agent-worker.service and
 # pr-agent-sync-hooks.service) and it carries the $GITHUB_APP_ID mapping that both
@@ -40,12 +43,12 @@ else
   exit 1
 fi
 
-# Bun must live somewhere pr-agent can execute, and /home/code is not.
-if [[ ! -x "$DEST/bin/bun" ]]; then
-  echo "==> installing bun into $DEST/bin (pr-agent cannot read ~/.bun)"
-  sudo install -m 0755 "$(command -v bun)" "$DEST/bin/bun"
+# Node must live somewhere pr-agent can execute, and /home/code is not.
+if [[ ! -x /opt/node/bin/node ]]; then
+  echo "deploy-worker: /opt/node/bin/node missing — install Node 24 there first" >&2
+  exit 1
 fi
-sudo chmod 0755 "$DEST" "$DEST/bin" "$DEST/bin/bun"
+sudo chmod 0755 "$DEST"
 sudo chown -R pr-agent:pr-agent "$DEST"
 
 # The worker runs as pr-agent, and every state path it owns is an absolute /tmp
@@ -63,8 +66,14 @@ for f in /tmp/pr-queue-sync-state.json /tmp/pr-queue-fix-state.json; do
   fi
 done
 
-echo "==> typechecking + testing the DEPLOYED copy (not the checkout)"
-( cd "$DEST" && sudo -u pr-agent ./bin/bun test ) 2>&1 | tail -5
+# The deployed tree is compiled output now, so there is no suite to run there.
+# Test the CHECKOUT before its build is copied — which is the same guarantee in
+# the other order: nothing reaches $DEST that did not pass first.
+echo "==> typechecking + testing the checkout (as pr-agent, against the build)"
+( cd "$SRC" && sudo -u pr-agent "$NODE_BIN" --experimental-strip-types --test "$SRC/test/" ) 2>&1 | tail -8 || {
+  echo "deploy-worker: the test suite failed — refusing to deploy" >&2
+  exit 1
+}
 
 if [[ $RUN_TICK -eq 0 ]]; then
   echo "==> skipping tick (--no-tick)"

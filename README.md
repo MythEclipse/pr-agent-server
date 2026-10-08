@@ -1,20 +1,19 @@
 # PR-Agent Server
 
 GitHub App server for **automated PR review + auto-merge** using a custom LLM
-endpoint (9router/Omniroute). Runtime is **Bun + TypeScript**, deployed as a
+endpoint (9router/Omniroute). Runtime is **Node + TypeScript**, deployed as a
 single compiled binary.
 
 ## Architecture
 
 ```
-GitHub webhook → pr-agent-bun (Bun.serve, systemd unit, PORT=4023)
+GitHub webhook → pr-agent-server (Hono, systemd unit, PORT=4023)
     → in-process review queue (dedupe per PR, 2 concurrent)
         → review pipeline (diff → token budget → prompt → LLM)
             → 9router API (custom OpenAI-compatible endpoint)
 ```
 
-The server listens on `$PORT` (code default `3000`; the systemd unit sets
-`PORT=4023`). The only inbound webhook path is `/api/v1/github_webhooks`
+The server listens on `$PORT` (code default `4023`). The only inbound webhook path is `/api/v1/github_webhooks`
 (`POST`, HMAC-verified); `POST /setup/callback` completes the GitHub App
 manifest flow using `templates/manifest.json`.
 
@@ -22,9 +21,11 @@ manifest flow using `templates/manifest.json`.
 
 ```
 pr-agent-server/
-├── server/                  # TypeScript/Bun GitHub App server
+├── apps/api/                # Hono/oRPC GitHub App server (@pr-agent/api)
+├── apps/worker/             # 5-minute PR loop (@pr-agent/worker)
+├── apps/web/                # Review history SPA (@pr-agent/web)
 │   ├── src/
-│   │   ├── main.ts          # entry: `if (import.meta.main) startServer()`
+│   │   ├── main.ts          # Hono composition root
 │   │   ├── cli.ts           # one-shot CLI: review / describe / improve
 │   │   ├── config.ts        # env + key resolution
 │   │   ├── llm.ts           # chatCompletion + callWithFallback (retry per model)
@@ -37,14 +38,14 @@ pr-agent-server/
 │   │   ├── notify/discord.ts  # HTML→Discord plain text + webhook poster
 │   │   ├── prompts/         # review, describe, suggestions
 │   │   └── tools/           # review, describe, improve, publish
-│   ├── test/                # bun:test suites
+│   ├── test/                # Vitest suites
 │   └── e2e.ts               # live end-to-end against real GitHub + LLM
-├── scripts/                 # setup/deploy helpers + the PR queue cron worker
-│   ├── pr-queue-worker.py   # cron worker (Python today; being migrated to TS)
+├── deploy/                  # systemd units (server + worker timers)
+├── scripts/                 # setup/deploy helpers
 │   ├── smoke_hermes_api_server.py
 │   └── test_pr_queue_sync.py
 ├── templates/manifest.json  # GitHub App manifest template
-├── .github/workflows/       # deploy.yml (Bun CI), mirror-gitea.yml
+├── .github/workflows/       # ci.yml (PR gate), deploy.yml, mirror-gitea.yml
 ├── .editorconfig
 ├── .gitignore
 ├── CONTRIBUTING.md
@@ -54,7 +55,7 @@ pr-agent-server/
 ## Development
 
 ### Prerequisites
-- Bun 1.3.14+ (runtime + build)
+- Node 24.21.0+ (runtime), pnpm 10.33.2+
 - GitHub App credentials (App ID, private key, webhook secret)
 - 9router/OpenAI-compatible key for the LLM
 
@@ -62,10 +63,10 @@ pr-agent-server/
 
 ```bash
 cd server
-bun install
+pnpm install
 bunx tsc --noEmit          # typecheck
-bun test                   # unit tests (48 tests)
-bun src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
+pnpm run test               # 489 tests across apps/api and apps/worker
+pnpm -C apps/api exec tsx src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
 ```
 
 ### Run server (after setting up secrets)
@@ -74,15 +75,15 @@ bun src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
 # Secrets are resolved at startup: PR_AGENT_APP_ID, private key path,
 # omniroute key file (see src/config.ts key resolution)
 cd server
-bun src/main.ts            # starts on $PORT (code default 3000)
+pnpm -C apps/api dev            # starts on $PORT (code default 3000)
 ```
 
 ### Test tools end-to-end (real GitHub + LLM)
 
 ```bash
-bun e2e.ts --repo asepharyana/nextjs-template --pr 19 --publish
-bun src/cli.ts --tool describe --repo <owner>/<repo> --pr <n>
-bun src/cli.ts --tool improve  --repo <owner>/<repo> --pr <n>
+pnpm -C apps/api exec tsx e2e.ts --repo asepharyana/nextjs-template --pr 19 --publish
+pnpm -C apps/api exec tsx src/cli.ts --tool describe --repo <owner>/<repo> --pr <n>
+pnpm -C apps/api exec tsx src/cli.ts --tool improve  --repo <owner>/<repo> --pr <n>
 ```
 
 ## Deployment
@@ -91,7 +92,7 @@ Deploy is fully automated via GitHub Actions on push to `main`:
 
 ```yaml
 # .github/workflows/deploy.yml
-1. build-and-deploy → bun install → typecheck → tests → bun build --compile
+1. build-and-deploy → pnpm install → lint → typecheck → tests → build
    → scp binary to VPS → swap /opt/pr-agent-server/bin/pr-agent-bun
    → restart pr-agent-bun.service → health check on :4023
 2. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
@@ -121,7 +122,7 @@ Secrets required in GitHub Actions:
 
 The original Python `pr_agent` server (FastAPI + Nix build, port 4002) is fully
 retired: its systemd unit, venv, `src/*.py`, `scripts/setup_*` and flake are all
-gone from the repo. The Bun binary replaced the server end-to-end. The Python
+gone from the repo. The Node build replaced the server end-to-end. The Python
 cron worker in `scripts/` is still live in production and is being migrated to
 TypeScript.
 

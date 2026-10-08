@@ -1,0 +1,48 @@
+# PR-Agent webhook server — the GitHub App that reviews PRs.
+#
+# This unit was never committed before the Node migration (the old one lives
+# only on the box), which meant rebuilding the deploy from the repo alone could
+# not reproduce the server half. It is committed now for that reason.
+#
+# DEPLOY TARGET: /opt/pr-agent-server. The pr-agent user cannot read /home/code
+# (mode 750), so running from a checkout is impossible; deploy.yml ships the
+# compiled dist/ plus a self-contained node_modules.
+#
+# SECRETS: bws-exec `pr-agent` supplies DATABASE_URL, BETTER_AUTH_SECRET, the
+# webhook secret and the LLM key. Nothing sensitive lives in this file.
+#
+# PORT 4023 is load-bearing: the health watchdog cron and deploy.yml's poll
+# both curl http://127.0.0.1:4023/health.
+[Unit]
+Description=PR-Agent webhook server (Node/TypeScript)
+After=network-online.target
+Requires=network-online.target
+
+[Service]
+Type=simple
+User=pr-agent
+Group=pr-agent
+WorkingDirectory=/opt/pr-agent-server
+Environment=NODE_ENV=production
+Environment=PORT=4023
+# WEB_DIST_PATH is how the built SPA reaches the browser: Hono serves it and
+# falls through to index.html, so there is no second process to supervise.
+Environment=WEB_DIST_PATH=/opt/pr-agent-server/web-dist
+Environment=HOME=/var/lib/pr-agent-server
+Environment=PR_AGENT_APP_DIR=/var/lib/pr-agent-server
+Environment=PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem
+Environment=PR_AGENT_ANALYTICS_DIR=/var/lib/pr-agent-server/analytics
+# Analytics are append-only JSONL under /var/lib/pr-agent-server, and the
+# worker's /tmp/pr-queue-* state must survive a restart — so this unit needs a
+# real filesystem, not a private /tmp namespace.
+PrivateTmp=false
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/pr-agent-server /opt/pr-agent-server
+ExecStart=/usr/local/bin/bws-exec pr-agent env PORT=4023 /opt/node/bin/node /opt/pr-agent-server/dist/main.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
