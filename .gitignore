@@ -38,3 +38,6 @@ build/
 
 # Bun TS build artifacts
 *.tsbuildinfo
+
+# Vite / TanStack Router generated
+apps/web/src/routeTree.gen.ts
