@@ -69,8 +69,12 @@ done
 # The deployed tree is compiled output now, so there is no suite to run there.
 # Test the CHECKOUT before its build is copied — which is the same guarantee in
 # the other order: nothing reaches $DEST that did not pass first.
+#
+# `pnpm test`, not `node --test`. The suite moved off bun:test to Vitest in the
+# Node migration, and Node's built-in runner discovers none of it: it reported
+# success having run zero tests, so this gate was not a gate at all.
 echo "==> typechecking + testing the checkout (as pr-agent, against the build)"
-( cd "$SRC" && sudo -u pr-agent "$NODE_BIN" --experimental-strip-types --test "$SRC/test/" ) 2>&1 | tail -8 || {
+( cd "$SRC" && sudo -u pr-agent pnpm test ) 2>&1 | tail -8 || {
   echo "deploy-worker: the test suite failed — refusing to deploy" >&2
   exit 1
 }

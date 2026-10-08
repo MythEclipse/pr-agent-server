@@ -62,10 +62,10 @@ pr-agent-server/
 ### Local testing
 
 ```bash
-cd server
 pnpm install
-bunx tsc --noEmit          # typecheck
-pnpm run test               # 489 tests across apps/api and apps/worker
+pnpm exec biome check .     # lint + format
+moon run :typecheck         # tsc --noEmit across all three apps
+moon run :test              # 500 tests across apps/api and apps/worker
 pnpm -C apps/api exec tsx src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
 ```
 
@@ -74,9 +74,20 @@ pnpm -C apps/api exec tsx src/cli.ts --tool review --repo <owner>/<repo> --pr <n
 ```bash
 # Secrets are resolved at startup: PR_AGENT_APP_ID, private key path,
 # omniroute key file (see src/config.ts key resolution)
-cd server
-pnpm -C apps/api dev            # starts on $PORT (code default 3000)
+pnpm -C apps/api dev            # starts on $PORT (default 4023)
 ```
+
+### Local database (no Docker required)
+
+```bash
+node apps/api/scripts/dev-stack.mjs --port 5433
+# then: DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/postgres
+```
+
+The canonical dev database is the Postgres in `docker-compose.dev.yml`. This
+harness is the fallback for hosts without Docker: it puts PGlite — Postgres
+compiled to WASM — behind the Postgres wire protocol, so the app talks to it
+with the ordinary `pg` driver. It applies the committed migrations on start.
 
 ### Test tools end-to-end (real GitHub + LLM)
 
