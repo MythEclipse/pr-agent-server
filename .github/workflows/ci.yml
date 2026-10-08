@@ -46,6 +46,21 @@ jobs:
       - name: Lint and format
         run: pnpm exec biome check .
 
+      # No explicit route-tree step here on purpose: apps/web's `typecheck`
+      # script is `tsr generate && tsc --noEmit`, because ./routeTree.gen.ts is
+      # generated and gitignored (.gitignore:43). Only the TanStack Router vite
+      # plugin used to produce it, and that runs during build/dev — after this
+      # step — so on a fresh clone tsc failed with TS2307 on ./routeTree.gen.ts
+      # plus six follow-on TS2345 errors.
+      #
+      # Generating it in the script rather than in a workflow step keeps a fresh
+      # local clone working too: `pnpm -C apps/web typecheck` and `moon run
+      # :typecheck` both self-heal without anyone remembering a codegen step.
+      #
+      # The file stays gitignored, which is also why lint above skips it:
+      # biome.json sets vcs.useIgnoreFile, so biome honours the ignore list.
+      # Committing it instead would fail lint — biome would want to format and
+      # re-sort a file the plugin rewrites unformatted on every build.
       - name: Typecheck
         run: pnpm run typecheck
 
