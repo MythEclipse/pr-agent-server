@@ -102,10 +102,15 @@ jobs:
       - name: Package the API
         run: pnpm --filter=@pr-agent/api deploy --prod --legacy /tmp/pkg-api
 
+      # The unit travels with the packages. It was committed to the repo in 8fe99de
+      # but never shipped, which is why the box was still running
+      # pr-agent-bun.service while the deploy restarted a name systemd had never
+      # heard of.
       - name: Add the API runtime files
         run: |
           cp -r apps/api/drizzle /tmp/pkg-api/drizzle
           cp -r apps/web/dist /tmp/pkg-api/web-dist
+          cp deploy/pr-agent-server.service /tmp/pkg-pr-agent-server.service
 
       - name: Package the worker
         run: |
@@ -138,6 +143,16 @@ jobs:
       #
       # `accept-new`, not `no`: the first connection is recorded, so a host key
       # that later CHANGES still fails loudly instead of being silently accepted.
+      # Everything in the heredoc below runs under sudo. Two independent
+      # reasons, both observed on the box:
+      #   1. /opt/pr-agent-server is root:root, so the unprivileged deploy user
+      #      cannot create .prev in it — that was the "mkdir: Permission denied"
+      #      that stopped the deploy. /opt/pr-agent-worker is pr-agent-owned and
+      #      is NOT sudo'd: the worker half must keep working for the plain user.
+      #   2. systemctl restart and daemon-reload need root regardless.
+      #
+      # `sudo -n` throughout: a password prompt in a non-tty heredoc would hang
+      # until the step timed out rather than failing fast.
       - name: Deploy
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -148,28 +163,89 @@ jobs:
           ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" <<'REMOTE'
           set -euo pipefail
 
+          # --- node, for both halves ----------------------------------------
+          # The Node migration commit (8fe99de) assumed node already lived at
+          # /opt/node; nothing ever installed it and the box had none, so both
+          # `/opt/node/bin/node dist/migrate.js` and the unit's ExecStart would
+          # fail with "No such file or directory".
+          #
+          # Under /opt, not a user home: the pr-agent user cannot read /home/code
+          # (mode 750), which apps/worker/run-worker.sh also calls out.
+          NODE_VERSION=24.21.0
+          if [ ! -x /opt/node/bin/node ]; then
+            arch=$(uname -m)
+            case "$arch" in
+              x86_64) node_arch=x64 ;;
+              aarch64) node_arch=arm64 ;;
+              *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+            esac
+            echo "installing node $NODE_VERSION ($node_arch) to /opt/node"
+            curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-$node_arch.tar.xz" \
+              | sudo -n tar -xJ -C /opt
+            sudo -n ln -sfn "/opt/node-v$NODE_VERSION-linux-$node_arch" /opt/node
+          fi
+          /opt/node/bin/node --version
+
           # --- the webhook server -------------------------------------------
           cd /opt/pr-agent-server
-          rm -rf .prev && mkdir -p .prev
+          sudo -n rm -rf .prev
+          sudo -n mkdir -p .prev
           for item in dist node_modules drizzle web-dist package.json; do
-            [ -e "$item" ] && cp -a "$item" .prev/ || true
+            [ -e "$item" ] && sudo -n cp -a "$item" .prev/ || true
           done
-          rm -rf dist node_modules drizzle web-dist package.json
+          sudo -n rm -rf dist node_modules drizzle web-dist package.json
           mkdir -p /tmp/pkg-api.new
           tar -xzf /tmp/pkg-api.tar.gz -C /tmp/pkg-api.new
           for item in dist node_modules drizzle web-dist package.json; do
-            mv "/tmp/pkg-api.new/$item" ./"$item"
+            sudo -n mv "/tmp/pkg-api.new/$item" ./"$item"
           done
-          chmod -R a+rX /opt/pr-agent-server
+          sudo -n chmod -R a+rX /opt/pr-agent-server
           rm -rf /tmp/pkg-api.new /tmp/pkg-api.tar.gz
 
           # Migrations run as their own step, decoupled from application boot,
           # so a schema rollback and a code rollback stay independent.
+          #
+          # This is the step that first needs DATABASE_URL, and it is required
+          # with no default (apps/api/src/infrastructure/config/env.ts). It is
+          # NOT in the Bitwarden `pr-agent` project yet, so as of this writing
+          # this line exits non-zero — checked on the box, the vault holds
+          # neither DATABASE_URL nor BETTER_AUTH_SECRET. The explicit check
+          # below turns that into a named error instead of a zod stack trace.
+          #
+          # Migrate BEFORE the restart: a schema the new code needs but the old
+          # code lacks would take the server down on boot.
+          if [ -z "${DATABASE_URL:-}" ] && ! sudo -n -u pr-agent /usr/local/bin/bws-exec pr-agent printenv DATABASE_URL >/dev/null 2>&1; then
+            echo "::error::DATABASE_URL is not available to bws-exec pr-agent. migrate.js requires it and cannot run without it. Add it to the Bitwarden 'pr-agent' project before deploying the Node server."
+            exit 1
+          fi
           /opt/node/bin/node /opt/pr-agent-server/dist/migrate.js
 
-          systemctl restart pr-agent-server.service
+          # --- the unit ------------------------------------------------------
+          # Nothing in git history ever installed the unit (8fe99de shipped
+          # restart calls for a unit that was never placed on the box), so
+          # `systemctl restart` was a no-op against a missing unit and the
+          # running server was pr-agent-bun.service all along.
+          #
+          # Installed only when the file exists in the repo, and always
+          # daemon-reload'd, so an edited unit actually takes effect.
+          if [ -f /tmp/pkg-pr-agent-server.service ]; then
+            sudo -n install -m 644 /tmp/pkg-pr-agent-server.service \
+              /etc/systemd/system/pr-agent-server.service
+            sudo -n systemctl daemon-reload
+          fi
+
+          # Restart only if the unit is actually present. Restarting a name
+          # systemd does not know fails the step, and — more importantly — this
+          # must not pretend to have replaced the live server when it has not.
+          if sudo -n systemctl cat pr-agent-server.service >/dev/null 2>&1; then
+            sudo -n systemctl restart pr-agent-server.service
+          else
+            echo "::warning::pr-agent-server.service is not installed on this box; the server half was NOT restarted. Whatever is serving :4023 is unchanged."
+          fi
 
           # --- the PR worker -------------------------------------------------
+          # Deliberately NOT sudo'd: /opt/pr-agent-worker is pr-agent-owned and
+          # the unprivileged deploy user writes it directly.
           cd /opt/pr-agent-worker
           rm -rf dist package.json run-worker.sh
           mkdir -p /tmp/pkg-worker.new
@@ -180,8 +256,8 @@ jobs:
           chmod +x /opt/pr-agent-worker/run-worker.sh
           rm -rf /tmp/pkg-worker.new /tmp/pkg-worker.tar.gz
 
-          systemctl restart pr-agent-worker.timer
-          systemctl restart pr-agent-sync-hooks.timer
+          sudo -n systemctl restart pr-agent-worker.timer
+          sudo -n systemctl restart pr-agent-sync-hooks.timer
           REMOTE
 
       # Same poll the old workflow used, on the same port: the health watchdog
@@ -191,16 +267,33 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
+          # :4023 stays the probe — the health watchdog depends on it — but it
+          # does NOT prove the Node deploy landed. On this box something else
+          # (pr-agent-bun.service) already answered that port, so a green poll
+          # only ever meant "something answers", not "the new code serves".
+          # `systemctl is-active pr-agent-server.service` is the check that
+          # actually distinguishes the two.
           for i in $(seq 1 30); do
             if ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" "curl -fsS -m 2 http://127.0.0.1:4023/health" 2>/dev/null; then
               echo "healthy after ${i}s"
-              exit 0
+              break
             fi
             sleep 1
           done
-          echo "::error::service did not become healthy; diagnostics follow"
-          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'systemctl is-active pr-agent-server.service || true; ss -ltnp | grep -E ":(4023|3000)" || true; systemctl show -p Environment -p MainPID -p ExecMainStatus pr-agent-server.service || true; journalctl -u pr-agent-server.service -n 60 || true'
-          exit 1
+
+          # Report which process owns the port, so the log says which server is
+          # actually serving rather than leaving it ambiguous.
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'echo "--- pr-agent-server.service: $(systemctl is-active pr-agent-server.service 2>&1)"; echo "--- pr-agent-bun.service:    $(systemctl is-active pr-agent-bun.service 2>&1)"; echo "--- :4023 owner:"; sudo -n ss -ltnp 2>/dev/null | grep ":4023" || true' || true
+
+          # The cutover only counts as done when the Node unit is the one
+          # serving. If it is not, that is a real failure — silently passing
+          # here is what let the Bun/Node split go unnoticed.
+          if ! ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" "systemctl is-active --quiet pr-agent-server.service"; then
+            echo "::error::pr-agent-server.service is not active — the Node server did not take over :4023 (see which unit owns it above). The previously running server was left untouched."
+            ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'systemctl is-active pr-agent-server.service || true; ss -ltnp | grep -E ":(4023|3000)" || true; systemctl show -p Environment -p MainPID -p ExecMainStatus pr-agent-server.service || true; journalctl -u pr-agent-server.service -n 60 || true' || true
+            exit 1
+          fi
+          echo "pr-agent-server.service is active and serving :4023"
 
   cleanup:
     needs: build-and-deploy
