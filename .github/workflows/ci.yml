@@ -17,7 +17,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 — moon is a VCS-aware task runner and needs real history.
+      #
+      # On a pull_request event checkout fetches a single merge commit at depth
+      # 1, so the `main` branch ref never exists locally. moon then diffs
+      # against vcs.defaultBranch ('main' in .moon/workspace.yml) and dies with
+      # `fatal: ambiguous argument 'main': unknown revision`, exit 128 —
+      # killing the Typecheck step on every PR.
+      #
+      # Push runs were unaffected because `main` IS the checked-out branch
+      # there, which is why every green run so far was a push and the PR gate
+      # stayed red. deploy.yml already sets this for the same reason.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
