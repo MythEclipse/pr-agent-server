@@ -31,14 +31,14 @@
 	"devDependencies": {
 		"@electric-sql/pglite": "^0.5.8",
 		"@electric-sql/pglite-socket": "^0.2.11",
-		"@types/node": "^24.0.0",
+		"@types/node": "^26.6.4",
 		"@types/nunjucks": "^3.2.6",
 		"@types/pg": "^8.23.1",
 		"drizzle-kit": "^0.31.11",
 		"esbuild": "^0.28.2",
 		"tsx": "^4.20.0",
-		"typescript": "^5.9.0",
-		"vitest": "^3.2.4"
+		"typescript": "^7.0.2",
+		"vitest": "^5.0.3"
 	},
 	"exports": {
 		".": {
