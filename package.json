@@ -1,0 +1,23 @@
+{
+	"name": "pr-agent-server",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "moon run :dev",
+		"build": "moon run :build",
+		"test": "moon run :test",
+		"typecheck": "moon run :typecheck",
+		"check": "moon run :check",
+		"lint": "moon run :lint",
+		"format": "moon run :format",
+		"db:generate": "pnpm -C apps/api drizzle-kit generate",
+		"db:push": "pnpm -C apps/api drizzle-kit push",
+		"db:migrate": "pnpm -C apps/api tsx src/migrate.ts",
+		"db:seed": "pnpm -C apps/api tsx src/db/seed.ts",
+		"db:studio": "pnpm -C apps/api drizzle-kit studio"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.2.4",
+		"typescript": "^5.9.0"
+	}
+}

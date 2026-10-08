@@ -1,0 +1,23 @@
+$schema: 'https://moonrepo.dev/schemas/moon-project.json'
+
+language: 'typescript'
+
+dependsOn:
+  - 'api'
+
+tasks:
+  dev:
+    command: 'pnpm run dev'
+  build:
+    command: 'pnpm run build'
+    inputs:
+      - 'src/**'
+      - 'vite.config.ts'
+      - 'tsconfig.json'
+    outputs:
+      - 'dist/**'
+  typecheck:
+    command: 'pnpm run typecheck'
+    inputs:
+      - 'src/**'
+      - 'tsconfig.json'

@@ -12,6 +12,15 @@ __pycache__/
 *.pyc
 result
 
+# Monorepo — moon's config (.moon/workspace.yml, toolchain.yml, tasks.yml) is
+# source-controlled; only its build cache and local toolchain download are not.
+.moon/cache/
+.moon/docker/
+node_modules/
+.pnpm-store/
+
+# Drizzle / Postgres local data
+.postgres-data/
 # Packaging
 *.egg-info/
 .eggs/
