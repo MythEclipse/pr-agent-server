@@ -95,7 +95,7 @@ The worker is **deployed as a systemd timer on the VPS**, not as a cron job.
 |---|---|
 | Unit | `pr-agent-worker.service` (`Type=oneshot`) |
 | Timer | `pr-agent-worker.timer` — `OnBootSec=2min`, `OnUnitActiveSec=5min` |
-| Deployed code | `/opt/pr-agent-worker/` (`src/`, `test/`, `bin/bun`) |
+| Deployed code | `/opt/pr-agent-worker/` (`dist/`, `package.json`, `run-worker.sh`) |
 | Entrypoint | `/opt/pr-agent-worker/run-worker.sh` |
 | User | `pr-agent` |
 | Logs | `journalctl -u pr-agent-worker.service` |
@@ -111,10 +111,10 @@ sudo journalctl -u pr-agent-worker.service -f
 ```
 
 **Why `/opt` and not this checkout:** the `pr-agent` user cannot read
-`/home/code` (mode 750), so a checkout-based deploy cannot execute at all — bun
-itself lives at `/opt/pr-agent-worker/bin/bun` for the same reason. `/opt` is
-where the webhook server's binary already lives, so the two halves of this
-system share one deploy location.
+`/home/code` (mode 750), so a checkout-based deploy cannot execute at all — Node
+itself lives at `/opt/node/bin/node` for the same reason. `/opt` is where the
+webhook server's `dist/` already lives, so the two halves of this system share
+one deploy location.
 
 **Why a timer and not a cron job:** a periodic job has no reason to be resident
 between ticks. `OnUnitActiveSec` is measured from the end of the previous run,

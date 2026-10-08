@@ -22,28 +22,29 @@ manifest flow using `templates/manifest.json`.
 ```
 pr-agent-server/
 ├── apps/api/                # Hono/oRPC GitHub App server (@pr-agent/api)
-├── apps/worker/             # 5-minute PR loop (@pr-agent/worker)
-├── apps/web/                # Review history SPA (@pr-agent/web)
 │   ├── src/
-│   │   ├── main.ts          # Hono composition root
+│   │   ├── main.ts          # Hono composition root — route mounting order matters
+│   │   ├── migrate.ts       # standalone migration runner (deploy step)
 │   │   ├── cli.ts           # one-shot CLI: review / describe / improve
-│   │   ├── config.ts        # env + key resolution
-│   │   ├── llm.ts           # chatCompletion + callWithFallback (retry per model)
-│   │   ├── queue.ts         # in-process review queue: dedupe + concurrency cap
-│   │   ├── analytics.ts     # async serialized jsonl writer
-│   │   ├── core/            # token, render (templates), yaml, markdown
-│   │   ├── diff/            # hunk/extend/filter/budget/multi
-│   │   ├── github/          # client, provider, large-diff
-│   │   ├── http/            # server, webhook, notify, analytics, setup
-│   │   ├── notify/discord.ts  # HTML→Discord plain text + webhook poster
-│   │   ├── prompts/         # review, describe, suggestions
-│   │   └── tools/           # review, describe, improve, publish
+│   │   ├── domain/          # framework-free entities + port interfaces
+│   │   ├── application/     # use cases: review, webhook, queue, analytics
+│   │   ├── infrastructure/  # adapters: db, github, llm, auth, config
+│   │   ├── presentation/    # oRPC routers + the raw legacy HTTP routes
+│   │   ├── legacy/          # ported pure modules: prompts, diff, core, tools
+│   │   └── db/seed.ts       # one-shot admin seed (idempotent)
+│   ├── drizzle/             # committed migrations — the only schema a deploy applies
 │   ├── test/                # Vitest suites
 │   └── e2e.ts               # live end-to-end against real GitHub + LLM
+├── apps/worker/             # 5-minute PR loop (@pr-agent/worker)
+├── apps/web/                # Review history SPA (@pr-agent/web)
+│   └── src/
+│       ├── routes/          # TanStack Router file-based routes
+│       ├── components/ui/   # design-system primitives
+│       └── libs/{orpc,auth,tanstack-query}/
 ├── deploy/                  # systemd units (server + worker timers)
-├── scripts/                 # setup/deploy helpers
-│   ├── smoke_hermes_api_server.py
-│   └── test_pr_queue_sync.py
+├── scripts/                 # deploy helpers
+│   ├── deploy-worker.sh
+│   └── smoke_hermes_api_server.py
 ├── templates/manifest.json  # GitHub App manifest template
 ├── .github/workflows/       # ci.yml (PR gate), deploy.yml, mirror-gitea.yml
 ├── .editorconfig
@@ -73,7 +74,7 @@ pnpm -C apps/api exec tsx src/cli.ts --tool review --repo <owner>/<repo> --pr <n
 
 ```bash
 # Secrets are resolved at startup: PR_AGENT_APP_ID, private key path,
-# omniroute key file (see src/config.ts key resolution)
+# omniroute key file (see src/infrastructure/config/ key resolution)
 pnpm -C apps/api dev            # starts on $PORT (default 4023)
 ```
 
@@ -104,16 +105,18 @@ Deploy is fully automated via GitHub Actions on push to `main`:
 ```yaml
 # .github/workflows/deploy.yml
 1. build-and-deploy → pnpm install → lint → typecheck → tests → build
-   → scp binary to VPS → swap /opt/pr-agent-server/bin/pr-agent-bun
-   → restart pr-agent-bun.service → health check on :4023
+   → pnpm deploy --prod (self-contained node_modules) → tar → scp to VPS
+   → swap /opt/pr-agent-server/{dist,node_modules,drizzle,web-dist}
+   → node dist/migrate.js → restart pr-agent-server.service
+   → health check on :4023
 2. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
 ```
 
-The production server is a single compiled binary
-(`/opt/pr-agent-server/bin/pr-agent-bun`) running as a systemd service
-(`pr-agent-bun.service`, port 4023, secrets via `bws-exec pr-agent`). The
-runtime has no Nix dependency — the `cleanup` job only reaps leftover Nix
-store entries on the VPS.
+The production server is compiled output run by Node
+(`/opt/node/bin/node /opt/pr-agent-server/dist/main.js`) as a systemd service
+(`pr-agent-server.service`, port 4023, secrets via `bws-exec pr-agent`). The
+previous tree is kept as `.prev` for a manual rollback. The runtime has no Nix
+dependency — the `cleanup` job only reaps leftover Nix store entries on the VPS.
 
 Secrets required in GitHub Actions:
 - `VPS_HOST` — VPS IP address
@@ -124,18 +127,19 @@ Secrets required in GitHub Actions:
 ## Ops
 
 - **Health watchdog**: cron `pr-agent-health-watchdog` (every 10 min) → `~/.hermes/scripts/pr-agent-health-check.sh` → curl `http://127.0.0.1:4023/health`
-- **Secrets**: systemd `ExecStart=/usr/local/bin/bws-exec pr-agent env PORT=4023 /opt/pr-agent-server/bin/pr-agent-bun`
+- **Secrets**: systemd `ExecStart=/usr/local/bin/bws-exec pr-agent env PORT=4023 /opt/node/bin/node /opt/pr-agent-server/dist/main.js`
 - **Prometheus**: `GET /api/metrics` → `pr_agent_requests_total`, `pr_agent_model_failures`
 - **Analytics**: `GET /api/analytics` → JSON summary (legacy `pr-agent.*.log` + `pr-agent.bun.jsonl`)
 - **Discord**: `POST /api/v1/notify_review` → pr-agent-ops webhook
+- **API docs**: `GET /api/docs` for the oRPC surface, `/api/docs/spec` for the OpenAPI document
+- **Admin seed**: `pnpm db:seed` with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — creates the single admin the dashboard authenticates as
 
 ## Legacy (Python/Nix — retired 2026-09-21)
 
 The original Python `pr_agent` server (FastAPI + Nix build, port 4002) is fully
 retired: its systemd unit, venv, `src/*.py`, `scripts/setup_*` and flake are all
-gone from the repo. The Node build replaced the server end-to-end. The Python
-cron worker in `scripts/` is still live in production and is being migrated to
-TypeScript.
+gone from the repo. The Python cron worker was ported to TypeScript and now runs
+as `apps/worker/` on Node, from `/opt/pr-agent-worker/dist/index.js`.
 
 ## License
 

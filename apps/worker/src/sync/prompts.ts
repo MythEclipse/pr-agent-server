@@ -71,8 +71,10 @@ export function conflictPrompt(
 		"   no opportunistic fixes.\n" +
 		"4. If a file starts with a UTF-8 BOM (bytes EF BB BF), strip it.\n" +
 		"5. VERIFY before committing: run the repository's own checks when they\n" +
-		"   exist (package.json scripts: `bun run typecheck`, `bun test`; else\n" +
-		"   `npm test`, `cargo test`, `pytest -q`). Fix what YOUR resolution broke\n" +
+		"   exist. Detect the package manager from its lockfile first (pnpm-lock.yaml\n" +
+		"   -> pnpm, bun.lock/bun.lockb -> bun, package-lock.json -> npm) and run\n" +
+		"   that tool's scripts; otherwise `cargo test` or `pytest -q`. Do not\n" +
+		"   assume a tool the repo does not use. Fix what YOUR resolution broke\n" +
 		"   until they pass.\n" +
 		"6. Complete the merge: `git add -A && git commit --no-edit`\n" +
 		"7. Do NOT push — the harness pushes after you finish.\n\n" +
@@ -113,8 +115,9 @@ export function qualityPrompt(
 		"RULES:\n" +
 		"- Behavior must stay identical. Do NOT add features or change logic.\n" +
 		"- Do NOT rewrite the upstream architecture; this is a fresh merge.\n" +
-		"- Run the repository's checks when they exist (`bun run typecheck`,\n" +
-		"  `bun test`, else `npm test`/`cargo test`/`pytest -q`) and keep them green.\n" +
+		"- Run the repository's checks when they exist, using the package manager its\n" +
+		"  lockfile implies (pnpm-lock.yaml -> pnpm, bun.lock -> bun,\n" +
+		"  package-lock.json -> npm), else `cargo test`/`pytest -q`. Keep them green.\n" +
 		'- Commit exactly one commit: `git add -A && git commit --message="fix: auto-fix code quality [skip ci]"`\n' +
 		"- Do NOT push — the harness pushes after you finish."
 	)

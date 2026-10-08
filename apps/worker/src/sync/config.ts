@@ -4,7 +4,7 @@
  * 1029-1033 (`sync_config`) and 1025-1026 (`_sync_entry`).
  *
  * THE STATE FILE IS NOT HERE, and that is deliberate. `load_sync_state` /
- * `save_sync_state` live in `worker/src/state.ts` already, and `/tmp/
+ * `save_sync_state` live in `apps/worker/src/state.ts` already, and `/tmp/
  * pr-queue-sync-state.json` survives the Python→TS cut-over: whatever this
  * module writes must stay parseable by the Python reader. This file therefore
  * only adds the TYPED view of an entry on top of that opaque

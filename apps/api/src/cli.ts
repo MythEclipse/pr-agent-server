@@ -1,4 +1,5 @@
-// CLI — one-shot review: `bun start --repo owner/name --pr N`
+// CLI — one-shot review:
+//   pnpm -C apps/api exec tsx src/cli.ts --repo owner/name --pr N
 // Also used by the queue worker to trigger reviews without a webhook.
 
 import { join } from "node:path"
@@ -37,7 +38,7 @@ async function main() {
 
 	if (has("--help")) {
 		console.log(
-			"Usage: bun src/cli.ts --repo owner/name --pr N [--tool review|describe] [--private-key PATH] [--no-publish]",
+			"Usage: pnpm -C apps/api exec tsx src/cli.ts --repo owner/name --pr N [--tool review|describe] [--private-key PATH] [--no-publish]",
 		)
 		return
 	}

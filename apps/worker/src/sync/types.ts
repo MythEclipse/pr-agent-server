@@ -6,7 +6,7 @@
  * cap. THIS IS A MOVE, NOT A REWRITE — every field, comment and union member is
  * byte-identical, including the long note on why `report` is REQUIRED. That note
  * is load-bearing history: `report?` being optional made `deps.report?.push(...)`
- * a silent no-op at all three buffered sites, and nothing in `worker/src` ever
+ * a silent no-op at all three buffered sites, and nothing in `apps/worker/src` ever
  * constructed a port, so the salvage line could never reach an operator. A
  * required port fails at wiring time instead, which is how it was caught.
  *
@@ -98,7 +98,7 @@ export type SyncForkDeps = {
 	 * only record that a merge was recovered from an agent call that ended early,
 	 * and the following push looks like any other push. With `report?` optional,
 	 * `deps.report?.push(...)` was a silent no-op at every one of those sites and
-	 * nothing in `worker/src` ever constructed a port, so the salvage line could
+	 * nothing in `apps/worker/src` ever constructed a port, so the salvage line could
 	 * never reach a report. A required port fails at WIRING time instead, which
 	 * is what caught it here.
 	 */

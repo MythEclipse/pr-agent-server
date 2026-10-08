@@ -1,7 +1,7 @@
 // E2E test harness — runs the full review pipeline against the REAL GitHub
-// App + 9router. Not part of `bun test` (needs secrets); run explicitly.
+// App + 9router. Not part of `pnpm test` (needs secrets); run explicitly.
 //
-//   bun e2e --repo <owner/repo> --pr <number>
+//   pnpm -C apps/api exec tsx e2e.ts --repo <owner/repo> --pr <number>
 //
 // Validates: GitHub App auth (JWT+installation token), diff fetch, token
 // budget, prompt render, LLM call via 9router, YAML parse, markdown render.
@@ -19,7 +19,7 @@ const prArg = Number(args[args.indexOf("--pr") + 1])
 const publish = args.includes("--publish")
 
 if (!repoArg || !prArg) {
-	console.error("usage: bun e2e --repo owner/repo --pr N [--publish]")
+	console.error("usage: pnpm -C apps/api exec tsx e2e.ts --repo owner/repo --pr N [--publish]")
 	process.exit(2)
 }
 

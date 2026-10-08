@@ -142,7 +142,7 @@ const credentialUrl = (token: string, repo: string): string =>
  *
  * DIVERGENCE, deliberate and brief-mandated: the Python calls `_fetch_gh_token()`
  * itself (line 1135). Here the PAT is a parameter, so the CALLER injects it —
- * `GitHubApi.fetchGhToken()` (worker/src/github.ts) is that call. Keeping the
+ * `GitHubApi.fetchGhToken()` (apps/worker/src/github.ts) is that call. Keeping the
  * `gh` CLI out of this module is what lets every push test run with a stub.
  * A missing gh CLI is exactly the case where the list holds the App token only.
  */

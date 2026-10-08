@@ -60,7 +60,7 @@ const OPS_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || ""
 
 /**
  * Whether the daily fork-config sync runs. OPT-IN, and it stays that way until
- * someone has read `worker/src/ops/templates/` and agreed with what it writes.
+ * someone has read `apps/worker/src/ops/templates/` and agreed with what it writes.
  *
  * Those templates are the one genuinely greenfield artefact in this migration:
  * the Python they replace was already gone, so nothing states what fleet-wide
@@ -310,7 +310,7 @@ async function main(argvIn?: string[]): Promise<number> {
 		if (!SYNC_HOOKS) {
 			console.error(
 				"pr-queue-worker: --sync-hooks is gated. Set PR_AGENT_SYNC_HOOKS=1 after " +
-					"reviewing worker/src/ops/templates/ — it rewrites Dependabot config " +
+					"reviewing apps/worker/src/ops/templates/ — it rewrites Dependabot config " +
 					"across every repo this token can see.",
 			)
 			return 1

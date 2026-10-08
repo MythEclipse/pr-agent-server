@@ -10,7 +10,7 @@
  * (it polls), so it has to FABRICATE the webhook itself: build a synthetic
  * `pull_request` event body, sign it with the shared secret exactly as GitHub
  * would, and POST it to the server. The server is a real HMAC-verifying
- * endpoint (server/src/http/webhook.ts), so a wrong signature is a 403.
+ * endpoint (apps/api/src/application/webhook/), so a wrong signature is a 403.
  *
  * WHY THE PAYLOAD MUST BE COMPLETE (Python lines 412-414, and the single most
  * important comment in this port): PR-Agent's `_check_pull_request_event`
