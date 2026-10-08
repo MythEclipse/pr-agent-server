@@ -80,6 +80,17 @@ describe("serveSpa", () => {
 		expect(await res.json()).toEqual({ status: "ok" })
 	})
 
+	test("never answers an unknown /api/* path with the SPA shell", async () => {
+		// This one was a live bug: /api/nonexistent returned 200 text/html,
+		// which hides a typo'd webhook URL and makes /api/health-style probes
+		// report healthy. The catch-all must defer to the app's notFound.
+		for (const path of ["/api/nonexistent", "/api/v1/nonexistent", "/api/docs/typo"]) {
+			const res = await app.request(path)
+			expect(res.status, path).toBe(404)
+			expect(res.headers.get("content-type"), path).not.toContain("text/html")
+		}
+	})
+
 	test("refuses to read outside the dist root", async () => {
 		// Percent-encoded so the request line survives to the handler undecoded;
 		// normalize() collapses the .. but the resolved path is what is checked.

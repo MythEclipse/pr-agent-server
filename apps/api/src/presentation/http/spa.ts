@@ -57,6 +57,12 @@ export function serveSpa(app: Hono, distPath: string): void {
 	})
 
 	app.get("*", async (c) => {
+		// Never claim an API path. Falling through to index.html here would
+		// answer an unknown /api/* with 200 and an HTML body, which hides a
+		// typo'd webhook URL and makes /api/health-style probes report healthy.
+		// c.notFound() hands it to the app-level notFound handler instead.
+		if (c.req.path.startsWith("/api/")) return c.notFound()
+
 		const file = await readIfPresent(root, c.req.path)
 		if (file) {
 			return c.body(file.body, 200, {
