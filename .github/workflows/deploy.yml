@@ -5,12 +5,19 @@ name: Build & Deploy
 # poll on :4023. The previous tree is kept as `.prev` so a bad deploy can be
 # rolled back by hand.
 #
-# The first Node deploy is manual-only (workflow_dispatch). Re-enable the push
-# trigger in the commented block below once the box has run node dist/ through
-# a few clean restarts.
+# Gated on ci.yml via workflow_run, so a commit that fails lint/typecheck/tests
+# cannot reach the box even if it lands on main. ci.yml re-runs its own gates
+# here too: workflow_run reports the *conclusion* of the other workflow, not
+# its artifacts, so the commit is re-checked from scratch before anything ships.
+#
+# The first Node deploy should be run with workflow_dispatch and watched.
+# Add an `environment: production` to this job once that is routine — that is
+# what makes the deploy wait for a human approval.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -21,9 +28,16 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    # workflow_run also fires when CI *fails*. Without this the box would be
+    # updated from a commit that never passed.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v7
         with:
+          # workflow_run checks out the default branch, not the SHA that ran.
+          # Without this a second push to main would ship the newer commit
+          # under the older run's green tick.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
@@ -50,6 +64,23 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      # ci.yml has this; a deploy without it would happily ship a schema change
+      # whose migration was never committed. `node dist/migrate.js` on the box
+      # would then apply a stale drizzle/ — the new tables simply would not
+      # exist, and the app would fail on boot or, worse, on first login.
+      #
+      # `git status --porcelain`, not `git diff`: diff compares the working tree
+      # to the index and never sees an untracked file.
+      - name: Drizzle drift
+        working-directory: apps/api
+        run: |
+          pnpm exec drizzle-kit generate
+          if [ -n "$(git status --porcelain -- drizzle/)" ]; then
+            echo "::error::drizzle/ is out of date — run 'pnpm db:generate' and commit the SQL"
+            git status --porcelain -- drizzle/
+            exit 1
+          fi
 
       # `pnpm deploy` writes a self-contained node_modules, so the box needs no
       # pnpm and the installed tree is exactly what CI resolved.

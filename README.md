@@ -122,7 +122,9 @@ Secrets required in GitHub Actions:
 - `VPS_HOST` — VPS IP address
 - `VPS_USER` — SSH user
 - `SSH_PRIVATE_KEY` — SSH private key for deploy user
-- `GITEA_TOKEN` — for Gitea mirror (if using mirror workflow)
+- `GITEA_TOKEN` — for `mirror-gitea.yml` (pushes a mirror to the Gitea backup)
+
+`ci.yml` needs no secrets — it builds and tests only.
 
 ## Ops
 
