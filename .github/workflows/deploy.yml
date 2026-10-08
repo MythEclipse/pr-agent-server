@@ -53,8 +53,15 @@ jobs:
 
       # `pnpm deploy` writes a self-contained node_modules, so the box needs no
       # pnpm and the installed tree is exactly what CI resolved.
+      #
+      # Two things here are not optional:
+      #   --filter  pnpm deploy selects nothing without it (`-C apps/api` changes
+      #             directory but picks no project, and pnpm exits with
+      #             ERR_PNPM_NOTHING_TO_DEPLOY).
+      #   --legacy  pnpm 10 refuses a non-injected workspace; without this it
+      #             exits with ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE.
       - name: Package the API
-        run: pnpm -C apps/api deploy --prod /tmp/pkg-api
+        run: pnpm --filter=@pr-agent/api deploy --prod --legacy /tmp/pkg-api
 
       - name: Add the API runtime files
         run: |
@@ -69,6 +76,14 @@ jobs:
           cp apps/worker/run-worker.sh /tmp/pkg-worker/run-worker.sh
           chmod +x /tmp/pkg-worker/run-worker.sh
 
+      - name: Archive
+        # tar, not `cp -r`. The deployed node_modules is 476 symlinks pointing
+        # into node_modules/.pnpm; a plain copy dereferences them and turns a
+        # 202M tree into 838M on the wire while destroying the store layout.
+        run: |
+          tar -czf /tmp/pkg-api.tar.gz -C /tmp/pkg-api .
+          tar -czf /tmp/pkg-worker.tar.gz -C /tmp/pkg-worker .
+
       - name: Setup SSH key
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -82,8 +97,8 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          scp -r /tmp/pkg-api "$VPS_USER@$VPS_HOST:/tmp/pkg-api.new"
-          scp -r /tmp/pkg-worker "$VPS_USER@$VPS_HOST:/tmp/pkg-worker.new"
+          scp /tmp/pkg-api.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-api.tar.gz"
+          scp /tmp/pkg-worker.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-worker.tar.gz"
           ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" <<'REMOTE'
           set -euo pipefail
 
@@ -91,14 +106,16 @@ jobs:
           cd /opt/pr-agent-server
           rm -rf .prev && mkdir -p .prev
           for item in dist node_modules drizzle web-dist package.json; do
-            [ -e "$item" ] && cp -r "$item" .prev/ || true
+            [ -e "$item" ] && cp -a "$item" .prev/ || true
           done
           rm -rf dist node_modules drizzle web-dist package.json
+          mkdir -p /tmp/pkg-api.new
+          tar -xzf /tmp/pkg-api.tar.gz -C /tmp/pkg-api.new
           for item in dist node_modules drizzle web-dist package.json; do
             mv "/tmp/pkg-api.new/$item" ./"$item"
           done
           chmod -R a+rX /opt/pr-agent-server
-          rm -rf /tmp/pkg-api.new
+          rm -rf /tmp/pkg-api.new /tmp/pkg-api.tar.gz
 
           # Migrations run as their own step, decoupled from application boot,
           # so a schema rollback and a code rollback stay independent.
@@ -109,11 +126,13 @@ jobs:
           # --- the PR worker -------------------------------------------------
           cd /opt/pr-agent-worker
           rm -rf dist package.json run-worker.sh
+          mkdir -p /tmp/pkg-worker.new
+          tar -xzf /tmp/pkg-worker.tar.gz -C /tmp/pkg-worker.new
           for item in dist package.json run-worker.sh; do
             mv "/tmp/pkg-worker.new/$item" ./"$item"
           done
           chmod +x /opt/pr-agent-worker/run-worker.sh
-          rm -rf /tmp/pkg-worker.new
+          rm -rf /tmp/pkg-worker.new /tmp/pkg-worker.tar.gz
 
           systemctl restart pr-agent-worker.timer
           systemctl restart pr-agent-sync-hooks.timer

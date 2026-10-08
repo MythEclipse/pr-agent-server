@@ -17,6 +17,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@hono/node-server':
+        specifier: ^2.1.4
+        version: 2.1.4(hono@4.13.13)
       '@hono/zod-openapi':
         specifier: ^1.6.3
         version: 1.6.3(hono@4.13.13)(zod@4.6.5)
@@ -66,9 +69,6 @@ importers:
       '@electric-sql/pglite-socket':
         specifier: ^0.2.11
         version: 0.2.11(@electric-sql/pglite-age@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_hashids@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_ivm@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_textsearch@0.0.10(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_uuidv7@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgtap@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgvector@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite@0.5.8)
-      '@hono/node-server':
-        specifier: ^2.1.4
-        version: 2.1.4(hono@4.13.13)
       '@types/node':
         specifier: ^24.0.0
         version: 24.19.1
