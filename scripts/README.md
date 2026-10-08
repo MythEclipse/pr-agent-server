@@ -144,14 +144,22 @@ string `$GITHUB_APP_ID` and fail every signed call with a confusing 401.
 
 ### Keeping the deployed copy in sync
 
-`/opt/pr-agent-worker/` is a copy, not a symlink — it must be re-copied after
-any change to `apps/worker/`:
+`/opt/pr-agent-worker/` is a copy, not a symlink. Use the script — it syncs
+`dist/`, installs `run-worker.sh`, chowns to `pr-agent`, runs the worker's own
+test suite as a gate, and then starts a tick:
 
 ```bash
-sudo rsync -a --delete /home/code/pr-agent-server-wt/apps/worker/dist/  /opt/pr-agent-worker/dist/
-sudo chown -R pr-agent:pr-agent /opt/pr-agent-worker
-sudo systemctl start pr-agent-worker.service   # then check the journal
+scripts/deploy-worker.sh              # deploy + one tick
+scripts/deploy-worker.sh --no-tick    # deploy without ticking
 ```
+
+It needs `/opt/node/bin/node` and a built `apps/worker/dist/`, and it refuses to
+deploy if the suite fails. The workflow (`deploy.yml`) does the same thing for
+real; this script is the local path.
+
+Do not hand-roll an `rsync` here. The old recipe in this file pointed at
+`/home/code/pr-agent-server-wt/`, a git worktree that no longer exists, so it
+would have failed for anyone who followed it.
 
 CI (`.github/workflows/ci.yml`) lints, typechecks and tests `apps/worker/` on
 every pull request, so a break is caught before it reaches the timer.

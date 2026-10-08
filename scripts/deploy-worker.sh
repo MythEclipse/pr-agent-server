@@ -73,9 +73,20 @@ done
 # `pnpm test`, not `node --test`. The suite moved off bun:test to Vitest in the
 # Node migration, and Node's built-in runner discovers none of it: it reported
 # success having run zero tests, so this gate was not a gate at all.
-echo "==> typechecking + testing the checkout (as pr-agent, against the build)"
-( cd "$SRC" && sudo -u pr-agent pnpm test ) 2>&1 | tail -8 || {
+#
+# As `code`, NOT as pr-agent. /home/code is mode 750 code:code, so pr-agent
+# cannot even traverse into the checkout — `pnpm test` there fails EACCES
+# opening apps/worker/package.json. That was not a flake; it made this script
+# unusable while still exiting non-zero, so it refused to deploy every time.
+echo "==> testing the checkout before the copy is trusted"
+( cd "$SRC" && pnpm test ) 2>&1 | tail -8 || {
   echo "deploy-worker: the test suite failed — refusing to deploy" >&2
+  exit 1
+}
+
+echo "==> verifying the deployed copy is readable by pr-agent"
+sudo -u pr-agent head -c 1 "$DEST/package.json" >/dev/null || {
+  echo "deploy-worker: pr-agent cannot read $DEST/package.json — the unit would EACCES" >&2
   exit 1
 }
 
