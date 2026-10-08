@@ -52,6 +52,11 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Same reason as the step in ci.yml: the Typecheck and Build steps below
+      # are root scripts, so they resolve `moon` from node_modules/.bin.
+      - name: Verify moon is on PATH
+        run: moon --version
+
       # The same gates ci.yml runs, so a red build never reaches the VPS.
       - name: Lint
         run: pnpm exec biome check .

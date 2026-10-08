@@ -31,6 +31,14 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Nothing else here installs moon, and the root package.json scripts are
+      # all `moon run :…` — so without this the Typecheck step below died on
+      # `sh: 1: moon: not found`. It is a pinned devDependency rather than an
+      # action, so `pnpm install` puts it on PATH through node_modules/.bin and
+      # the lockfile pins its version like every other dependency.
+      - name: Verify moon is on PATH
+        run: moon --version
+
       - name: Lint and format
         run: pnpm exec biome check .
 

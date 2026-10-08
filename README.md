@@ -46,7 +46,7 @@ pr-agent-server/
 │   ├── deploy-worker.sh
 │   └── smoke_hermes_api_server.py
 ├── templates/manifest.json  # GitHub App manifest template
-├── .github/workflows/       # ci.yml (PR gate), deploy.yml, mirror-gitea.yml
+├── .github/workflows/       # ci.yml (PR gate), deploy.yml
 ├── .editorconfig
 ├── .gitignore
 ├── CONTRIBUTING.md
