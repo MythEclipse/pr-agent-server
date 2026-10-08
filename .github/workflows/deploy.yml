@@ -131,13 +131,20 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
 
+      # `accept-new` on every call below, not just the ssh heredoc: a fresh
+      # runner has an empty known_hosts, so the first connection to the box is
+      # unverifiable and scp dies with "Host key verification failed". Only the
+      # heredoc ssh carried the flag, so the two scps ahead of it failed first.
+      #
+      # `accept-new`, not `no`: the first connection is recorded, so a host key
+      # that later CHANGES still fails loudly instead of being silently accepted.
       - name: Deploy
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          scp /tmp/pkg-api.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-api.tar.gz"
-          scp /tmp/pkg-worker.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-worker.tar.gz"
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-api.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-api.tar.gz"
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-worker.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-worker.tar.gz"
           ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" <<'REMOTE'
           set -euo pipefail
 
@@ -185,14 +192,14 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           for i in $(seq 1 30); do
-            if ssh "$VPS_USER@$VPS_HOST" "curl -fsS -m 2 http://127.0.0.1:4023/health" 2>/dev/null; then
+            if ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" "curl -fsS -m 2 http://127.0.0.1:4023/health" 2>/dev/null; then
               echo "healthy after ${i}s"
               exit 0
             fi
             sleep 1
           done
           echo "::error::service did not become healthy; diagnostics follow"
-          ssh "$VPS_USER@$VPS_HOST" 'systemctl is-active pr-agent-server.service || true; ss -ltnp | grep -E ":(4023|3000)" || true; systemctl show -p Environment -p MainPID -p ExecMainStatus pr-agent-server.service || true; journalctl -u pr-agent-server.service -n 60 || true'
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'systemctl is-active pr-agent-server.service || true; ss -ltnp | grep -E ":(4023|3000)" || true; systemctl show -p Environment -p MainPID -p ExecMainStatus pr-agent-server.service || true; journalctl -u pr-agent-server.service -n 60 || true'
           exit 1
 
   cleanup:
@@ -210,4 +217,4 @@ jobs:
           install -m 600 -D /dev/null ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           # Non-fatal: the runtime no longer depends on Nix.
-          ssh "$VPS_USER@$VPS_HOST" 'sudo /usr/local/bin/nix-gc-vps.sh' || true
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'sudo /usr/local/bin/nix-gc-vps.sh' || true
