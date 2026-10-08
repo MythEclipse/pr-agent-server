@@ -55,6 +55,20 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      # The build above runs the TanStack Router plugin, which regenerates
+      # src/routeTree.gen.ts. That file is committed (see .gitignore) precisely
+      # so this typecheck step can see the route types on a fresh clone — which
+      # means a stale one would type-check happily against routes that no longer
+      # exist. Same reasoning as the drizzle check below: assert against
+      # `git status`, which also catches an untracked regeneration.
+      - name: Route tree drift
+        run: |
+          if [ -n "$(git status --porcelain -- apps/web/src/routeTree.gen.ts)" ]; then
+            echo "::error::apps/web/src/routeTree.gen.ts is stale — run 'pnpm -C apps/web build' and commit it"
+            git status --porcelain -- apps/web/src/routeTree.gen.ts
+            exit 1
+          fi
+
       # CI enforces no drift: a schema change without a committed migration
       # fails here rather than at deploy time (skill §5).
       #
