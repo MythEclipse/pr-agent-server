@@ -218,7 +218,16 @@ jobs:
             echo "::error::DATABASE_URL is not available to bws-exec pr-agent. migrate.js requires it and cannot run without it. Add it to the Bitwarden 'pr-agent' project before deploying the Node server."
             exit 1
           fi
-          /opt/node/bin/node /opt/pr-agent-server/dist/migrate.js
+          # `bws-exec`, not a bare node. migrate.js reads DATABASE_URL from the
+          # environment, and the only thing that exports it is the bws-exec
+          # wrapper — run as a bare `/opt/node/bin/node` it gets an empty env and
+          # dies with "Invalid environment: - DATABASE_URL: expected string,
+          # received undefined", even though the secret is in the vault.
+          #
+          # As pr-agent, matching User= in the unit, so the migration applies as
+          # the role that will own the tables.
+          sudo -n -u pr-agent /usr/local/bin/bws-exec pr_agent \
+            /opt/node/bin/node /opt/pr-agent-server/dist/migrate.js
 
           # --- the unit ------------------------------------------------------
           # Nothing in git history ever installed the unit (8fe99de shipped
