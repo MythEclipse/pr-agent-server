@@ -45,12 +45,19 @@ jobs:
 
       # CI enforces no drift: a schema change without a committed migration
       # fails here rather than at deploy time (skill §5).
+      #
+      # `git status --porcelain`, not `git diff`: diff only compares the working
+      # tree to the index, so a generated migration that was never `git add`ed
+      # would pass the check while the deploy ran against a schema missing it.
+      # That is not hypothetical — the better-auth tables went missing from the
+      # migrations this way once already.
       - name: Drizzle drift
         working-directory: apps/api
         run: |
           pnpm exec drizzle-kit generate
-          if ! git diff --quiet -- drizzle/; then
+          if [ -n "$(git status --porcelain -- drizzle/)" ]; then
             echo "::error::drizzle/ is out of date — run 'pnpm db:generate' and commit the SQL"
+            git status --porcelain -- drizzle/
             git diff --stat -- drizzle/
             exit 1
           fi

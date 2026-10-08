@@ -29,6 +29,9 @@ importers:
       '@orpc/client':
         specifier: ^1.15.5
         version: 1.15.5
+      '@orpc/openapi':
+        specifier: ^1.15.5
+        version: 1.15.5
       '@orpc/server':
         specifier: ^1.15.5
         version: 1.15.5
@@ -60,6 +63,9 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.5.8
         version: 0.5.8
+      '@electric-sql/pglite-socket':
+        specifier: ^0.2.11
+        version: 0.2.11(@electric-sql/pglite-age@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_hashids@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_ivm@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_textsearch@0.0.10(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_uuidv7@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgtap@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgvector@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite@0.5.8)
       '@hono/node-server':
         specifier: ^2.1.4
         version: 2.1.4(hono@4.13.13)
@@ -388,6 +394,54 @@ packages:
 
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
+
+  '@electric-sql/pglite-age@0.0.9':
+    resolution: {integrity: sha512-IdNy5P5nxwKVeSPLjDLXkp/eYffH5roympM7fTG+g9ehzBrDnQ9TT2tfCJ2vRVcOSPQBp4oURzfRE19cs/x8ZA==}
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_hashids@0.0.9':
+    resolution: {integrity: sha512-NffsZH+FaRLp0WzsYG35BW/wOHLsTs325zjgp+PnKlWeGyW523Mbw4EZ1Awm02C3QWBU9p8Y2Fk02Al5NpRGUg==}
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_ivm@0.0.9':
+    resolution: {integrity: sha512-mbTcDLQyzeOG4rX6LLHhWDPJeQUv2xHvayKtf4oE7xujWEGWEDUEJP1+U0pXXELtIoWiUzzPBWjzKY1mRisqkQ==}
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_textsearch@0.0.10':
+    resolution: {integrity: sha512-tsL1rTYU4tzIC44htL7/0nS6C2XC5Srz0tfxU1LJelCqNIBkpFI9Esw1JbuVCaQKUHGDbPgAz8JYavNxwbuRVw==}
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_uuidv7@0.0.9':
+    resolution: {integrity: sha512-n/JbzoQMF9jFKFxGLRIzUfC1O4V2vTE0Pt3uoAO6/EP7dX5m1h4zBdezQAcT2JFostD0YWUdzHj9iYvcbUGM1A==}
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pgtap@0.0.9':
+    resolution: {integrity: sha512-VIyclfOawUN0IJROKiCnrVxsZQEG7tixgiC8c8nxp9TlBhI79MZqotoqlqvdPzGHmjWZlcgJ7tC8InOcy+2A/A==}
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pgvector@0.0.9':
+    resolution: {integrity: sha512-ue4iBW651gDQwBwn97Ekv1lYGPvXa1ymHbRbTCSL0Ib286PRDD1VDOwzwEoekZuO/wctMbTzKzlwdgDwYrqZ8A==}
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-socket@0.2.11':
+    resolution: {integrity: sha512-DKnJBf7+5zFCXXGZAGUvGoWKetPPvaQ7fLSGVqP5onzgBhV9vvTcHigireMROMglgovvhoXHaMOKqt69/vts4A==}
+    hasBin: true
+    peerDependencies:
+      '@electric-sql/pglite': 0.5.8
+      '@electric-sql/pglite-age': 0.0.9
+      '@electric-sql/pglite-pg_hashids': 0.0.9
+      '@electric-sql/pglite-pg_ivm': 0.0.9
+      '@electric-sql/pglite-pg_textsearch': 0.0.10
+      '@electric-sql/pglite-pg_uuidv7': 0.0.9
+      '@electric-sql/pglite-pgtap': 0.0.9
+      '@electric-sql/pglite-pgvector': 0.0.9
 
   '@electric-sql/pglite@0.5.8':
     resolution: {integrity: sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q==}
@@ -988,6 +1042,12 @@ packages:
 
   '@orpc/interop@1.15.5':
     resolution: {integrity: sha512-VA9FQLt2jHY5MN8aMQ0Eg6muPZViOWBZaOmreARt8A/3AN8HaUOR43ccma6iTHVzojX7T1rz/9YXSY7zfUbDqw==}
+
+  '@orpc/openapi-client@1.15.5':
+    resolution: {integrity: sha512-+Dh294/EIrsKE7j0up0VdiA0+hXWqE49Kzu3/57f6hOw87XabVochnIOd2Q+LB6LDfCmBRtEpWpkK5wtRcAfSQ==}
+
+  '@orpc/openapi@1.15.5':
+    resolution: {integrity: sha512-+CF789KNssNZt+lrwO0IzlYcXRKMwTimo1INjpZiFdg19n8buL1oZLlKsGi00EUUsL65HVgDs0yXuxLjR94WXA==}
 
   '@orpc/server@1.15.5':
     resolution: {integrity: sha512-sH69dyk4M7nHGlRMGVx3WUBRBhGP+usSPjI9XnIxMxnqcyuib4zuLZARdFaeSWL1HSb0hWsGWMEheHxAMfuduQ==}
@@ -1872,6 +1932,9 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
+  json-schema-typed@8.0.2:
+    resolution: {integrity: sha512-fQhoXdcvc3V28x7C7BMs4P5+kNlgUURe2jmUT1T//oBRMDrqy1QPelJimwZGo7Hg9VPV3EQV5Bnq4hbFy2vetA==}
+
   json-with-bigint@3.5.12:
     resolution: {integrity: sha512-uwbF/wSSuOgC7qqlq27Xp5B6a2MHVug3t0idZdTqu0JnlFvgJuH7ju+KAk/J06C7GfhoYy2gnb9wz2INqcne7w==}
 
@@ -2184,6 +2247,9 @@ packages:
     resolution: {integrity: sha512-RxXm0XVVV1hFI3dYe12ruaOgsYQ725lUcUWeMSQqkF9tTxVErY+fy2Ets6vWhItL9MZMSNZGbvZFc7rH/VHp2Q==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
     hasBin: true
+
+  rou3@0.7.12:
+    resolution: {integrity: sha512-iFE4hLDuloSWcD7mjdCDhx2bKcIsYbtOTpfH5MHHLSKMOUyjqQXTeZVa289uuwEGEKFoE/BAPbhaU4B774nceg==}
 
   rou3@0.9.2:
     resolution: {integrity: sha512-3SOzvaAg8rkHrXtRjpCvCvbyO5to9oOO27Z/XqHEYXfMRVSw/qMIVdmaOk9W2lcRLtR6dlqTjo9hDeJk70QBYQ==}
@@ -2685,6 +2751,45 @@ snapshots:
 
   '@drizzle-team/brocli@0.10.2': {}
 
+  '@electric-sql/pglite-age@0.0.9(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_hashids@0.0.9(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_ivm@0.0.9(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_textsearch@0.0.10(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pg_uuidv7@0.0.9(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pgtap@0.0.9(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-pgvector@0.0.9(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+
+  '@electric-sql/pglite-socket@0.2.11(@electric-sql/pglite-age@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_hashids@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_ivm@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_textsearch@0.0.10(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_uuidv7@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgtap@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgvector@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite@0.5.8)':
+    dependencies:
+      '@electric-sql/pglite': 0.5.8
+      '@electric-sql/pglite-age': 0.0.9(@electric-sql/pglite@0.5.8)
+      '@electric-sql/pglite-pg_hashids': 0.0.9(@electric-sql/pglite@0.5.8)
+      '@electric-sql/pglite-pg_ivm': 0.0.9(@electric-sql/pglite@0.5.8)
+      '@electric-sql/pglite-pg_textsearch': 0.0.10(@electric-sql/pglite@0.5.8)
+      '@electric-sql/pglite-pg_uuidv7': 0.0.9(@electric-sql/pglite@0.5.8)
+      '@electric-sql/pglite-pgtap': 0.0.9(@electric-sql/pglite@0.5.8)
+      '@electric-sql/pglite-pgvector': 0.0.9(@electric-sql/pglite@0.5.8)
+
   '@electric-sql/pglite@0.5.8': {}
 
   '@esbuild-kit/core-utils@3.3.2':
@@ -3095,6 +3200,32 @@ snapshots:
       - '@opentelemetry/api'
 
   '@orpc/interop@1.15.5': {}
+
+  '@orpc/openapi-client@1.15.5':
+    dependencies:
+      '@orpc/client': 1.15.5
+      '@orpc/contract': 1.15.5
+      '@orpc/shared': 1.15.5
+      '@orpc/standard-server': 1.15.5
+    transitivePeerDependencies:
+      - '@opentelemetry/api'
+
+  '@orpc/openapi@1.15.5':
+    dependencies:
+      '@orpc/client': 1.15.5
+      '@orpc/contract': 1.15.5
+      '@orpc/interop': 1.15.5
+      '@orpc/openapi-client': 1.15.5
+      '@orpc/server': 1.15.5
+      '@orpc/shared': 1.15.5
+      '@orpc/standard-server': 1.15.5
+      json-schema-typed: 8.0.2
+      rou3: 0.7.12
+    transitivePeerDependencies:
+      - '@opentelemetry/api'
+      - crossws
+      - fastify
+      - ws
 
   '@orpc/server@1.15.5':
     dependencies:
@@ -3793,6 +3924,8 @@ snapshots:
 
   jsesc@3.1.0: {}
 
+  json-schema-typed@8.0.2: {}
+
   json-with-bigint@3.5.12: {}
 
   json5@2.2.3: {}
@@ -4059,6 +4192,8 @@ snapshots:
       '@rollup/rollup-win32-x64-gnu': 4.64.2
       '@rollup/rollup-win32-x64-msvc': 4.64.2
       fsevents: 2.3.3
+
+  rou3@0.7.12: {}
 
   rou3@0.9.2: {}
 
