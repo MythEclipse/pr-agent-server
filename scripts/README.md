@@ -1,6 +1,6 @@
 # PR Queue Worker
 
-`apps/apps/worker/` (TypeScript/Node) — the 5-minute job that watches open PRs across every
+`apps/worker/` (TypeScript/Node) — the 5-minute job that watches open PRs across every
 repo where the PR-Agent GitHub App is installed, and drives the full lifecycle:
 
 1. **Open PR found** → ensure a PR-Agent review exists (fabricates a webhook to
@@ -50,12 +50,11 @@ config block in `apps/worker/src/sync/config.ts`).
 
 ## Development
 
-The worker's source is `apps/apps/worker/`. Run it straight from the checkout:
+The worker's source is `apps/worker/`. Run it straight from the checkout:
 
 ```bash
-cd worker
 pnpm install
-bunx tsc --noEmit
+moon run :typecheck
 pnpm -C apps/worker test
 pnpm -C apps/worker exec tsx src/index.ts --sync-status                    # read-only, needs no credentials
 pnpm -C apps/worker exec tsx src/index.ts --sync-only --dry                # stops before any push
@@ -146,16 +145,17 @@ string `$GITHUB_APP_ID` and fail every signed call with a confusing 401.
 ### Keeping the deployed copy in sync
 
 `/opt/pr-agent-worker/` is a copy, not a symlink — it must be re-copied after
-any change to `apps/apps/worker/`:
+any change to `apps/worker/`:
 
 ```bash
-sudo rsync -a --delete /home/code/pr-agent-server-wt/apps/apps/apps/worker/src/  /opt/pr-agent-apps/worker/src/
+sudo rsync -a --delete /home/code/pr-agent-server-wt/apps/worker/dist/  /opt/pr-agent-worker/dist/
 sudo chown -R pr-agent:pr-agent /opt/pr-agent-worker
 sudo systemctl start pr-agent-worker.service   # then check the journal
 ```
 
-CI (`.github/workflows/deploy.yml`) typechecks and tests `apps/apps/worker/` on every
-manual run, so a break is caught before it reaches the timer.
+CI (`.github/workflows/ci.yml`) lints, typechecks and tests `apps/worker/` on
+every pull request, so a break is caught before it reaches the timer.
+`deploy.yml` is what ships, and only runs on push to main or a manual dispatch.
 
 ## Python history
 
