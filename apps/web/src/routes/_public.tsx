@@ -2,7 +2,7 @@
 // layout component and `_public/` holds its children — both must exist for the
 // guard to work (skill §3.1).
 
-import { Outlet, createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, Outlet } from "@tanstack/react-router"
 
 export const Route = createFileRoute("/_public")({
 	component: PublicLayout,

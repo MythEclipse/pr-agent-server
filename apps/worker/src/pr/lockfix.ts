@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: ported pr_agent code; GitHub payloads are untyped JSON
 /**
  * Lockfile pre-fixes for trivial (dependabot) PRs — port of
  * `scripts/pr-queue-worker.py` lines 589-597 (`is_trivial_pr`), 608-624
@@ -32,17 +33,17 @@
  *    happened to hold the real credential (the Task 8 lesson). Task 14 wires
  *    the real implementations.
  */
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { redactCredentials, setBotIdentity, type GitResult, type GitRunner } from "../git.ts";
-import type { GhClient } from "./scan.ts";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { type GitResult, type GitRunner, redactCredentials, setBotIdentity } from "../git.ts"
+import type { GhClient } from "./scan.ts"
 
 /** Python `TMP_BASE` (line 67). The parent of all three workdirs. */
-export const TMP_BASE = "/tmp/pr-queue-work";
+export const TMP_BASE = "/tmp/pr-queue-work"
 
 // `CLONE_TIMEOUT_SEC` is the one budget that stays here: it belongs to
 // `clonePr` below. The rest of the lockfix budgets live in `./relock`,
 // with the bodies that cite them.
-const CLONE_TIMEOUT_SEC = 60; // 647-650, 735-738
+const CLONE_TIMEOUT_SEC = 60 // 647-650, 735-738
 // ── Shared injection types (autofix.ts imports these) ──────────────────────
 
 /**
@@ -51,31 +52,31 @@ const CLONE_TIMEOUT_SEC = 60; // 647-650, 735-738
  * wiring.
  */
 export type Workdirs = {
-  exists(path: string): boolean;
-  mkdir(path: string): void;
-  /** `rm -rf` in the Python, and `unlink(missing_ok=True)` for the pid file. */
-  remove(path: string): void;
-  writeFile(path: string, contents: string): void;
-  readFile(path: string): string;
-};
+	exists(path: string): boolean
+	mkdir(path: string): void
+	/** `rm -rf` in the Python, and `unlink(missing_ok=True)` for the pid file. */
+	remove(path: string): void
+	writeFile(path: string, contents: string): void
+	readFile(path: string): string
+}
 
 /**
  * A non-git program (`uv lock`, `bun install`). Same result shape as
  * `GitRunner` because the Python has one `subprocess.run` for both, but kept as
  * its own type so a test's two namespaces stay legible.
  */
-export type ProcRunner = (args: string[], cwd?: string, timeoutSec?: number) => GitResult;
+export type ProcRunner = (args: string[], cwd?: string, timeoutSec?: number) => GitResult
 
 /** What `fixUvLock` / `fixBunLock` need from the world. */
 export type LockfixDeps = {
-  /** Git. Never throws (git.ts). */
-  run: GitRunner;
-  /** `uv` / `bun`. Never throws. */
-  exec: ProcRunner;
-  workdirs: Workdirs;
-  /** Python `_fetch_gh_token()` (lines 599-605). `""` means "no PAT". */
-  fetchGhToken: () => string;
-};
+	/** Git. Never throws (git.ts). */
+	run: GitRunner
+	/** `uv` / `bun`. Never throws. */
+	exec: ProcRunner
+	workdirs: Workdirs
+	/** Python `_fetch_gh_token()` (lines 599-605). `""` means "no PAT". */
+	fetchGhToken: () => string
+}
 
 /**
  * Python's `err[:n]`, by CODE POINT.
@@ -86,8 +87,8 @@ export type LockfixDeps = {
  * same semantics for its `[:200]` / `[:300]` summaries.
  */
 export function head(text: string, n: number): string {
-  const points = [...text];
-  return points.length <= n ? text : points.slice(0, n).join("");
+	const points = [...text]
+	return points.length <= n ? text : points.slice(0, n).join("")
 }
 
 /**
@@ -96,14 +97,14 @@ export function head(text: string, n: number): string {
  * an ordinary git or bun error stays diagnosable.
  */
 export function reportable(text: string): string {
-  return redactCredentials(text);
+	return redactCredentials(text)
 }
 /**
  * The credentialed clone URL — Python lines 646, 734 and 838, all one f-string.
  * Kept byte-identical to `git.ts`'s private `credentialUrl`.
  */
 const credentialUrl = (token: string, repo: string): string =>
-  `https://x-access-token:${token}@github.com/${repo}.git`;
+	`https://x-access-token:${token}@github.com/${repo}.git`
 
 /**
  * The clone, returning the RESULT rather than a boolean.
@@ -116,18 +117,18 @@ const credentialUrl = (token: string, repo: string): string =>
  * 60s budget, same post-clone bot identity. `depth: null` omits the flag.
  */
 export function clonePr(
-  run: GitRunner,
-  repo: string,
-  branch: string,
-  token: string,
-  workdir: string,
-  depth: number | null,
+	run: GitRunner,
+	repo: string,
+	branch: string,
+	token: string,
+	workdir: string,
+	depth: number | null,
 ): GitResult {
-  const args = ["clone", credentialUrl(token, repo), workdir, "--branch", branch];
-  if (depth !== null) args.push("--depth", String(depth));
-  const r = run(args, undefined, CLONE_TIMEOUT_SEC);
-  if (r.code === 0) setBotIdentity(workdir, run); // Python lines 743-744 / 847-848
-  return r;
+	const args = ["clone", credentialUrl(token, repo), workdir, "--branch", branch]
+	if (depth !== null) args.push("--depth", String(depth))
+	const r = run(args, undefined, CLONE_TIMEOUT_SEC)
+	if (r.code === 0) setBotIdentity(workdir, run) // Python lines 743-744 / 847-848
+	return r
 }
 
 /**
@@ -135,32 +136,32 @@ export function clonePr(
  * test that injects its own never touches the disk.
  */
 export function nodeWorkdirs(): Workdirs {
-  return {
-    // `statSync`, not `existsSync`: a broken symlink is a real leftover workdir
-    // that `existsSync` reports as absent, and Python's `Path.exists()` follows
-    // symlinks the way `statSync` does.
-    exists: (p) => {
-      try {
-        statSync(p);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    // Python's `mkdir(parents=True, exist_ok=True)`.
-    mkdir: (p) => {
-      mkdirSync(p, { recursive: true });
-    },
-    // Python's `rm -rf`, and `unlink(missing_ok=True)` for the pid file —
-    // `force: true` covers both without a branch.
-    remove: (p) => {
-      rmSync(p, { recursive: true, force: true });
-    },
-    writeFile: (p, c) => {
-      writeFileSync(p, c);
-    },
-    readFile: (p) => readFileSync(p, "utf8"),
-  };
+	return {
+		// `statSync`, not `existsSync`: a broken symlink is a real leftover workdir
+		// that `existsSync` reports as absent, and Python's `Path.exists()` follows
+		// symlinks the way `statSync` does.
+		exists: (p) => {
+			try {
+				statSync(p)
+				return true
+			} catch {
+				return false
+			}
+		},
+		// Python's `mkdir(parents=True, exist_ok=True)`.
+		mkdir: (p) => {
+			mkdirSync(p, { recursive: true })
+		},
+		// Python's `rm -rf`, and `unlink(missing_ok=True)` for the pid file —
+		// `force: true` covers both without a branch.
+		remove: (p) => {
+			rmSync(p, { recursive: true, force: true })
+		},
+		writeFile: (p, c) => {
+			writeFileSync(p, c)
+		},
+		readFile: (p) => readFileSync(p, "utf8"),
+	}
 }
 
 // ── is_trivial_pr ───────────────────────────────────────────────────────────
@@ -180,24 +181,24 @@ export function nodeWorkdirs(): Workdirs {
  * because the pipeline calls it with an author (line 1912).
  */
 export function isTrivialPr(title: string, _author: string): boolean {
-  const trivialKw = [
-    "dependabot",
-    "update",
-    "bump",
-    "chore(deps)",
-    "pin dependencies",
-    "update version",
-    "docs:",
-    "readme",
-    "changelog",
-  ];
-  // `String(...)` mirrors Python's `str(title)`, so a null/undefined/number
-  // title degrades instead of throwing inside a cron tick.
-  const titleLower = String(title).toLowerCase();
-  for (const kw of trivialKw) {
-    if (titleLower.includes(kw)) return true; // Python line 595
-  }
-  return false; // Python line 597
+	const trivialKw = [
+		"dependabot",
+		"update",
+		"bump",
+		"chore(deps)",
+		"pin dependencies",
+		"update version",
+		"docs:",
+		"readme",
+		"changelog",
+	]
+	// `String(...)` mirrors Python's `str(title)`, so a null/undefined/number
+	// title degrades instead of throwing inside a cron tick.
+	const titleLower = String(title).toLowerCase()
+	for (const kw of trivialKw) {
+		if (titleLower.includes(kw)) return true // Python line 595
+	}
+	return false // Python line 597
 }
 
 // ── _repo_has_bun_lock ──────────────────────────────────────────────────────
@@ -218,32 +219,36 @@ export function isTrivialPr(title: string, _author: string): boolean {
  * counts — and so would a file merely named `bun.lock.bak`.
  */
 export async function repoHasBunLock(
-  api: GhClient,
-  token: string,
-  repo: string,
-  sha: string,
+	api: GhClient,
+	token: string,
+	repo: string,
+	sha: string,
 ): Promise<boolean> {
-  try {
-    const { status, data } = await api.request("GET", `/repos/${repo}/git/trees/${sha}?recursive=1`, {
-      token,
-    });
-    if (status === 200 && Array.isArray(data?.tree)) {
-      for (const item of data.tree as any[]) {
-        const path = typeof item?.path === "string" ? item.path : "";
-        if (path.includes("bun.lock")) return true; // Python line 620
-      }
-    }
-  } catch {
-    /* Python lines 622-623: `except Exception: pass` */
-  }
-  return false; // Python line 624
+	try {
+		const { status, data } = await api.request(
+			"GET",
+			`/repos/${repo}/git/trees/${sha}?recursive=1`,
+			{
+				token,
+			},
+		)
+		if (status === 200 && Array.isArray(data?.tree)) {
+			for (const item of data.tree as any[]) {
+				const path = typeof item?.path === "string" ? item.path : ""
+				if (path.includes("bun.lock")) return true // Python line 620
+			}
+		}
+	} catch {
+		/* Python lines 622-623: `except Exception: pass` */
+	}
+	return false // Python line 624
 }
-import { fixBunLock, fixUvLock } from "./relock.ts";
+
+import { fixBunLock, fixUvLock } from "./relock.ts"
 
 // Re-exported so `pipeline.ts` and the test suite keep importing the two
 // flows from `./lockfix`. This is a live re-export and `./relock` imports
 // `clonePr`/`head`/`reportable` back, so the two modules form an ESM cycle;
 // it is safe because nothing either module reads is touched at
 // module-evaluation time.
-export { fixBunLock, fixUvLock };
-
+export { fixBunLock, fixUvLock }

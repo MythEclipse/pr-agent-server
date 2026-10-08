@@ -16,24 +16,25 @@
  * read from the environment: a policy that an env var can silently switch off
  * is not a policy. Changing a pin is a code change, on purpose.
  */
-import type { GhClient } from "./scan.ts";
-import type { CloseResult } from "./ci.ts";
+
+import type { CloseResult } from "./ci.ts"
+import type { GhClient } from "./scan.ts"
 
 /**
  * Python `TOOLCHAIN_PINS` (lines 510-520), byte-for-byte.
  * `repo full name -> { package -> allowed major }`.
  */
 export const TOOLCHAIN_PINS: Record<string, Record<string, number>> = {
-  "asepharyana/nextjs-template": {
-    typescript: 6,
-    eslint: 9,
-    "eslint-config-next": 16,
-    "eslint-plugin-react": 7,
-    "@tsparticles/react": 3,
-    "@tsparticles/engine": 3,
-    "@tsparticles/slim": 3,
-  },
-};
+	"asepharyana/nextjs-template": {
+		typescript: 6,
+		eslint: 9,
+		"eslint-config-next": 16,
+		"eslint-plugin-react": 7,
+		"@tsparticles/react": 3,
+		"@tsparticles/engine": 3,
+		"@tsparticles/slim": 3,
+	},
+}
 
 /**
  * Python line 531, anchored at the start (Python `re.match`).
@@ -46,10 +47,10 @@ export const TOOLCHAIN_PINS: Record<string, Record<string, number>> = {
  * match, or a re-run of an old title would be judged as if it were the current
  * one. `^` is the JS spelling of `re.match`.
  */
-const BUMP_TITLE = /^chore\(deps(?:-dev)?\): bump ([^ ]+) from ([0-9.]+) to ([0-9.]+)/;
+const BUMP_TITLE = /^chore\(deps(?:-dev)?\): bump ([^ ]+) from ([0-9.]+) to ([0-9.]+)/
 
 /** Python's `(pkg, old_ver, new_ver)` tuple, as an array. */
-export type PinViolation = [string, string, string];
+export type PinViolation = [string, string, string]
 
 /**
  * Python `toolchain_pin_violation(repo_full, title)` (lines 523-541).
@@ -74,17 +75,17 @@ export type PinViolation = [string, string, string];
  * can never be missed by it — it is not on that path.
  */
 export function toolchainPinViolation(repo: string, title: string): PinViolation | null {
-  const pins = TOOLCHAIN_PINS[repo];
-  if (!pins) return null; // Python lines 528-529
-  const m = BUMP_TITLE.exec(String(title));
-  if (!m) return null; // Python line 532-533
-  const [, pkg, oldVer, newVer] = m;
-  const allowedMajor = pins[pkg];
-  if (allowedMajor === undefined) return null; // Python lines 536-537
-  const newMajor = toMajor(newVer);
-  if (newMajor === null) return null; // divergence, see above
-  if (newMajor !== allowedMajor) return [pkg, oldVer, newVer];
-  return null;
+	const pins = TOOLCHAIN_PINS[repo]
+	if (!pins) return null // Python lines 528-529
+	const m = BUMP_TITLE.exec(String(title))
+	if (!m) return null // Python line 532-533
+	const [, pkg, oldVer, newVer] = m
+	const allowedMajor = pins[pkg]
+	if (allowedMajor === undefined) return null // Python lines 536-537
+	const newMajor = toMajor(newVer)
+	if (newMajor === null) return null // divergence, see above
+	if (newMajor !== allowedMajor) return [pkg, oldVer, newVer]
+	return null
 }
 
 /**
@@ -103,9 +104,9 @@ export function toolchainPinViolation(repo: string, title: string): PinViolation
  * the null case, and that is the only one.
  */
 function toMajor(ver: string): number | null {
-  const segment = ver.split(".")[0];
-  if (!/^\d+$/.test(segment)) return null;
-  return Number(segment);
+	const segment = ver.split(".")[0]
+	if (!/^\d+$/.test(segment)) return null
+	return Number(segment)
 }
 
 /**
@@ -121,30 +122,30 @@ function toMajor(ver: string): number | null {
  * The body is transcribed verbatim from Python lines 547-555, arrow included.
  */
 export async function closeToolchainPr(
-  api: GhClient,
-  token: string,
-  repo: string,
-  pr: number,
-  pkg: string,
-  oldVer: string,
-  newVer: string,
+	api: GhClient,
+	token: string,
+	repo: string,
+	pr: number,
+	pkg: string,
+	oldVer: string,
+	newVer: string,
 ): Promise<CloseResult> {
-  const body =
-    `⛔ Auto-closed by PR Queue Worker — **toolchain pin violation**.\n\n` +
-    `\`${pkg}\` ${oldVer} → ${newVer} bumps a pinned toolchain package ` +
-    `whose major must stay as declared in \`package.json\` (exact pin) and ` +
-    `\`.github/dependabot.yml\` (\`ignore\` rule). The vendored Aceternity ` +
-    `components and the CI stack are validated against this major only.\n\n` +
-    `This PR is a policy violation — it will **not** be merged. ` +
-    `If the pin needs changing, do it deliberately via a regular PR.`;
+	const body =
+		`⛔ Auto-closed by PR Queue Worker — **toolchain pin violation**.\n\n` +
+		`\`${pkg}\` ${oldVer} → ${newVer} bumps a pinned toolchain package ` +
+		`whose major must stay as declared in \`package.json\` (exact pin) and ` +
+		`\`.github/dependabot.yml\` (\`ignore\` rule). The vendored Aceternity ` +
+		`components and the CI stack are validated against this major only.\n\n` +
+		`This PR is a policy violation — it will **not** be merged. ` +
+		`If the pin needs changing, do it deliberately via a regular PR.`
 
-  const comment = await api.request("POST", `/repos/${repo}/issues/${pr}/comments`, {
-    token,
-    json: { body },
-  });
-  const closed = await api.request("PATCH", `/repos/${repo}/pulls/${pr}`, {
-    token,
-    json: { state: "closed" },
-  });
-  return { status: closed.status, commentStatus: comment.status };
+	const comment = await api.request("POST", `/repos/${repo}/issues/${pr}/comments`, {
+		token,
+		json: { body },
+	})
+	const closed = await api.request("PATCH", `/repos/${repo}/pulls/${pr}`, {
+		token,
+		json: { state: "closed" },
+	})
+	return { status: closed.status, commentStatus: comment.status }
 }

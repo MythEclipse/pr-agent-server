@@ -111,13 +111,13 @@ export function decoupleAndConvertToHunksWithLinesNumbers(
 			const isPlus = newContentLines.some((l) => l.startsWith("+"))
 			const isMinus = oldContentLines.some((l) => l.startsWith("-"))
 			if (isPlus || isMinus) {
-				out = out.replace(/\s*$/, "") + "\n__new hunk__\n"
+				out = `${out.replace(/\s*$/, "")}\n__new hunk__\n`
 				for (let i = 0; i < newContentLines.length; i++) {
 					out += `${start2 + i} ${newContentLines[i]}\n`
 				}
 			}
 			if (isMinus) {
-				out = out.replace(/\s*$/, "") + "\n__old hunk__\n"
+				out = `${out.replace(/\s*$/, "")}\n__old hunk__\n`
 				for (const l of oldContentLines) out += `${l}\n`
 			}
 			newContentLines = []

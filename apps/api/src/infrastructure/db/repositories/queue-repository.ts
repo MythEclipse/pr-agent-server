@@ -16,6 +16,17 @@ import type {
 } from "../../../domain/review/queue-repository.ts"
 import { reviewQueueJobs } from "../schema.ts"
 
+/**
+ * The query surface a repository needs, generic over the driver.
+ *
+ * PgDatabase's first generic is the driver's query-result type, which differs
+ * between the node-postgres handle production uses and the pglite handle the
+ * integration tests use. `unknown` is not accepted there, so this alias holds
+ * the single unavoidable `any` rather than repeating it at each use site.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: documented above
+export type TAnyPgDatabase = PgDatabase<any, any>
+
 export const queueKeyOf = (owner: string, repo: string, pr: number): string =>
 	`${owner}/${repo}#${pr}`
 
@@ -39,7 +50,7 @@ const toJob = (row: typeof reviewQueueJobs.$inferSelect): TQueueJob => ({
  * production passes the node-postgres handle, the integration tests pass the
  * in-memory pglite one, and only the session result types differ.
  */
-export function createQueueRepository<TDb extends PgDatabase<any, any>>(db: TDb): QueueRepository {
+export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): QueueRepository {
 	return {
 		async enqueue(input: TEnqueueInput) {
 			const key = queueKeyOf(input.owner, input.repo, input.pr)

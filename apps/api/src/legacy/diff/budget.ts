@@ -58,7 +58,7 @@ export function generateFullPatch(
 		if (!convertHunksToLineNumbers) {
 			patchFinal = `\n\n## File: '${data.filename.trim()}'\n\n${data.patch.trim()}\n`
 		} else {
-			patchFinal = "\n\n" + data.patch.trim()
+			patchFinal = `\n\n${data.patch.trim()}`
 		}
 		patches.push(patchFinal)
 		totalTokens += countTokens(patchFinal)
@@ -149,7 +149,7 @@ export function getPrDiff(
 	}
 	const addedStr = clipTokens(ADDED_FILES_ + addedList.join("\n"), maxTokensForLists - currToken)
 	if (addedStr) {
-		finalDiff += "\n\n" + addedStr
+		finalDiff += `\n\n${addedStr}`
 		currToken += countTokens(addedStr) + 2
 	}
 	const modifiedStr = clipTokens(
@@ -157,14 +157,14 @@ export function getPrDiff(
 		maxTokensForLists - currToken,
 	)
 	if (modifiedStr) {
-		finalDiff += "\n\n" + modifiedStr
+		finalDiff += `\n\n${modifiedStr}`
 		currToken += countTokens(modifiedStr) + 2
 	}
 	const deletedStr = clipTokens(
 		DELETED_FILES_ + deletedList.join("\n"),
 		maxTokensForLists - currToken,
 	)
-	if (deletedStr) finalDiff += "\n\n" + deletedStr
+	if (deletedStr) finalDiff += `\n\n${deletedStr}`
 
 	return { diff: finalDiff, remainingFiles }
 }

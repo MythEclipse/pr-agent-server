@@ -15,20 +15,20 @@
  *    makes the budget rotate fairly across forks instead of always serving
  *    whichever one the installation listing happened to return first.
  */
-import { loadSyncState, saveSyncState, SYNC_STATE_FILE } from "../state.ts";
-import { num, syncConfig, syncEntry, upstreamSyncEnabled } from "./config.ts";
-import type { SyncState } from "./config.ts";
-import { listForkRepos } from "./repos.ts";
-import { syncRevertMerge, type RevertArgs, type RevertOutcome } from "./merge.ts";
-import type { RunUpstreamSyncDeps as RunUpstreamSyncDepsType } from "./types.ts";
-import { verifyPendingSyncs } from "./verify.ts";
-import { sweepForks } from "./sweep.ts";
-import { syncForkRepo } from "./fork.ts";
+import { loadSyncState, SYNC_STATE_FILE, saveSyncState } from "../state.ts"
+import type { SyncState } from "./config.ts"
+import { num, syncConfig, syncEntry, upstreamSyncEnabled } from "./config.ts"
+import { syncForkRepo } from "./fork.ts"
+import { type RevertArgs, type RevertOutcome, syncRevertMerge } from "./merge.ts"
+import { listForkRepos } from "./repos.ts"
+import { sweepForks } from "./sweep.ts"
+import type { RunUpstreamSyncDeps as RunUpstreamSyncDepsType } from "./types.ts"
+import { verifyPendingSyncs } from "./verify.ts"
 
 // Re-exported, not fixed: the test suite and src/index.ts import these two by
 // name from "./run.ts", so re-exporting is what keeps the split invisible to them.
-export { syncForkRepo } from "./fork.ts";
-export { openSyncPr, type OpenPrOpts } from "./openpr.ts";
+export { syncForkRepo } from "./fork.ts"
+export { type OpenPrOpts, openSyncPr } from "./openpr.ts"
 
 // ── Types ────────────────────────────────────────────────────────────────────
 //
@@ -37,15 +37,15 @@ export { openSyncPr, type OpenPrOpts } from "./openpr.ts";
 // names from "./run.ts", so keeping the re-export means the move changed no
 // caller. See ./types for the note on why `report` is required.
 export type {
-  PostDiscord,
-  ReportPort,
-  RunUpstreamSyncDeps,
-  SyncAgentPort,
-  SyncForkDeps,
-  SyncRequest,
-  SyncResult,
-  SyncStatus,
-} from "./types.ts";
+	PostDiscord,
+	ReportPort,
+	RunUpstreamSyncDeps,
+	SyncAgentPort,
+	SyncForkDeps,
+	SyncRequest,
+	SyncResult,
+	SyncStatus,
+} from "./types.ts"
 
 // No timeout budgets or truncation widths are declared here. Every one of them
 // belongs to a fork operation, so they went to ./fork, ./openpr or ./resolve with
@@ -57,7 +57,7 @@ export type {
 // ── run_upstream_sync ────────────────────────────────────────────────────────
 
 /** Python `run_upstream_sync(only=None, dry=False)`'s keyword arguments. */
-export type RunUpstreamSyncOptions = { only?: string; dry?: boolean };
+export type RunUpstreamSyncOptions = { only?: string; dry?: boolean }
 
 /**
  * Python `run_upstream_sync(only=None, dry=False)` (lines 1723-1829): "Sync
@@ -79,94 +79,92 @@ export type RunUpstreamSyncOptions = { only?: string; dry?: boolean };
  * `--sync-only <repo> --dry` always runs even when the budget is spent.
  */
 export async function runUpstreamSync(
-  deps: RunUpstreamSyncDepsType,
-  opts: RunUpstreamSyncOptions = {},
+	deps: RunUpstreamSyncDepsType,
+	opts: RunUpstreamSyncOptions = {},
 ): Promise<string[]> {
-  const lines: string[] = [];
-  const only = opts.only;
-  // `dry` lives in `opts` only. The Python's `run_upstream_sync(only=None,
-  // dry=False)` has exactly one place to say it, and a `deps.dry` alongside it
-  // would be a second source of truth that can disagree with the first.
-  const dry = opts.dry ?? false;
-  const enabled = upstreamSyncEnabled();
+	const lines: string[] = []
+	const only = opts.only
+	// `dry` lives in `opts` only. The Python's `run_upstream_sync(only=None,
+	// dry=False)` has exactly one place to say it, and a `deps.dry` alongside it
+	// would be a second source of truth that can disagree with the first.
+	const dry = opts.dry ?? false
+	const enabled = upstreamSyncEnabled()
 
-  // Python lines 1732-1733: disabled means disabled, EXCEPT for an explicit
-  // `only`, which is a human asking for one specific fork right now.
-  if (!enabled && !only) return lines;
+	// Python lines 1732-1733: disabled means disabled, EXCEPT for an explicit
+	// `only`, which is a human asking for one specific fork right now.
+	if (!enabled && !only) return lines
 
-  try {
-    // Python lines 1735-1737: a dry run gets a throwaway state so the gating
-    // `_sync_entry` calls cannot touch the real /tmp file.
-    const state: SyncState = dry ? {} : deps.loadState();
+	try {
+		// Python lines 1735-1737: a dry run gets a throwaway state so the gating
+		// `_sync_entry` calls cannot touch the real /tmp file.
+		const state: SyncState = dry ? {} : deps.loadState()
 
-    let forks = await listForkRepos(deps.api);
-    if (only) forks = forks.filter((f) => f[1] === only);
-    const tokenByRepo: Record<string, string> = {};
-    for (const [token, fork] of forks) tokenByRepo[fork] = token;
+		let forks = await listForkRepos(deps.api)
+		if (only) forks = forks.filter((f) => f[1] === only)
+		const tokenByRepo: Record<string, string> = {}
+		for (const [token, fork] of forks) tokenByRepo[fork] = token
 
-    // Python line 1742: verification first.
-    lines.push(
-      ...(await verifyPendingSyncs(
-        {
-          api: deps.api,
-          enabled,
-          repoOverrides: deps.repoOverrides,
-          now: deps.now,
-          saveState: deps.saveState,
-          revertMerge: (args: RevertArgs): Promise<RevertOutcome> =>
-            Promise.resolve(
-              syncRevertMerge(deps.run, deps.workdirs, {
-                ...args,
-                fetchGhToken: deps.fetchGhToken,
-              }),
-            ),
-          postDiscord: deps.postDiscord,
-        },
-        state,
-        tokenByRepo,
-        dry,
-      )),
-    );
+		// Python line 1742: verification first.
+		lines.push(
+			...(await verifyPendingSyncs(
+				{
+					api: deps.api,
+					enabled,
+					repoOverrides: deps.repoOverrides,
+					now: deps.now,
+					saveState: deps.saveState,
+					revertMerge: (args: RevertArgs): Promise<RevertOutcome> =>
+						Promise.resolve(
+							syncRevertMerge(deps.run, deps.workdirs, {
+								...args,
+								fetchGhToken: deps.fetchGhToken,
+							}),
+						),
+					postDiscord: deps.postDiscord,
+				},
+				state,
+				tokenByRepo,
+				dry,
+			)),
+		)
 
-    const now = deps.now();
-    // Python line 1746: "oldest attempt first so the per-tick budget rotates
-    // fairly across forks". A fork never synced sorts as 0 — oldest.
-    const ordered = [...forks].sort(
-      (a, b) => num(syncEntry(state, a[1]).last_sync_ts) - num(syncEntry(state, b[1]).last_sync_ts),
-    );
+		const now = deps.now()
+		// Python line 1746: "oldest attempt first so the per-tick budget rotates
+		// fairly across forks". A fork never synced sorts as 0 — oldest.
+		const ordered = [...forks].sort(
+			(a, b) => num(syncEntry(state, a[1]).last_sync_ts) - num(syncEntry(state, b[1]).last_sync_ts),
+		)
 
-    const baseCfg = syncConfig("", deps.repoOverrides, enabled);
-    // Python line 1747 reads `UPSTREAM_SYNC["max_per_tick"]` — worker-wide, NOT
-    // the per-repo config, so a per-repo override cannot raise the budget.
-    await sweepForks(
-      deps,
-      deps.syncForkRepo ?? syncForkRepo,
-      ordered,
-      state,
-      lines,
-      { only, dry, enabled, now, budget: baseCfg.max_per_tick },
-    );
+		const baseCfg = syncConfig("", deps.repoOverrides, enabled)
+		// Python line 1747 reads `UPSTREAM_SYNC["max_per_tick"]` — worker-wide, NOT
+		// the per-repo config, so a per-repo override cannot raise the budget.
+		await sweepForks(deps, deps.syncForkRepo ?? syncForkRepo, ordered, state, lines, {
+			only,
+			dry,
+			enabled,
+			now,
+			budget: baseCfg.max_per_tick,
+		})
 
-    if (!dry) deps.saveState(state); // Python line 1826
-  } catch (err) {
-    // Python lines 1827-1828: a sync error is a REPORT LINE, never an exception.
-    const name = err instanceof Error ? err.name : typeof err;
-    const msg = err instanceof Error ? err.message : String(err);
-    lines.push(`⚠️  Upstream sync error: ${name}: ${msg}`);
-  }
-  return lines;
+		if (!dry) deps.saveState(state) // Python line 1826
+	} catch (err) {
+		// Python lines 1827-1828: a sync error is a REPORT LINE, never an exception.
+		const name = err instanceof Error ? err.name : typeof err
+		const msg = err instanceof Error ? err.message : String(err)
+		lines.push(`⚠️  Upstream sync error: ${name}: ${msg}`)
+	}
+	return lines
 }
 
-
 export type FileSyncState = {
-  load: () => SyncState;
-  save: (state: SyncState) => void;
-};
+	load: () => SyncState
+	save: (state: SyncState) => void
+}
 
 /** Read/write the sync state against a real file, not the module singleton. */
 export function fileSyncState(file: string = SYNC_STATE_FILE): FileSyncState {
-  return {
-    load: () => loadSyncState(file),
-    save: (state) => saveSyncState(file, state),
-  };
+	return {
+		load: () => loadSyncState(file),
+		save: (state) => saveSyncState(file, state),
+	}
 }

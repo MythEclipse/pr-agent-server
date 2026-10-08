@@ -13,14 +13,14 @@ export function buildLargeDiff(
 	const headLines = headContent.split("\n")
 	// Simple whole-file diff: present as full add or full delete
 	if (!baseContent) {
-		return `@@ -0,0 +1,${headLines.length} @@\n${headLines.map((l) => "+" + l).join("\n")}`
+		return `@@ -0,0 +1,${headLines.length} @@\n${headLines.map((l) => `+${l}`).join("\n")}`
 	}
 	if (!headContent) {
-		return `@@ -1,${baseLines.length} +0,0 @@\n${baseLines.map((l) => "-" + l).join("\n")}`
+		return `@@ -1,${baseLines.length} +0,0 @@\n${baseLines.map((l) => `-${l}`).join("\n")}`
 	}
 	// fallback: whole-file replace (approximation)
 	return `@@ -1,${baseLines.length} +1,${headLines.length} @@\n${baseLines
-		.map((l) => "-" + l)
-		.concat(headLines.map((l) => "+" + l))
+		.map((l) => `-${l}`)
+		.concat(headLines.map((l) => `+${l}`))
 		.join("\n")}`
 }

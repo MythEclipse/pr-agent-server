@@ -1,7 +1,7 @@
-import { defineConfig } from "vite"
-import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { tanstackRouter } from "@tanstack/router-plugin/vite"
+import react from "@vitejs/plugin-react"
+import { defineConfig } from "vite"
 
 // Dev proxies to the API so cookies stay same-origin. In production Hono
 // serves this build from WEB_DIST_PATH and falls through to index.html.

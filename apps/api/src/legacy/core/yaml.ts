@@ -67,7 +67,7 @@ export function tryFixYaml(
 	const copyB = copy.map((l) => {
 		const initSpace = l.length - l.trimStart().length
 		if (initSpace === 2 && !l.includes("|2") && l.includes("}")) {
-			return "    " + l.trimStart()
+			return `    ${l.trimStart()}`
 		}
 		return l
 	})
@@ -78,7 +78,7 @@ export function tryFixYaml(
 	const snippetPattern = /```(yaml|yml)?([\s\S]*?)```(?=\s*$|")/
 	let m = snippetPattern.exec(copy.join("\n"))
 	if (!m) m = snippetPattern.exec(original)
-	if (m && m[2]) {
+	if (m?.[2]) {
 		data = tryParse(m[2])
 		if (data) return data
 	}
@@ -108,7 +108,7 @@ export function tryFixYaml(
 	}
 
 	// fallback 5: remove leading '+'
-	copy = lines.map((l) => (l.startsWith("+") ? " " + l.slice(1) : l))
+	copy = lines.map((l) => (l.startsWith("+") ? ` ${l.slice(1)}` : l))
 	data = tryParse(copy.join("\n"))
 	if (data) return data
 
@@ -139,7 +139,7 @@ export function tryFixYaml(
 			startLine = -1
 			return l
 		} else if (startLine !== -1) {
-			return "    " + l
+			return `    ${l}`
 		}
 		return l
 	})

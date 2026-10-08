@@ -122,45 +122,45 @@ export async function runDescribe(
 	const ordered: Record<string, unknown> = {}
 	if (typeof data["User Description"] === "string")
 		ordered["User Description"] = data["User Description"]
-	if (data["type"] !== undefined) ordered["type"] = data["type"]
-	if (data["labels"] !== undefined) ordered["labels"] = data["labels"]
-	if (data["description"] !== undefined) ordered["description"] = data["description"]
-	if (data["changes_diagram"] !== undefined) {
-		const sanitized = sanitizeDiagram(String(data["changes_diagram"]))
+	if (data.type !== undefined) ordered.type = data.type
+	if (data.labels !== undefined) ordered.labels = data.labels
+	if (data.description !== undefined) ordered.description = data.description
+	if (data.changes_diagram !== undefined) {
+		const sanitized = sanitizeDiagram(String(data.changes_diagram))
 		if (sanitized) {
-			ordered["changes_diagram"] = applyDiagramDirection(sanitized, "adaptive", 5)
+			ordered.changes_diagram = applyDiagramDirection(sanitized, "adaptive", 5)
 		}
 	}
-	if (data["pr_files"] !== undefined) ordered["pr_files"] = data["pr_files"]
+	if (data.pr_files !== undefined) ordered.pr_files = data.pr_files
 	for (const k of Object.keys(data)) {
 		if (!(k in ordered)) ordered[k] = data[k]
 	}
 
 	// File labels grouping (mirrors _prepare_file_labels)
 	const fileLabelDict: Record<string, FileLabelEntry[]> = {}
-	const prFiles = (ordered["pr_files"] as unknown[]) ?? []
+	const prFiles = (ordered.pr_files as unknown[]) ?? []
 	for (const f of prFiles as Record<string, unknown>[]) {
 		const req = ["changes_title", "filename", "label"]
 		if (!req.every((r) => f[r] !== undefined && f[r] !== "")) {
 			continue
 		}
-		const filename = String(f["filename"]).replace(/'/g, "`")
-		const changesSummary = String(f["changes_summary"] ?? "").trim()
-		const changesTitle = String(f["changes_title"]).trim()
-		const label = String(f["label"]).trim().toLowerCase()
+		const filename = String(f.filename).replace(/'/g, "`")
+		const changesSummary = String(f.changes_summary ?? "").trim()
+		const changesTitle = String(f.changes_title).trim()
+		const label = String(f.label).trim().toLowerCase()
 		if (!changesSummary) continue
 		if (!fileLabelDict[label]) fileLabelDict[label] = []
 		fileLabelDict[label].push({ filename, changesTitle, changesSummary })
 	}
 
 	// Build PR body (mirrors _prepare_pr_answer)
-	const aiTitle = String(ordered["title"] ?? title).trim()
+	const aiTitle = String(ordered.title ?? title).trim()
 	const publishTitle = opts?.generateAiTitle ? aiTitle : title
 	const cleanup = { ...ordered }
-	delete cleanup["labels"]
-	delete cleanup["title"]
-	if (!descCfg.enablePrType) delete cleanup["type"]
-	if (descCfg.enablePrDescription === false) delete cleanup["description"]
+	delete cleanup.labels
+	delete cleanup.title
+	if (!descCfg.enablePrType) delete cleanup.type
+	if (descCfg.enablePrDescription === false) delete cleanup.description
 
 	let prBody = ""
 	const entries = Object.entries(cleanup)
@@ -252,7 +252,7 @@ export async function runDescribe(
 }
 
 export function deriveLabels(data: Record<string, unknown>): string[] {
-	const raw = data["labels"] ?? data["type"]
+	const raw = data.labels ?? data.type
 	let labels: string[] = []
 	if (Array.isArray(raw)) labels = raw.map((x) => String(x))
 	else if (typeof raw === "string") labels = raw.split(",").map((s) => s.trim())
@@ -291,7 +291,8 @@ function applyDiagramDirection(diagram: string, _direction: string, threshold: n
 function longestChain(edges: string[][]): number {
 	const adj: Record<string, string[]> = {}
 	for (const [a, b] of edges) {
-		;(adj[a] ??= []).push(b)
+		if (!adj[a]) adj[a] = []
+		adj[a].push(b)
 	}
 	let best = 0
 	const visited = new Set<string>()

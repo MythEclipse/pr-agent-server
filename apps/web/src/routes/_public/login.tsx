@@ -3,12 +3,12 @@
 // better-auth's role field is `input: false` and a signup path would have
 // nowhere to put a role.
 
-import { useState, type FormEvent } from "react"
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
-import { authClient } from "#/libs/auth/client.ts"
+import { type FormEvent, useState } from "react"
 import { Button } from "#/components/ui/button.tsx"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "#/components/ui/card.tsx"
 import { Input } from "#/components/ui/input.tsx"
+import { authClient } from "#/libs/auth/client.ts"
 
 export const Route = createFileRoute("/_public/login")({
 	component: LoginPage,

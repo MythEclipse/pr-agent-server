@@ -176,7 +176,8 @@ async function generateSummariasedSuggestions(
 	const groups: Record<string, Suggestion[]> = {}
 	for (const s of suggestions) {
 		const label = s.label.trim().replace(/^['"]|['"]$/g, "")
-		;(groups[label] ??= []).push(s)
+		if (!groups[label]) groups[label] = []
+		groups[label].push(s)
 	}
 	const sortedLabels = Object.keys(groups).sort(
 		(a, b) =>
@@ -210,8 +211,8 @@ async function generateSummariasedSuggestions(
 				link = ""
 			}
 			const content = insertBrAfterXChars(s.suggestion_content.replace(/\n$/, ""), 84)
-			const existing = s.existing_code.replace(/\n$/, "") + "\n"
-			const improved = s.improved_code.replace(/\n$/, "") + "\n"
+			const existing = `${s.existing_code.replace(/\n$/, "")}\n`
+			const improved = `${s.improved_code.replace(/\n$/, "")}\n`
 			const patch = unifiedDiff(existing, improved)
 			let summary = s.one_sentence_summary.trim().replace(/\.$/, "")
 			if (/(?:^|['"])<.*>(?:['"]|$)/.test(summary)) {
@@ -271,8 +272,8 @@ function unifiedDiff(existing: string, improved: string): string {
 	const start = prefix + 1
 	out.push("```diff")
 	out.push(`@@ -${start},${oldMid.length} +${start},${newMid.length} @@`)
-	for (const l of oldMid) out.push("-" + l)
-	for (const l of newMid) out.push("+" + l)
+	for (const l of oldMid) out.push(`-${l}`)
+	for (const l of newMid) out.push(`+${l}`)
 	out.push("```")
 	return out.join("\n")
 }

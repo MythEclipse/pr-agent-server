@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: ported pr_agent code; GitHub payloads are untyped JSON
 /**
  * Open-PR fan-out — port of `scripts/pr-queue-worker.py` lines 301-316
  * (`gather_open_prs`).
@@ -25,24 +26,24 @@
 
 /** The subset of `GitHubApi.request` this module uses. */
 export type GhClient = {
-  request(
-    method: string,
-    path: string,
-    opts?: { token?: string; json?: unknown },
-  ): Promise<{ status: number; data: any }>;
-};
+	request(
+		method: string,
+		path: string,
+		opts?: { token?: string; json?: unknown },
+	): Promise<{ status: number; data: any }>
+}
 
 /** `GhClient` plus the token minting `gatherOpenPrs` needs. */
 export type GhAppClient = GhClient & {
-  installationToken(installId: number): Promise<string>;
-};
+	installationToken(installId: number): Promise<string>
+}
 
 /** Python's `(token, repo_full, pr)` triple, as an object. */
-export type OpenPr = { token: string; repo: string; pr: any };
+export type OpenPr = { token: string; repo: string; pr: any }
 
 /** Python `str.title` is irrelevant here; this is just a printable field. */
 const repoField = (repo: any): string | undefined =>
-  typeof repo?.full_name === "string" ? repo.full_name : undefined;
+	typeof repo?.full_name === "string" ? repo.full_name : undefined
 
 /**
  * Python `gather_open_prs()` (lines 301-316).
@@ -64,31 +65,31 @@ const repoField = (repo: any): string | undefined =>
  * shape guards already make the degenerate responses safe.
  */
 export async function gatherOpenPrs(api: GhAppClient): Promise<OpenPr[]> {
-  const results: OpenPr[] = [];
-  const { data: installs } = await api.request("GET", "/app/installations");
-  if (!Array.isArray(installs)) return results; // Python lines 304-305
-  for (const inst of installs) {
-    const id = (inst as { id?: number })?.id;
-    if (typeof id !== "number") continue; // guard: `inst["id"]` would throw
-    const token = await api.installationToken(id);
-    if (!token) continue; // Python lines 308-309
-    const { data: repos } = await api.request("GET", "/installation/repositories", { token });
-    const list =
-      repos !== null && typeof repos === "object" && Array.isArray((repos as any).repositories)
-        ? (repos as any).repositories
-        : [];
-    for (const repo of list) {
-      const fullName = repoField(repo);
-      if (!fullName) continue; // guard: `repo['full_name']` would throw
-      const { data: prs } = await api.request(
-        "GET",
-        `/repos/${fullName}/pulls?state=open&per_page=20&sort=updated`,
-        { token },
-      );
-      if (Array.isArray(prs)) {
-        for (const pr of prs) results.push({ token, repo: fullName, pr });
-      }
-    }
-  }
-  return results;
+	const results: OpenPr[] = []
+	const { data: installs } = await api.request("GET", "/app/installations")
+	if (!Array.isArray(installs)) return results // Python lines 304-305
+	for (const inst of installs) {
+		const id = (inst as { id?: number })?.id
+		if (typeof id !== "number") continue // guard: `inst["id"]` would throw
+		const token = await api.installationToken(id)
+		if (!token) continue // Python lines 308-309
+		const { data: repos } = await api.request("GET", "/installation/repositories", { token })
+		const list =
+			repos !== null && typeof repos === "object" && Array.isArray((repos as any).repositories)
+				? (repos as any).repositories
+				: []
+		for (const repo of list) {
+			const fullName = repoField(repo)
+			if (!fullName) continue // guard: `repo['full_name']` would throw
+			const { data: prs } = await api.request(
+				"GET",
+				`/repos/${fullName}/pulls?state=open&per_page=20&sort=updated`,
+				{ token },
+			)
+			if (Array.isArray(prs)) {
+				for (const pr of prs) results.push({ token, repo: fullName, pr })
+			}
+		}
+	}
+	return results
 }

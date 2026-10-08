@@ -75,9 +75,9 @@ export function convertToMarkdownV2(
 			md += renderTicketCompliance(emoji, value, gfmSupported)
 		} else if (keyNice.toLowerCase().includes("contribution time cost estimate")) {
 			const obj = value as Record<string, string>
-			const best = expandMinuteSuffix(String(obj["best_case"] ?? ""))
-			const avg = expandMinuteSuffix(String(obj["average_case"] ?? ""))
-			const worst = expandMinuteSuffix(String(obj["worst_case"] ?? ""))
+			const best = expandMinuteSuffix(String(obj.best_case ?? ""))
+			const avg = expandMinuteSuffix(String(obj.average_case ?? ""))
+			const worst = expandMinuteSuffix(String(obj.worst_case ?? ""))
 			if (gfmSupported) {
 				md += `<tr><td>${emoji}&nbsp;<strong>Contribution time estimate</strong> (best, average, worst case): ${best} | ${avg} | ${worst}</td></tr>\n`
 			} else {
@@ -122,9 +122,9 @@ export function convertToMarkdownV2(
 					continue
 				}
 				const o = (it ?? {}) as Record<string, string>
-				const file = o["relevant_file"] || ""
-				const line = o["relevant_line"] || ""
-				const sug = o["suggestion"] || ""
+				const file = o.relevant_file || ""
+				const line = o.relevant_line || ""
+				const sug = o.suggestion || ""
 				const loc = file ? `${file}${line ? `:${line}` : ""}` : ""
 				parts.push(loc ? `**${loc}** — ${sug}` : sug)
 			}
@@ -152,7 +152,7 @@ export function convertToMarkdownV2(
 	}
 
 	if (gfmSupported) md += "</table>\n"
-	return md.trimEnd() + "\n"
+	return `${md.trimEnd()}\n`
 }
 
 export function isValueNo(value: string): boolean {
@@ -168,7 +168,7 @@ export function emphasizeHeader(s: string): string {
 	// bold anything before the first ':' if short
 	const lines = s.split("\n").map((l) => {
 		const m = /^([^:]{1,60}):(.*)$/.exec(l)
-		if (m && m[1].trim()) return `**${m[1].trim()}**:${m[2]}`
+		if (m?.[1].trim()) return `**${m[1].trim()}**:${m[2]}`
 		return l
 	})
 	return lines.join("\n")
@@ -181,13 +181,12 @@ function renderTicketCompliance(emoji: string, value: unknown, gfm: boolean): st
 	for (const t of items) {
 		if (gfm) {
 			const tObj = t as Record<string, string>
-			const url = tObj["ticket_url"] || ""
-			const compliance = tObj["overall_compliance_level"] || tObj["ticket_compliance_level"] || ""
-			const explanation = tObj["explanation"] || tObj["why_compliance_level_partial"] || ""
+			const url = tObj.ticket_url || ""
+			const compliance = tObj.overall_compliance_level || tObj.ticket_compliance_level || ""
+			const explanation = tObj.explanation || tObj.why_compliance_level_partial || ""
 			out += `<tr><td>${emoji}&nbsp;<strong>Ticket compliance check</strong><br><br>\n`
 			if (
-				url &&
-				url.trim() &&
+				url?.trim() &&
 				!/^(n\/?a|none|no ticket|no\b)/i.test(url.trim()) &&
 				/^https?:\/\//i.test(url.trim())
 			) {

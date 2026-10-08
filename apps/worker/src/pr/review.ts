@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: ported pr_agent code / test fixtures use untyped JSON shapes
 /**
  * PR-Agent trigger + review-comment detection — port of
  * `scripts/pr-queue-worker.py` lines 320-330 (`find_review_comment`),
@@ -27,24 +28,24 @@
  * risk a key-order difference producing a different byte string, which verifies
  * as an invalid signature.
  */
-import { createHmac } from "node:crypto";
-import type { GhAppClient, GhClient } from "./scan.ts";
+import { createHmac } from "node:crypto"
+import type { GhAppClient, GhClient } from "./scan.ts"
 
 /** Python `BOT_LOGIN` (line 64). */
-export const BOT_LOGIN = "mytheclipsebotreview";
+export const BOT_LOGIN = "mytheclipsebotreview"
 
 /** Python `WEBHOOK_SECRET` default (line 61) — empty, never a real secret. */
-export const DEFAULT_WEBHOOK_SECRET = "";
+export const DEFAULT_WEBHOOK_SECRET = ""
 /** Python `PR_AGENT_WEBHOOK_URL` default (line 62). */
-export const DEFAULT_WEBHOOK_URL = "https://pr-agent.asepharyana.my.id/api/v1/github_webhooks";
+export const DEFAULT_WEBHOOK_URL = "https://pr-agent.asepharyana.my.id/api/v1/github_webhooks"
 /** Python `httpx.Client(timeout=30)` (line 446) for the webhook POST. */
-const WEBHOOK_TIMEOUT_MS = 30_000;
+const WEBHOOK_TIMEOUT_MS = 30_000
 
 /** Injection seam: the `fetch` used for the webhook POST. */
 export type FetchLike = (
-  input: string,
-  init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal },
-) => Promise<{ status: number }>;
+	input: string,
+	init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal },
+) => Promise<{ status: number }>
 
 /**
  * Everything the trigger needs from the environment, INJECTED.
@@ -57,46 +58,47 @@ export type FetchLike = (
  * reads `process.env` at import is untestable in isolation.
  */
 export type TriggerDeps = {
-  /** Used for the best-effort installation-id lookup. */
-  api: GhAppClient;
-  fetchImpl: FetchLike;
-  /** `PR_AGENT_WEBHOOK_SECRET`. Empty string signs with the empty key. */
-  webhookSecret?: string;
-  /** `PR_AGENT_WEBHOOK_URL`. */
-  webhookUrl?: string;
-  /** Unix seconds for `x-github-delivery`. Defaults to the wall clock. */
-  nowSec?: number;
-};
+	/** Used for the best-effort installation-id lookup. */
+	api: GhAppClient
+	fetchImpl: FetchLike
+	/** `PR_AGENT_WEBHOOK_SECRET`. Empty string signs with the empty key. */
+	webhookSecret?: string
+	/** `PR_AGENT_WEBHOOK_URL`. */
+	webhookUrl?: string
+	/** Unix seconds for `x-github-delivery`. Defaults to the wall clock. */
+	nowSec?: number
+}
 
 /** Python's return: an int status, or `f"error: {e}"` (line 453). */
-export type TriggerResult = number | string;
+export type TriggerResult = number | string
 
 /** One issue comment, as far as this module reads it. */
-const loginOf = (c: any): string =>
-  typeof c?.user?.login === "string" ? c.user.login : "";
-const bodyOf = (c: any): string => (typeof c?.body === "string" ? c.body : "");
+const loginOf = (c: any): string => (typeof c?.user?.login === "string" ? c.user.login : "")
+const bodyOf = (c: any): string => (typeof c?.body === "string" ? c.body : "")
 
 /** The bot's review body for `pr`, or null. Python lines 320-330. */
 export async function findReviewComment(
-  api: GhClient,
-  token: string,
-  repo: string,
-  pr: number,
+	api: GhClient,
+	token: string,
+	repo: string,
+	pr: number,
 ): Promise<string | null> {
-  const { data: comments } = await api.request("GET", `/repos/${repo}/issues/${pr}/comments`, { token });
-  if (!Array.isArray(comments)) return null; // Python lines 322-323
-  for (const c of comments) {
-    // SUBSTRING test, as Python line 326: GitHub's App login is
-    // `mytheclipsebotreview[bot]`, so equality against the bare login would
-    // never match. NOT `in`: JavaScript's `in` is the property-existence
-    // operator and THROWS a TypeError on a string primitive, where Python's
-    // `in` is a substring test. `includes` is the equivalent.
-    if (loginOf(c).includes(BOT_LOGIN)) {
-      const body = bodyOf(c);
-      if (body.includes("PR Reviewer Guide")) return body;
-    }
-  }
-  return null;
+	const { data: comments } = await api.request("GET", `/repos/${repo}/issues/${pr}/comments`, {
+		token,
+	})
+	if (!Array.isArray(comments)) return null // Python lines 322-323
+	for (const c of comments) {
+		// SUBSTRING test, as Python line 326: GitHub's App login is
+		// `mytheclipsebotreview[bot]`, so equality against the bare login would
+		// never match. NOT `in`: JavaScript's `in` is the property-existence
+		// operator and THROWS a TypeError on a string primitive, where Python's
+		// `in` is a substring test. `includes` is the equivalent.
+		if (loginOf(c).includes(BOT_LOGIN)) {
+			const body = bodyOf(c)
+			if (body.includes("PR Reviewer Guide")) return body
+		}
+	}
+	return null
 }
 
 /**
@@ -114,22 +116,24 @@ export async function findReviewComment(
  * containing only the heading is a review in progress, not a verdict.
  */
 export async function findTrivialNoReviewMarker(
-  api: GhClient,
-  token: string,
-  repo: string,
-  pr: number,
+	api: GhClient,
+	token: string,
+	repo: string,
+	pr: number,
 ): Promise<boolean> {
-  const { data: comments } = await api.request("GET", `/repos/${repo}/issues/${pr}/comments`, { token });
-  if (!Array.isArray(comments)) return false; // Python lines 340-341
-  for (const c of comments) {
-    if (loginOf(c).includes(BOT_LOGIN)) {
-      const body = bodyOf(c);
-      if (body.includes("PR Code Suggestions") && body.includes("No code suggestions found")) {
-        return true;
-      }
-    }
-  }
-  return false;
+	const { data: comments } = await api.request("GET", `/repos/${repo}/issues/${pr}/comments`, {
+		token,
+	})
+	if (!Array.isArray(comments)) return false // Python lines 340-341
+	for (const c of comments) {
+		if (loginOf(c).includes(BOT_LOGIN)) {
+			const body = bodyOf(c)
+			if (body.includes("PR Code Suggestions") && body.includes("No code suggestions found")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 /**
@@ -142,33 +146,31 @@ export async function findTrivialNoReviewMarker(
  * failure here means id 0, and the webhook is still sent.
  */
 async function resolveInstallId(api: GhAppClient, repo: string): Promise<number> {
-  try {
-    const { data: installs } = await api.request("GET", "/app/installations");
-    if (!Array.isArray(installs)) return 0;
-    for (const inst of installs) {
-      const id = (inst as { id?: number })?.id;
-      if (typeof id !== "number") continue;
-      const token = await api.installationToken(id);
-      const { data: repos } = await api.request(
-        "GET",
-        "/installation/repositories?per_page=100",
-        { token },
-      );
-      // Python line 425 guards the dict before `.get`, and filters non-dict
-      // entries; both are reproduced so a malformed entry cannot throw here.
-      const list =
-        repos !== null && typeof repos === "object" && Array.isArray((repos as any).repositories)
-          ? (repos as any).repositories
-          : [];
-      const fulls = (list as any[])
-        .filter((r: any) => r !== null && typeof r === "object")
-        .map((r: any) => r.full_name);
-      if (fulls.includes(repo)) return id;
-    }
-  } catch {
-    return 0; // Python lines 429-430
-  }
-  return 0;
+	try {
+		const { data: installs } = await api.request("GET", "/app/installations")
+		if (!Array.isArray(installs)) return 0
+		for (const inst of installs) {
+			const id = (inst as { id?: number })?.id
+			if (typeof id !== "number") continue
+			const token = await api.installationToken(id)
+			const { data: repos } = await api.request("GET", "/installation/repositories?per_page=100", {
+				token,
+			})
+			// Python line 425 guards the dict before `.get`, and filters non-dict
+			// entries; both are reproduced so a malformed entry cannot throw here.
+			const list =
+				repos !== null && typeof repos === "object" && Array.isArray((repos as any).repositories)
+					? (repos as any).repositories
+					: []
+			const fulls = (list as any[])
+				.filter((r: any) => r !== null && typeof r === "object")
+				.map((r: any) => r.full_name)
+			if (fulls.includes(repo)) return id
+		}
+	} catch {
+		return 0 // Python lines 429-430
+	}
+	return 0
 }
 
 /**
@@ -182,63 +184,63 @@ async function resolveInstallId(api: GhAppClient, repo: string): Promise<number>
  * no-review, which is the exact failure this function exists to avoid.
  */
 export async function triggerReview(
-  deps: TriggerDeps,
-  repo: string,
-  pr: number,
-  title: string,
-  headSha: string,
-  headRef: string,
-  baseRef: string,
+	deps: TriggerDeps,
+	repo: string,
+	pr: number,
+	title: string,
+	headSha: string,
+	headRef: string,
+	baseRef: string,
 ): Promise<TriggerResult> {
-  const installId = await resolveInstallId(deps.api, repo);
+	const installId = await resolveInstallId(deps.api, repo)
 
-  // Key order is the Python's (lines 431-443).
-  //
-  // NOT byte-identical to the Python's `json.dumps`: that call uses the default
-  // separators (", " and ": "), while `JSON.stringify` emits "," and ":". The
-  // server parses the body as JSON, so this is a PARSE-equivalent difference,
-  // not a behavioural one — the same judgement state.ts records for the fix
-  // state file. What IS load-bearing is that the signature below is computed
-  // over THIS string and the same string is POSTed, so the two can never
-  // disagree; the receiver verifies bytes against the bytes it received, not
-  // against a re-serialisation of them.
-  const payload = JSON.stringify({
-    action: "opened",
-    number: pr,
-    sender: { login: "mytheclipsebotreview", id: 0, type: "Bot" },
-    installation: { id: installId },
-    pull_request: {
-      url: `https://api.github.com/repos/${repo}/pulls/${pr}`,
-      number: pr,
-      title,
-      state: "open",
-      draft: false,
-      labels: [],
-      head: { sha: headSha, ref: headRef },
-      base: { ref: baseRef, repo: { full_name: repo } },
-    },
-    repository: { full_name: repo },
-  });
+	// Key order is the Python's (lines 431-443).
+	//
+	// NOT byte-identical to the Python's `json.dumps`: that call uses the default
+	// separators (", " and ": "), while `JSON.stringify` emits "," and ":". The
+	// server parses the body as JSON, so this is a PARSE-equivalent difference,
+	// not a behavioural one — the same judgement state.ts records for the fix
+	// state file. What IS load-bearing is that the signature below is computed
+	// over THIS string and the same string is POSTed, so the two can never
+	// disagree; the receiver verifies bytes against the bytes it received, not
+	// against a re-serialisation of them.
+	const payload = JSON.stringify({
+		action: "opened",
+		number: pr,
+		sender: { login: "mytheclipsebotreview", id: 0, type: "Bot" },
+		installation: { id: installId },
+		pull_request: {
+			url: `https://api.github.com/repos/${repo}/pulls/${pr}`,
+			number: pr,
+			title,
+			state: "open",
+			draft: false,
+			labels: [],
+			head: { sha: headSha, ref: headRef },
+			base: { ref: baseRef, repo: { full_name: repo } },
+		},
+		repository: { full_name: repo },
+	})
 
-  // Python line 444. Signed over the SAME string that is sent below.
-  const secret = deps.webhookSecret ?? DEFAULT_WEBHOOK_SECRET;
-  const sig = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`;
-  const nowSec = deps.nowSec ?? Math.floor(Date.now() / 1000);
+	// Python line 444. Signed over the SAME string that is sent below.
+	const secret = deps.webhookSecret ?? DEFAULT_WEBHOOK_SECRET
+	const sig = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`
+	const nowSec = deps.nowSec ?? Math.floor(Date.now() / 1000)
 
-  try {
-    const r = await deps.fetchImpl(deps.webhookUrl ?? DEFAULT_WEBHOOK_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-github-event": "pull_request",
-        "x-hub-signature-256": sig,
-        "x-github-delivery": `cron-${nowSec}-${pr}`,
-      },
-      body: payload,
-      signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
-    });
-    return r.status;
-  } catch (e) {
-    return `error: ${e instanceof Error ? e.message : String(e)}`; // line 453
-  }
+	try {
+		const r = await deps.fetchImpl(deps.webhookUrl ?? DEFAULT_WEBHOOK_URL, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"x-github-event": "pull_request",
+				"x-hub-signature-256": sig,
+				"x-github-delivery": `cron-${nowSec}-${pr}`,
+			},
+			body: payload,
+			signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+		})
+		return r.status
+	} catch (e) {
+		return `error: ${e instanceof Error ? e.message : String(e)}` // line 453
+	}
 }

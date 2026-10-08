@@ -1,3 +1,5 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: ported pr_agent code; GitHub payloads are untyped JSON
+// biome-ignore-all lint/style/noNonNullAssertion: test helper asserts immediately after
 /**
  * Fork discovery and upstream comparison — port of
  * `scripts/pr-queue-worker.py` lines 1069-1091 (`list_fork_repos`),
@@ -19,25 +21,25 @@
  *    and `behind_by` is the fork's own divergence, which is never discarded.
  *    The docstring records the `git rev-list --count` cross-check.
  */
-import type { GhAppClient } from "../pr/scan.ts";
-import { SYNC_PR_PREFIX } from "./merge.ts";
+import type { GhAppClient } from "../pr/scan.ts"
+import { SYNC_PR_PREFIX } from "./merge.ts"
 
 /**
  * `[app_token, fork_full_name, parent_full_name, default_branch]` for every
  * fork in the installation — the Python's 4-tuple, kept as a tuple because the
  * brief specifies that return shape.
  */
-export type ForkRepo = [string, string, string, string];
+export type ForkRepo = [string, string, string, string]
 
 /** What `upstreamStatus` returns, or null when the comparison is unavailable. */
-export type UpstreamInfo = [mergeCount: number, divergence: number, upstreamTip: string];
+export type UpstreamInfo = [mergeCount: number, divergence: number, upstreamTip: string]
 
 const asObject = (value: unknown): Record<string, any> | undefined =>
-  value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, any>)
-    : undefined;
+	value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, any>)
+		: undefined
 
-const str = (value: unknown): string => (typeof value === "string" ? value : "");
+const str = (value: unknown): string => (typeof value === "string" ? value : "")
 
 /**
  * Python `list_fork_repos()` (lines 1069-1091).
@@ -60,42 +62,38 @@ const str = (value: unknown): string => (typeof value === "string" ? value : "")
  * branch resolution in `runUpstreamSync` applies.
  */
 export async function listForkRepos(api: GhAppClient): Promise<ForkRepo[]> {
-  const out: ForkRepo[] = [];
-  const { data: installs } = await api.request("GET", "/app/installations");
-  if (!Array.isArray(installs)) return out; // Python line 1075
+	const out: ForkRepo[] = []
+	const { data: installs } = await api.request("GET", "/app/installations")
+	if (!Array.isArray(installs)) return out // Python line 1075
 
-  for (const inst of installs) {
-    const id = (inst as { id?: number })?.id;
-    if (typeof id !== "number") continue; // guard: `inst["id"]` would throw
-    const token = await api.installationToken(id);
-    if (!token) continue; // Python line 1077
-    const { data: repos } = await api.request(
-      "GET",
-      "/installation/repositories?per_page=100",
-      { token },
-    );
-    const list = Array.isArray(asObject(repos)?.repositories)
-      ? (repos as any).repositories
-      : [];
-    for (const r of list) {
-      const full = str(r?.full_name);
-      if (!full || !r?.fork) continue; // Python lines 1082-1083
-      const { status, data: meta } = await api.request("GET", `/repos/${full}`, { token });
-      const parent = asObject(meta)?.parent;
-      const parentFull = str(asObject(parent)?.full_name);
-      if (status !== 200 || !parentFull) continue; // Python lines 1086-1087
-      const defaultBranch = str(asObject(meta)?.default_branch) || "main"; // line 1088
-      out.push([token, full, parentFull, defaultBranch]);
-    }
-  }
-  return out;
+	for (const inst of installs) {
+		const id = (inst as { id?: number })?.id
+		if (typeof id !== "number") continue // guard: `inst["id"]` would throw
+		const token = await api.installationToken(id)
+		if (!token) continue // Python line 1077
+		const { data: repos } = await api.request("GET", "/installation/repositories?per_page=100", {
+			token,
+		})
+		const list = Array.isArray(asObject(repos)?.repositories) ? (repos as any).repositories : []
+		for (const r of list) {
+			const full = str(r?.full_name)
+			if (!full || !r?.fork) continue // Python lines 1082-1083
+			const { status, data: meta } = await api.request("GET", `/repos/${full}`, { token })
+			const parent = asObject(meta)?.parent
+			const parentFull = str(asObject(parent)?.full_name)
+			if (status !== 200 || !parentFull) continue // Python lines 1086-1087
+			const defaultBranch = str(asObject(meta)?.default_branch) || "main" // line 1088
+			out.push([token, full, parentFull, defaultBranch])
+		}
+	}
+	return out
 }
 
 /** What `upstreamStatus` needs beyond the request itself. */
 export type UpstreamStatusOpts = {
-  /** Python `_fetch_gh_token()` (line 1106) — `""` means no PAT is available. */
-  fetchGhToken?: () => string;
-};
+	/** Python `_fetch_gh_token()` (line 1106) — `""` means no PAT is available. */
+	fetchGhToken?: () => string
+}
 
 /**
  * Python `upstream_status(token, fork, parent, local_branch, upstream_branch)`
@@ -117,42 +115,42 @@ export type UpstreamStatusOpts = {
  * token, not the PAT.
  */
 export async function upstreamStatus(
-  api: GhAppClient,
-  token: string,
-  fork: string,
-  parent: string,
-  localBranch: string,
-  upstreamBranch: string,
-  opts: UpstreamStatusOpts = {},
+	api: GhAppClient,
+	token: string,
+	fork: string,
+	parent: string,
+	localBranch: string,
+	upstreamBranch: string,
+	opts: UpstreamStatusOpts = {},
 ): Promise<UpstreamInfo | null> {
-  // Python line 1102: the OWNER part only.
-  const owner = parent.includes("/") ? parent.split("/")[0] : parent;
-  const path = `/repos/${fork}/compare/${localBranch}...${owner}:${upstreamBranch}`;
-  let { status, data } = await api.request("GET", path, { token });
-  if (status !== 200) {
-    const pat = opts.fetchGhToken?.() ?? "";
-    if (pat) ({ status, data } = await api.request("GET", path, { token: pat }));
-  }
-  const body = asObject(data);
-  if (status !== 200 || !body) return null; // Python line 1110
+	// Python line 1102: the OWNER part only.
+	const owner = parent.includes("/") ? parent.split("/")[0] : parent
+	const path = `/repos/${fork}/compare/${localBranch}...${owner}:${upstreamBranch}`
+	let { status, data } = await api.request("GET", path, { token })
+	if (status !== 200) {
+		const pat = opts.fetchGhToken?.() ?? ""
+		if (pat) ({ status, data } = await api.request("GET", path, { token: pat }))
+	}
+	const body = asObject(data)
+	if (status !== 200 || !body) return null // Python line 1110
 
-  const commits = Array.isArray(body.commits) ? body.commits : [];
-  let tip = commits.length ? str(commits[commits.length - 1]?.sha) : "";
-  if (!tip) {
-    const second = await api.request("GET", `/repos/${parent}/commits/${upstreamBranch}`, { token });
-    if (second.status === 200) tip = str(asObject(second.data)?.sha);
-  }
-  // `int(...)` on a missing or non-numeric count is ZERO in the sense that
-  // matters here: a non-numeric value must not become NaN, because NaN fails
-  // every `merge_count <= 0` comparison as `false` and the fork would be synced
-  // against garbage.
-  return [toInt(body.ahead_by), toInt(body.behind_by), tip];
+	const commits = Array.isArray(body.commits) ? body.commits : []
+	let tip = commits.length ? str(commits[commits.length - 1]?.sha) : ""
+	if (!tip) {
+		const second = await api.request("GET", `/repos/${parent}/commits/${upstreamBranch}`, { token })
+		if (second.status === 200) tip = str(asObject(second.data)?.sha)
+	}
+	// `int(...)` on a missing or non-numeric count is ZERO in the sense that
+	// matters here: a non-numeric value must not become NaN, because NaN fails
+	// every `merge_count <= 0` comparison as `false` and the fork would be synced
+	// against garbage.
+	return [toInt(body.ahead_by), toInt(body.behind_by), tip]
 }
 
 /** Python `int(data.get("ahead_by", 0))` — non-finite/absent becomes 0. */
 function toInt(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : 0;
+	const n = Number(value)
+	return Number.isFinite(n) ? Math.trunc(n) : 0
 }
 
 /**
@@ -166,23 +164,21 @@ function toInt(value: unknown): number {
  * not block this one.
  */
 export async function syncOpenPr(
-  api: GhAppClient,
-  token: string,
-  fork: string,
-  baseBranch: string,
+	api: GhAppClient,
+	token: string,
+	fork: string,
+	baseBranch: string,
 ): Promise<number> {
-  const { data: prs } = await api.request(
-    "GET",
-    `/repos/${fork}/pulls?state=open&per_page=50`,
-    { token },
-  );
-  if (!Array.isArray(prs)) return 0; // Python line 1124
-  for (const pr of prs) {
-    const headRef = str(asObject(pr?.head)?.ref);
-    if (headRef.startsWith(SYNC_PR_PREFIX) && str(asObject(pr?.base)?.ref) === baseBranch) {
-      const n = Number((pr as any)?.number);
-      return Number.isFinite(n) ? n : 0;
-    }
-  }
-  return 0;
+	const { data: prs } = await api.request("GET", `/repos/${fork}/pulls?state=open&per_page=50`, {
+		token,
+	})
+	if (!Array.isArray(prs)) return 0 // Python line 1124
+	for (const pr of prs) {
+		const headRef = str(asObject(pr?.head)?.ref)
+		if (headRef.startsWith(SYNC_PR_PREFIX) && str(asObject(pr?.base)?.ref) === baseBranch) {
+			const n = Number((pr as any)?.number)
+			return Number.isFinite(n) ? n : 0
+		}
+	}
+	return 0
 }

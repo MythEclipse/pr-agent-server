@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: ported pr_agent code; GitHub payloads are untyped JSON
 /**
  * Approve + merge actions — port of `scripts/pr-queue-worker.py` lines
  * 455-458 (`approve_pr`) and 460-470 (`merge_pr`).
@@ -19,16 +20,16 @@
  * `mergePr` returns the retry's `api.request` directly rather than awaiting and
  * catching it, so there is no second guard here on top of the client's.
  */
-import type { GhClient } from "./scan.ts";
+import type { GhClient } from "./scan.ts"
 
 /** Python's `(status, data)` pair from `merge_pr`, as an object. */
-export type MergeResult = { status: number; data: any };
+export type MergeResult = { status: number; data: any }
 
 /** The one thing `mergePr` needs from the outside world. */
 export type MergeDeps = {
-  /** Python `_fetch_gh_token()` (lines 599-605). `""` means "no PAT". */
-  fetchGhToken: () => string;
-};
+	/** Python `_fetch_gh_token()` (lines 599-605). `""` means "no PAT". */
+	fetchGhToken: () => string
+}
 
 /**
  * Python `approve_pr(token, repo_full, pr_num)` (lines 455-458).
@@ -39,16 +40,16 @@ export type MergeDeps = {
  * (`status, _ = gh_api(...)`) and carries nothing the caller uses.
  */
 export async function approvePr(
-  api: GhClient,
-  token: string,
-  repo: string,
-  pr: number,
+	api: GhClient,
+	token: string,
+	repo: string,
+	pr: number,
 ): Promise<number> {
-  const { status } = await api.request("POST", `/repos/${repo}/pulls/${pr}/reviews`, {
-    token,
-    json: { event: "APPROVE", body: "✅ Auto-approved by PR Queue Worker." },
-  });
-  return status; // Python line 458
+	const { status } = await api.request("POST", `/repos/${repo}/pulls/${pr}/reviews`, {
+		token,
+		json: { event: "APPROVE", body: "✅ Auto-approved by PR Queue Worker." },
+	})
+	return status // Python line 458
 }
 
 /**
@@ -64,32 +65,32 @@ export async function approvePr(
  * them would double the API calls for no new information.
  */
 export async function mergePr(
-  deps: MergeDeps,
-  api: GhClient,
-  token: string,
-  repo: string,
-  pr: number,
-  sha: string,
+	deps: MergeDeps,
+	api: GhClient,
+	token: string,
+	repo: string,
+	pr: number,
+	sha: string,
 ): Promise<MergeResult> {
-  const path = `/repos/${repo}/pulls/${pr}/merge`;
-  // Key order is the Python dict's (line 461).
-  const json = { commit_title: `Auto-merge PR #${pr}`, merge_method: "merge", sha };
+	const path = `/repos/${repo}/pulls/${pr}/merge`
+	// Key order is the Python dict's (line 461).
+	const json = { commit_title: `Auto-merge PR #${pr}`, merge_method: "merge", sha }
 
-  const first = await api.request("PUT", path, { token, json });
-  if (first.status === 403) {
-    // Python lines 463-469.
-    const pat = deps.fetchGhToken();
-    if (pat) {
-      // The RETRY's result is what the caller gets — a successful PAT merge must
-      // not be reported as the App's 403.
-      return api.request("PUT", path, { token: pat, json });
-    }
-    // No PAT means the returned 403 is the App's refusal alone, and the caller
-    // cannot tell that from a 403 the owner token also received — which is how
-    // a missing `gh auth token` reads as a GitHub policy block.
-    console.error(
-      `[merge] ${repo}#${pr}: HTTP 403 and \`gh auth token\` returned nothing — the owner retry did not run, so this is the App's refusal alone`,
-    );
-  }
-  return { status: first.status, data: first.data };
+	const first = await api.request("PUT", path, { token, json })
+	if (first.status === 403) {
+		// Python lines 463-469.
+		const pat = deps.fetchGhToken()
+		if (pat) {
+			// The RETRY's result is what the caller gets — a successful PAT merge must
+			// not be reported as the App's 403.
+			return api.request("PUT", path, { token: pat, json })
+		}
+		// No PAT means the returned 403 is the App's refusal alone, and the caller
+		// cannot tell that from a 403 the owner token also received — which is how
+		// a missing `gh auth token` reads as a GitHub policy block.
+		console.error(
+			`[merge] ${repo}#${pr}: HTTP 403 and \`gh auth token\` returned nothing — the owner retry did not run, so this is the App's refusal alone`,
+		)
+	}
+	return { status: first.status, data: first.data }
 }

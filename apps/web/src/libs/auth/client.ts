@@ -5,8 +5,8 @@
 // same-origin in both dev (Vite proxies /api/auth) and prod (Hono serves the
 // SPA and the API from one host), which keeps the session cookie first-party.
 
-import { createAuthClient } from "better-auth/react"
 import { adminClient } from "better-auth/client/plugins"
+import { createAuthClient } from "better-auth/react"
 
 export const authClient = createAuthClient({
 	baseURL: `${import.meta.env.VITE_API_URL ?? ""}/api/auth`,

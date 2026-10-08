@@ -2,8 +2,8 @@
 // published to GitHub, so an operator can see what the model said without
 // opening the PR.
 
-import { Link, createFileRoute } from "@tanstack/react-router"
 import { useSuspenseQuery } from "@tanstack/react-query"
+import { createFileRoute, Link } from "@tanstack/react-router"
 import { Badge, STATUS_TONE } from "#/components/ui/badge.tsx"
 import { Button } from "#/components/ui/button.tsx"
 import { Card, CardContent, CardHeader, CardTitle } from "#/components/ui/card.tsx"

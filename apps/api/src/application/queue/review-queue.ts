@@ -72,7 +72,8 @@ export class ReviewQueue {
 	/** Fill free slots from the head of the queue. */
 	private pump(): void {
 		while (this.running < this.concurrency && this.pending.length > 0) {
-			const job = this.pending.shift()!
+			// The length check above guarantees a shift; `!` would hide a future refactor bug.
+			const job = this.pending.shift() as ReviewJob
 			this.running++
 			void this.execute(job)
 		}
@@ -95,15 +96,14 @@ export class ReviewQueue {
 			// Coalesced re-run: the deduped webhook(s) landed while this ran, so
 			// review the PR again against its current head. Doing it here — before
 			// the idle check below — keeps the "pending implies running" invariant.
-			if (this.rerun.delete(key)) {
-				this.pending.push(job)
-				this.running--
-				this.pump()
-				return
-			}
+			const rerun = this.rerun.delete(key)
+			if (rerun) this.pending.push(job)
 			this.running--
 			this.pump()
-			if (this.running === 0 && this.pending.length === 0) {
+			// No `return` inside `finally`: it would swallow a throw from the try
+			// block above. The rerun case only skips the idle check, which cannot
+			// be correct anyway — a job was just re-queued, so the queue is not idle.
+			if (!rerun && this.running === 0 && this.pending.length === 0) {
 				const waiters = this.waiters
 				this.waiters = []
 				for (const resolve of waiters) resolve()

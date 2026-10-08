@@ -4,7 +4,7 @@
 // The UX half of the authz pair. The authoritative half is adminProcedure on
 // the oRPC side — this redirect is a convenience, never the enforcement.
 
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router"
+import { createFileRoute, Outlet, redirect } from "@tanstack/react-router"
 import { authClient } from "#/libs/auth/client.ts"
 import { SignOutButton } from "./_authenticated/_components/sign-out-button.tsx"
 

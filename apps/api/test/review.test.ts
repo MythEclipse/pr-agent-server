@@ -141,15 +141,15 @@ describe("yaml", () => {
 `
 		const data = loadYaml(text, ["review:", "relevant_tests:"], "review", "security_concerns")
 		expect(data).not.toBeNull()
-		const review = (data as Record<string, unknown>)["review"] as Record<string, unknown>
-		expect(review["score"]).toBe(89)
-		expect((review["key_issues_to_review"] as unknown[]).length).toBe(1)
+		const review = (data as Record<string, unknown>).review as Record<string, unknown>
+		expect(review.score).toBe(89)
+		expect((review.key_issues_to_review as unknown[]).length).toBe(1)
 	})
 
 	test("loadYaml recovers from fenced yaml", () => {
 		const text = "Here is the review:\n```yaml\nreview:\n  score: 42\n```\n"
 		const data = loadYaml(text, [], "review", "security_concerns")
-		expect((data as Record<string, unknown>)?.["review"]).toBeDefined()
+		expect((data as Record<string, unknown>)?.review).toBeDefined()
 	})
 })
 

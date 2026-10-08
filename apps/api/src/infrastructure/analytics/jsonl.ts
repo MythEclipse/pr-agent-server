@@ -125,7 +125,7 @@ export function generateMetrics(dir: string): string {
 	for (const [model, cnt] of Object.entries(modelFailures).sort()) {
 		lines.push(`pr_agent_model_failures{model="${model}"} ${cnt}`)
 	}
-	return lines.join("\n") + "\n"
+	return `${lines.join("\n")}\n`
 }
 
 // ── writers ────────────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ export function appendAnalyticsEvent(dir: string, event: AnalyticsEvent): Promis
 					_file: "",
 				},
 			}
-			await appendFile(join(dir, `pr-agent.${process.pid}.log`), JSON.stringify(rec) + "\n")
+			await appendFile(join(dir, `pr-agent.${process.pid}.log`), `${JSON.stringify(rec)}\n`)
 		} catch {
 			// analytics must never break the review path
 		}
@@ -171,7 +171,7 @@ export function appendBunAnalyticsRecord(dir: string, record: BunAnalyticsRecord
 	return enqueueWrite(async () => {
 		try {
 			await mkdir(dir, { recursive: true })
-			await appendFile(join(dir, "pr-agent.bun.jsonl"), JSON.stringify(record) + "\n")
+			await appendFile(join(dir, "pr-agent.bun.jsonl"), `${JSON.stringify(record)}\n`)
 		} catch {
 			// analytics must never break the review path
 		}

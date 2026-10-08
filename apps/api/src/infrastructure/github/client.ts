@@ -51,6 +51,7 @@ export class AppAuthClient {
 		this.appClient = new Octokit({
 			baseUrl: cfg.github.baseUrl,
 			authStrategy: () => ({
+				// biome-ignore lint/suspicious/noExplicitAny: Octokit leaves authStrategy.hook untyped
 				hook: async (request: any, options: Record<string, any>) => {
 					const jwtAuth = await this.appAuth({ type: "app" })
 					options.headers = options.headers ?? {}

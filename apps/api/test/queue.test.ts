@@ -13,7 +13,11 @@ describe("ReviewQueue", () => {
 			run: async (j) => {
 				ran.push(`${j.repo}#${j.pr}`)
 				// Only the first attempt blocks; the coalesced re-run runs to completion.
-				if (ran.length === 1) await new Promise<void>((r) => (gate.release = r))
+				if (ran.length === 1) {
+					await new Promise<void>((r) => {
+						gate.release = r
+					})
+				}
 			},
 		})
 		expect(q.enqueue({ owner: "o", repo: "r", pr: 1 })).toBe("queued")
@@ -32,7 +36,9 @@ describe("ReviewQueue", () => {
 		const q = new ReviewQueue({
 			run: async (j) => {
 				ran.push(`${j.repo}#${j.pr}`)
-				await new Promise<void>((r) => (release = r))
+				await new Promise<void>((r) => {
+					release = r
+				})
 			},
 		})
 		q.enqueue({ owner: "o", repo: "r", pr: 1 })

@@ -7,7 +7,7 @@
 // `error.code === "ETIMEDOUT"` and a missing binary through ENOENT, so both
 // are translated back into the Bun shape rather than changing every call site.
 
-import { spawnSync, type SpawnSyncReturns } from "node:child_process"
+import { type SpawnSyncReturns, spawnSync } from "node:child_process"
 
 export interface ProcResult {
 	/** Exit code, or the Python-parity sentinel 124 when the timeout fires. */

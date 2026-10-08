@@ -25,7 +25,7 @@ describe("analytics", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pr-agent-test-"))
 		writeFileSync(
 			join(dir, "pr-agent.123.log"),
-			[legacyLine(1000), legacyLine(2000)].join("\n") + "\n",
+			`${[legacyLine(1000), legacyLine(2000)].join("\n")}\n`,
 		)
 
 		const records = readAnalyticsLogs(dir)

@@ -30,24 +30,24 @@
  * lines 994-1003; a per-repo override may replace any of them.
  */
 export interface SyncConfig {
-  /** `cfg.get("enabled", True)` — a per-repo opt-out (line 1750). */
-  enabled: boolean;
-  /** Hours between upstream comparisons for this fork (line 994). */
-  interval_h: number;
-  /** Forks attempted per 5-minute tick (line 995). */
-  max_per_tick: number;
-  /** Hand a conflicted merge to the agent (line 996). */
-  resolve_conflicts: boolean;
-  /** Quality pass on a clean merge (line 997). */
-  ai_fix_after_merge: boolean;
-  /** Revert our own merge commit if fork CI fails (line 998). */
-  verify_ci: boolean;
-  /** Stop watching (KEEPING the merge) after this many hours (line 999). */
-  verify_ci_max_age_h: number;
-  /** Wait this long before concluding "this repo has no CI" (line 1000). */
-  no_ci_grace_s: number;
-  /** Pin the local/upstream branch pair instead of deriving it (line 1003). */
-  branches?: { local?: string; upstream?: string };
+	/** `cfg.get("enabled", True)` — a per-repo opt-out (line 1750). */
+	enabled: boolean
+	/** Hours between upstream comparisons for this fork (line 994). */
+	interval_h: number
+	/** Forks attempted per 5-minute tick (line 995). */
+	max_per_tick: number
+	/** Hand a conflicted merge to the agent (line 996). */
+	resolve_conflicts: boolean
+	/** Quality pass on a clean merge (line 997). */
+	ai_fix_after_merge: boolean
+	/** Revert our own merge commit if fork CI fails (line 998). */
+	verify_ci: boolean
+	/** Stop watching (KEEPING the merge) after this many hours (line 999). */
+	verify_ci_max_age_h: number
+	/** Wait this long before concluding "this repo has no CI" (line 1000). */
+	no_ci_grace_s: number
+	/** Pin the local/upstream branch pair instead of deriving it (line 1003). */
+	branches?: { local?: string; upstream?: string }
 }
 
 /**
@@ -56,10 +56,10 @@ export interface SyncConfig {
  * from the resolved config, at line 1747), so it is excluded to keep a single
  * budget per tick rather than one per fork.
  */
-export type RepoOverride = Partial<Omit<SyncConfig, "repos" | "max_per_tick">>;
+export type RepoOverride = Partial<Omit<SyncConfig, "repos" | "max_per_tick">>
 
 /** Per-repo overrides, keyed by `owner/fork`. */
-export type RepoOverrides = Record<string, RepoOverride>;
+export type RepoOverrides = Record<string, RepoOverride>
 
 /**
  * The worker-wide defaults, transcribed from Python lines 994-1003.
@@ -70,15 +70,15 @@ export type RepoOverrides = Record<string, RepoOverride>;
  * at import. `runUpstreamSync` merges it in when it resolves a config.
  */
 export const UPSTREAM_SYNC_DEFAULTS: SyncConfig = {
-  enabled: true,
-  interval_h: 1.0,
-  max_per_tick: 2,
-  resolve_conflicts: true,
-  ai_fix_after_merge: true,
-  verify_ci: true,
-  verify_ci_max_age_h: 6.0,
-  no_ci_grace_s: 600,
-};
+	enabled: true,
+	interval_h: 1.0,
+	max_per_tick: 2,
+	resolve_conflicts: true,
+	ai_fix_after_merge: true,
+	verify_ci: true,
+	verify_ci_max_age_h: 6.0,
+	no_ci_grace_s: 600,
+}
 
 // ── Sync state ───────────────────────────────────────────────────────────────
 
@@ -86,17 +86,17 @@ export const UPSTREAM_SYNC_DEFAULTS: SyncConfig = {
  * The on-disk sync state, kept in state.ts's exact shape so the two
  * serializers stay interchangeable across the cut-over.
  */
-export type SyncState = Record<string, Record<string, unknown>>;
+export type SyncState = Record<string, Record<string, unknown>>
 
 /** `pending_verify` as written by a successful push (Python lines 1647-1650). */
 export interface PendingVerify {
-  /** The merge commit we pushed. */
-  sha: string;
-  /** The fork's tip before the merge — the revert target. */
-  pre_merge_sha: string;
-  branch: string;
-  /** Unix seconds, from `time.time()`. */
-  pushed_at: number;
+	/** The merge commit we pushed. */
+	sha: string
+	/** The fork's tip before the merge — the revert target. */
+	pre_merge_sha: string
+	branch: string
+	/** Unix seconds, from `time.time()`. */
+	pushed_at: number
 }
 
 /**
@@ -106,12 +106,12 @@ export interface PendingVerify {
  * carries that null through the cut-over.
  */
 export interface SyncEntry extends Record<string, unknown> {
-  last_sync_ts?: number;
-  last_attempt_sha?: string;
-  last_merged_upstream_sha?: string;
-  skip_reason?: string;
-  notified?: boolean;
-  pending_verify?: PendingVerify | null;
+	last_sync_ts?: number
+	last_attempt_sha?: string
+	last_merged_upstream_sha?: string
+	skip_reason?: string
+	notified?: boolean
+	pending_verify?: PendingVerify | null
 }
 
 /**
@@ -121,7 +121,8 @@ export interface SyncEntry extends Record<string, unknown> {
  * Python tests writes through the same accessor.
  */
 export function syncEntry(state: SyncState, repo: string): SyncEntry {
-  return (state[repo] ?? (state[repo] = {})) as SyncEntry;
+	if (state[repo] === undefined) state[repo] = {}
+	return state[repo] as SyncEntry
 }
 
 /**
@@ -132,10 +133,12 @@ export function syncEntry(state: SyncState, repo: string): SyncEntry {
  * returns undefined for all three, and the caller guards on `sha` being
  * truthy — the same predicate.
  */
-export function pendingVerify(entry: Record<string, unknown> | undefined): PendingVerify | undefined {
-  const pending = entry?.pending_verify;
-  if (pending === null || pending === undefined || typeof pending !== "object") return undefined;
-  return pending as PendingVerify;
+export function pendingVerify(
+	entry: Record<string, unknown> | undefined,
+): PendingVerify | undefined {
+	const pending = entry?.pending_verify
+	if (pending === null || pending === undefined || typeof pending !== "object") return undefined
+	return pending as PendingVerify
 }
 
 /**
@@ -146,8 +149,8 @@ export function pendingVerify(entry: Record<string, unknown> | undefined): Pendi
  * rather than wedge a fork forever.
  */
 export function num(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
+	const n = Number(value)
+	return Number.isFinite(n) ? n : 0
 }
 
 // ── Config resolution ────────────────────────────────────────────────────────
@@ -162,12 +165,12 @@ export function num(value: unknown): number {
  * disable switch testable without touching `process.env`.
  */
 export function syncConfig(
-  repo: string,
-  overrides: RepoOverrides = {},
-  enabled = UPSTREAM_SYNC_DEFAULTS.enabled,
+	repo: string,
+	overrides: RepoOverrides = {},
+	enabled = UPSTREAM_SYNC_DEFAULTS.enabled,
 ): SyncConfig {
-  const override = overrides[repo] ?? {};
-  return { ...UPSTREAM_SYNC_DEFAULTS, ...override, enabled: override.enabled ?? enabled };
+	const override = overrides[repo] ?? {}
+	return { ...UPSTREAM_SYNC_DEFAULTS, ...override, enabled: override.enabled ?? enabled }
 }
 
 /**
@@ -178,6 +181,8 @@ export function syncConfig(
  * `process.env`, and so the production wiring reads the real `process.env`
  * at the moment the tick runs.
  */
-export function upstreamSyncEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return env.PR_AGENT_UPSTREAM_SYNC !== "0";
+export function upstreamSyncEnabled(
+	env: Record<string, string | undefined> = process.env,
+): boolean {
+	return env.PR_AGENT_UPSTREAM_SYNC !== "0"
 }

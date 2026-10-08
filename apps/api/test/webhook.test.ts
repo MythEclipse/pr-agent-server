@@ -12,7 +12,7 @@ const env: WebhookEnv = {
 	discordWebhookUrl: "",
 	discordAlertWebhookUrl: "",
 }
-const sign = (b: string) => "sha256=" + createHmac("sha256", "s3cret").update(b).digest("hex")
+const sign = (b: string) => `sha256=${createHmac("sha256", "s3cret").update(b).digest("hex")}`
 // Real queue with a recording no-op worker; `sink` records the jobs it accepts.
 const fakeQueue = (sink: ReviewJob[] = []) =>
 	new ReviewQueue({

@@ -122,9 +122,9 @@ export async function chatCompletion(opts: {
 	// temperature omitted for models that don't support it (incl. claude-opus-5)
 	const isNoTemp = NO_SUPPORT_TEMPERATURE_MODELS.has(model)
 	if (temperature !== undefined && !isNoTemp) {
-		body["temperature"] = temperature
+		body.temperature = temperature
 	}
-	if (opts.maxTokens) body["max_tokens"] = opts.maxTokens
+	if (opts.maxTokens) body.max_tokens = opts.maxTokens
 
 	const controller = new AbortController()
 	const timeout = setTimeout(() => controller.abort(), cfg.aiTimeoutMs || 600000)

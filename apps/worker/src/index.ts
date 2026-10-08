@@ -17,37 +17,37 @@
  * lock through `onLockAcquired`; without that seam the handler has nothing to
  * release, and a stale lock wedges every later tick.
  */
-import { bootstrapEnv } from "./env.ts";
-import { spawnSyncCompat } from "./lib/proc.ts";
+import { bootstrapEnv } from "./env.ts"
+import { spawnSyncCompat } from "./lib/proc.ts"
 
-bootstrapEnv();
+bootstrapEnv()
 
-import { readFileSync, realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { AgentClient } from "./agent.ts";
-import { notifyReview, postDiscordOps } from "./discord.ts";
-import { GitHubApi } from "./github.ts";
-import { runGit } from "./git.ts";
-import { LOCK_FILE, WorkerLock } from "./lock.ts";
-import { nodeProcessDeps } from "./pr/autofix.ts";
-import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix.ts";
-import { runSyncHooks } from "./ops/syncHooks.ts";
-import { runTick, type WorkerDeps } from "./pr/pipeline.ts";
-import { Report } from "./report.ts";
-import { FIX_STATE_FILE, loadFixState, loadSyncState, saveFixState } from "./state.ts";
-import { fileSyncState, runUpstreamSync } from "./sync/run.ts";
+import { readFileSync, realpathSync } from "node:fs"
+import { fileURLToPath } from "node:url"
+import { AgentClient } from "./agent.ts"
+import { notifyReview, postDiscordOps } from "./discord.ts"
+import { runGit } from "./git.ts"
+import { GitHubApi } from "./github.ts"
+import { LOCK_FILE, WorkerLock } from "./lock.ts"
+import { runSyncHooks } from "./ops/syncHooks.ts"
+import { nodeProcessDeps } from "./pr/autofix.ts"
+import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix.ts"
+import { runTick, type WorkerDeps } from "./pr/pipeline.ts"
+import { Report } from "./report.ts"
+import { FIX_STATE_FILE, loadFixState, loadSyncState, saveFixState } from "./state.ts"
+import { fileSyncState, runUpstreamSync } from "./sync/run.ts"
 
 // ── Config, all read at CALL time (Python lines 59-62) ──────────────────────
 
 /** Python `APP_ID` (line 59) — a dev default, never a secret. */
-const APP_ID = process.env.PR_AGENT_APP_ID || "4319749";
+const APP_ID = process.env.PR_AGENT_APP_ID || "4319749"
 /** Python `PRIVATE_KEY_PATH` (line 60). */
-const KEY_PATH = process.env.PR_AGENT_KEY_PATH || "/home/code/.hermes/keys/pr-agent-key.pem";
+const KEY_PATH = process.env.PR_AGENT_KEY_PATH || "/home/code/.hermes/keys/pr-agent-key.pem"
 /** Python `WEBHOOK_SECRET` (line 61) — empty means signing with the empty key. */
-const WEBHOOK_SECRET = process.env.PR_AGENT_WEBHOOK_SECRET || "";
+const WEBHOOK_SECRET = process.env.PR_AGENT_WEBHOOK_SECRET || ""
 /** Python `PR_AGENT_WEBHOOK_URL` (line 62). */
 const WEBHOOK_URL =
-  process.env.PR_AGENT_WEBHOOK_URL || "https://pr-agent.asepharyana.my.id/api/v1/github_webhooks";
+	process.env.PR_AGENT_WEBHOOK_URL || "https://pr-agent.asepharyana.my.id/api/v1/github_webhooks"
 
 /**
  * `GITHUB_WEBHOOK_SECRET` for the fork-config sync (Task 16). Read here, in the
@@ -56,7 +56,7 @@ const WEBHOOK_URL =
  * itself. Empty is meaningful: it makes the webhook step skip entirely, leaving
  * the Dependabot files to be synced on their own.
  */
-const OPS_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
+const OPS_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || ""
 
 /**
  * Whether the daily fork-config sync runs. OPT-IN, and it stays that way until
@@ -68,7 +68,7 @@ const OPS_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
  * decision with fleet-wide consequences, not a code change, so it is gated
  * rather than defaulted. Set it to a truthy value to enable.
  */
-const SYNC_HOOKS = process.env.PR_AGENT_SYNC_HOOKS === "1";
+const SYNC_HOOKS = process.env.PR_AGENT_SYNC_HOOKS === "1"
 
 // ── The collaborators the Python held as module globals ─────────────────────
 
@@ -84,24 +84,24 @@ const SYNC_HOOKS = process.env.PR_AGENT_SYNC_HOOKS === "1";
  * exit code `git.ts` uses.
  */
 const runProc: ProcRunner = (args, cwd, timeoutSec = 180) => {
-  try {
-    const r = spawnSyncCompat(args.map(String), {
-      cwd: cwd ? String(cwd) : undefined,
-      timeout: timeoutSec * 1000,
-    });
-    if (r.exitedDueToTimeout) {
-      return { code: 124, stdout: "", stderr: `timeout after ${timeoutSec}s` };
-    }
-    return {
-      code: r.code,
-      stdout: r.stdout,
-      stderr: r.stderr,
-    };
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    return { code: e.code === "ENOENT" ? 127 : 1, stdout: "", stderr: String(e.message ?? err) };
-  }
-};
+	try {
+		const r = spawnSyncCompat(args.map(String), {
+			cwd: cwd ? String(cwd) : undefined,
+			timeout: timeoutSec * 1000,
+		})
+		if (r.exitedDueToTimeout) {
+			return { code: 124, stdout: "", stderr: `timeout after ${timeoutSec}s` }
+		}
+		return {
+			code: r.code,
+			stdout: r.stdout,
+			stderr: r.stderr,
+		}
+	} catch (err) {
+		const e = err as NodeJS.ErrnoException
+		return { code: e.code === "ENOENT" ? 127 : 1, stdout: "", stderr: String(e.message ?? err) }
+	}
+}
 
 /**
  * Build the real deps from the environment.
@@ -120,51 +120,51 @@ const runProc: ProcRunner = (args, cwd, timeoutSec = 180) => {
  * import-time construction is genuinely inconvenient.
  */
 function buildDeps(opts: { dry: boolean; report: Report }): WorkerDeps {
-  // The key is the one thing that cannot be faked, so read it with a message
-  // an operator can act on. A bare `readFileSync` here surfaced as a raw ENOENT
-  // stack pointing at `readFileSync`, which reads like a bug in the worker
-  // rather than a missing deployment credential. Every other external effect
-  // below is a function or a client and fails on use; only this one is read
-  // eagerly, so only this one needs the guard.
-  let privateKeyPem: string;
-  try {
-    privateKeyPem = readFileSync(KEY_PATH, "utf8");
-  } catch {
-    throw new Error(
-      `GitHub App private key not found at ${KEY_PATH}. Set PR_AGENT_KEY_PATH ` +
-        `(and PR_AGENT_APP_ID), or run --sync-status, which needs no credential.`,
-    );
-  }
-  const api = new GitHubApi({
-    appId: APP_ID,
-    privateKeyPem, // Python line 161
-  });
-  const workdirs = nodeWorkdirs();
-  const syncState = fileSyncState();
-  return {
-    api,
-    agent: new AgentClient(),
-    run: runGit,
-    exec: runProc,
-    workdirs,
-    procs: nodeProcessDeps(workdirs),
-    fetchGhToken: () => api.fetchGhToken(),
-    report: opts.report,
-    flushReport: () => opts.report.flush(),
-    notify: notifyReview,
-    postDiscord: postDiscordOps,
-    loadFixState: () => loadFixState(),
-    saveFixState: (state) => saveFixState(FIX_STATE_FILE, state),
-    loadSyncState: () => syncState.load(),
-    saveSyncState: (state) => syncState.save(state),
-    repoOverrides: {},
-    now: () => Date.now() / 1000,
-    fetchImpl: (input, init) => fetch(input, init as RequestInit),
-    lock: { acquire: (path) => WorkerLock.acquire(path) },
-    webhookSecret: WEBHOOK_SECRET,
-    webhookUrl: WEBHOOK_URL,
-    dry: opts.dry,
-  };
+	// The key is the one thing that cannot be faked, so read it with a message
+	// an operator can act on. A bare `readFileSync` here surfaced as a raw ENOENT
+	// stack pointing at `readFileSync`, which reads like a bug in the worker
+	// rather than a missing deployment credential. Every other external effect
+	// below is a function or a client and fails on use; only this one is read
+	// eagerly, so only this one needs the guard.
+	let privateKeyPem: string
+	try {
+		privateKeyPem = readFileSync(KEY_PATH, "utf8")
+	} catch {
+		throw new Error(
+			`GitHub App private key not found at ${KEY_PATH}. Set PR_AGENT_KEY_PATH ` +
+				`(and PR_AGENT_APP_ID), or run --sync-status, which needs no credential.`,
+		)
+	}
+	const api = new GitHubApi({
+		appId: APP_ID,
+		privateKeyPem, // Python line 161
+	})
+	const workdirs = nodeWorkdirs()
+	const syncState = fileSyncState()
+	return {
+		api,
+		agent: new AgentClient(),
+		run: runGit,
+		exec: runProc,
+		workdirs,
+		procs: nodeProcessDeps(workdirs),
+		fetchGhToken: () => api.fetchGhToken(),
+		report: opts.report,
+		flushReport: () => opts.report.flush(),
+		notify: notifyReview,
+		postDiscord: postDiscordOps,
+		loadFixState: () => loadFixState(),
+		saveFixState: (state) => saveFixState(FIX_STATE_FILE, state),
+		loadSyncState: () => syncState.load(),
+		saveSyncState: (state) => syncState.save(state),
+		repoOverrides: {},
+		now: () => Date.now() / 1000,
+		fetchImpl: (input, init) => fetch(input, init as RequestInit),
+		lock: { acquire: (path) => WorkerLock.acquire(path) },
+		webhookSecret: WEBHOOK_SECRET,
+		webhookUrl: WEBHOOK_URL,
+		dry: opts.dry,
+	}
 }
 
 // ── SIGTERM ─────────────────────────────────────────────────────────────────
@@ -182,12 +182,12 @@ function buildDeps(opts: { dry: boolean; report: Report }): WorkerDeps {
  * release that already happened, and a release is idempotent anyway
  * (`unlinkSync` on a missing path is a no-op).
  */
-let releaseHeld: (() => void) | null = null;
+let releaseHeld: (() => void) | null = null
 process.on("SIGTERM", () => {
-  releaseHeld?.();
-  releaseHeld = null;
-  process.exit(143); // 128 + 15
-});
+	releaseHeld?.()
+	releaseHeld = null
+	process.exit(143) // 128 + 15
+})
 
 // ── CLI modes ───────────────────────────────────────────────────────────────
 
@@ -200,41 +200,41 @@ process.on("SIGTERM", () => {
  * nothing happened.
  */
 async function syncOnly(argv: string[]): Promise<number> {
-  const i = argv.indexOf("--sync-only");
-  const next = argv[i + 1];
-  const target = next && !next.startsWith("-") ? next : undefined;
-  const dry = argv.includes("--dry");
+	const i = argv.indexOf("--sync-only")
+	const next = argv[i + 1]
+	const target = next && !next.startsWith("-") ? next : undefined
+	const dry = argv.includes("--dry")
 
-  const lock = WorkerLock.acquire(LOCK_FILE);
-  if (!lock) {
-    console.log("another pr-queue-worker run holds the lock — try again shortly");
-    return 1;
-  }
-  releaseHeld = () => lock.release();
-  try {
-    const deps = buildDeps({ dry, report: new Report() });
-    const report = await runUpstreamSync(
-      {
-        run: deps.run,
-        workdirs: deps.workdirs,
-        agent: deps.agent,
-        api: deps.api,
-        fetchGhToken: deps.fetchGhToken,
-        postDiscord: deps.postDiscord,
-        loadState: deps.loadSyncState,
-        saveState: deps.saveSyncState,
-        now: deps.now,
-        report: deps.report,
-        repoOverrides: deps.repoOverrides,
-      },
-      { only: target, dry },
-    );
-    console.log(report.length ? report.join("\n") : "(nothing to sync)");
-  } finally {
-    lock.release();
-    releaseHeld = null;
-  }
-  return 0;
+	const lock = WorkerLock.acquire(LOCK_FILE)
+	if (!lock) {
+		console.log("another pr-queue-worker run holds the lock — try again shortly")
+		return 1
+	}
+	releaseHeld = () => lock.release()
+	try {
+		const deps = buildDeps({ dry, report: new Report() })
+		const report = await runUpstreamSync(
+			{
+				run: deps.run,
+				workdirs: deps.workdirs,
+				agent: deps.agent,
+				api: deps.api,
+				fetchGhToken: deps.fetchGhToken,
+				postDiscord: deps.postDiscord,
+				loadState: deps.loadSyncState,
+				saveState: deps.saveSyncState,
+				now: deps.now,
+				report: deps.report,
+				repoOverrides: deps.repoOverrides,
+			},
+			{ only: target, dry },
+		)
+		console.log(report.length ? report.join("\n") : "(nothing to sync)")
+	} finally {
+		lock.release()
+		releaseHeld = null
+	}
+	return 0
 }
 
 /**
@@ -252,29 +252,29 @@ async function syncOnly(argv: string[]): Promise<number> {
  * half-apply a fleet.
  */
 async function syncHooks(argv: string[]): Promise<number> {
-  const lock = WorkerLock.acquire(LOCK_FILE);
-  if (!lock) {
-    console.log("another pr-queue-worker run holds the lock — try again shortly");
-    return 1;
-  }
-  releaseHeld = () => lock.release();
-  try {
-    const deps = buildDeps({ dry: argv.includes("--dry"), report: new Report() });
-    const res = await runSyncHooks({
-      api: deps.api,
-      // The PAT push path is a different credential from the App's JWT; the ops
-      // module asks the client for it, exactly as the Python's
-      // `_fetch_gh_token()` did.
-      ghToken: deps.fetchGhToken(),
-      webhookSecret: OPS_WEBHOOK_SECRET,
-    });
-    for (const line of res.lines) console.log(line);
-    console.log(`sync-hooks: ${res.ok} updated, ${res.skip} skipped`);
-    return res.ok > 0 || res.skip === 0 ? 0 : 1;
-  } finally {
-    lock.release();
-    releaseHeld = null;
-  }
+	const lock = WorkerLock.acquire(LOCK_FILE)
+	if (!lock) {
+		console.log("another pr-queue-worker run holds the lock — try again shortly")
+		return 1
+	}
+	releaseHeld = () => lock.release()
+	try {
+		const deps = buildDeps({ dry: argv.includes("--dry"), report: new Report() })
+		const res = await runSyncHooks({
+			api: deps.api,
+			// The PAT push path is a different credential from the App's JWT; the ops
+			// module asks the client for it, exactly as the Python's
+			// `_fetch_gh_token()` did.
+			ghToken: deps.fetchGhToken(),
+			webhookSecret: OPS_WEBHOOK_SECRET,
+		})
+		for (const line of res.lines) console.log(line)
+		console.log(`sync-hooks: ${res.ok} updated, ${res.skip} skipped`)
+		return res.ok > 0 || res.skip === 0 ? 0 : 1
+	} finally {
+		lock.release()
+		releaseHeld = null
+	}
 }
 
 // ── main ───────────────────────────────────────────────────────────────────
@@ -296,39 +296,39 @@ async function syncHooks(argv: string[]): Promise<number> {
  * Named to be obvious at every call site that this is not an internal API.
  */
 export async function runCliForTest(argv: string[]): Promise<number> {
-  return main(argv);
+	return main(argv)
 }
 
 async function main(argvIn?: string[]): Promise<number> {
-  const argv = argvIn ?? process.argv.slice(2);
-  if (argv.includes("--sync-status")) {
-    console.log(JSON.stringify(loadSyncState(), null, 2));
-    return 0;
-  }
-  if (argv.includes("--sync-only")) return syncOnly(argv);
-  if (argv.includes("--sync-hooks")) {
-    if (!SYNC_HOOKS) {
-      console.error(
-        "pr-queue-worker: --sync-hooks is gated. Set PR_AGENT_SYNC_HOOKS=1 after " +
-          "reviewing worker/src/ops/templates/ — it rewrites Dependabot config " +
-          "across every repo this token can see.",
-      );
-      return 1;
-    }
-    return syncHooks(argv);
-  }
+	const argv = argvIn ?? process.argv.slice(2)
+	if (argv.includes("--sync-status")) {
+		console.log(JSON.stringify(loadSyncState(), null, 2))
+		return 0
+	}
+	if (argv.includes("--sync-only")) return syncOnly(argv)
+	if (argv.includes("--sync-hooks")) {
+		if (!SYNC_HOOKS) {
+			console.error(
+				"pr-queue-worker: --sync-hooks is gated. Set PR_AGENT_SYNC_HOOKS=1 after " +
+					"reviewing worker/src/ops/templates/ — it rewrites Dependabot config " +
+					"across every repo this token can see.",
+			)
+			return 1
+		}
+		return syncHooks(argv)
+	}
 
-  const report = new Report();
-  await runTick({
-    ...buildDeps({ dry: argv.includes("--dry"), report }),
-    onLockAcquired: (release) => {
-      releaseHeld = release;
-    },
-  });
-  // `runTick` released the lock in its own `finally`; drop the stale handle so a
-  // later SIGTERM cannot unlink a lockfile some LATER process now owns.
-  releaseHeld = null;
-  return 0;
+	const report = new Report()
+	await runTick({
+		...buildDeps({ dry: argv.includes("--dry"), report }),
+		onLockAcquired: (release) => {
+			releaseHeld = release
+		},
+	})
+	// `runTick` released the lock in its own `finally`; drop the stale handle so a
+	// later SIGTERM cannot unlink a lockfile some LATER process now owns.
+	releaseHeld = null
+	return 0
 }
 
 // Only run when executed as the program. Without this guard every test that
@@ -338,29 +338,29 @@ async function main(argvIn?: string[]): Promise<number> {
 // `import.meta.main` was the Bun spelling; Node asks the same question by
 // comparing argv[1] with this module's resolved path.
 function isEntrypoint(): boolean {
-	const entry = process.argv[1];
-	if (!entry) return false;
+	const entry = process.argv[1]
+	if (!entry) return false
 	try {
-		return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+		return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
 	} catch {
-		return false;
+		return false
 	}
 }
 
 if (isEntrypoint()) {
-  try {
-    process.exitCode = await main();
-  } catch (err) {
-  // A missing credential is an operator-actionable configuration error, not a
-  // crash: report it as one line on stderr with a non-zero exit, instead of a
-  // stack trace that buries the cause. Anything else is a real defect and keeps
-  // its stack for debugging.
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("private key not found")) {
-      console.error(`pr-queue-worker: ${message}`);
-      process.exitCode = 1;
-    } else {
-      throw err;
-    }
-  }
+	try {
+		process.exitCode = await main()
+	} catch (err) {
+		// A missing credential is an operator-actionable configuration error, not a
+		// crash: report it as one line on stderr with a non-zero exit, instead of a
+		// stack trace that buries the cause. Anything else is a real defect and keeps
+		// its stack for debugging.
+		const message = err instanceof Error ? err.message : String(err)
+		if (message.includes("private key not found")) {
+			console.error(`pr-queue-worker: ${message}`)
+			process.exitCode = 1
+		} else {
+			throw err
+		}
+	}
 }

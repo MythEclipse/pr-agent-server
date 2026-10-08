@@ -12,6 +12,17 @@ import type {
 } from "../../../domain/review/review-repository.ts"
 import { reviews } from "../schema.ts"
 
+/**
+ * The query surface a repository needs, generic over the driver.
+ *
+ * PgDatabase's first generic is the driver's query-result type, which differs
+ * between the node-postgres handle production uses and the pglite handle the
+ * integration tests use. `unknown` is not accepted there, so this alias holds
+ * the single unavoidable `any` rather than repeating it at each use site.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: documented above
+export type TAnyPgDatabase = PgDatabase<any, any>
+
 const DEFAULT_LIMIT = 50
 const MAX_LIMIT = 200
 
@@ -22,9 +33,7 @@ const MAX_LIMIT = 200
  * naming either driver here would make the other uncompilable. PgDatabase is
  * the base both share; the query-builder surface used below is identical.
  */
-export function createReviewRepository<TDb extends PgDatabase<any, any>>(
-	db: TDb,
-): ReviewRepository {
+export function createReviewRepository<TDb extends TAnyPgDatabase>(db: TDb): ReviewRepository {
 	return {
 		async insertReview(row: TNewReviewRow): Promise<TReviewRow> {
 			const inserted = await db.insert(reviews).values(row).returning()

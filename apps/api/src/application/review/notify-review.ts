@@ -55,10 +55,8 @@ export async function notifyReviewSuccess(
 		await sendDiscord(
 			env.discordWebhookUrl,
 			`**${owner}/${repo}** PR #${pr} reviewed` +
-				(result.data &&
-				result.data["review"] &&
-				(result.data["review"] as Record<string, unknown>)["score"]
-					? ` — score ${(result.data["review"] as Record<string, unknown>)["score"]}/100`
+				(result.data?.review && (result.data.review as Record<string, unknown>).score
+					? ` — score ${(result.data.review as Record<string, unknown>).score}/100`
 					: "") +
 				`\n${htmlToDiscordPlain(result.markdown).slice(0, 4000)}`,
 			"✅ PR-Agent Review Complete",

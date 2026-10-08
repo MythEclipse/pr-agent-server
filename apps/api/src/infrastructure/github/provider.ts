@@ -38,10 +38,6 @@ export class GitHubProvider {
 	readonly prNumber: number
 	private pr: PullRequestData | null = null
 	private diffs: FilePatchInfo[] | null = null
-	// Reserved cache slot carried over verbatim from the pr_agent port; kept so the
-	// shape survives the migration even though nothing reads it yet.
-	// @ts-expect-error -- unused private field, kept for parity with the port
-	private _repoObjCache: { languages?: Record<string, number> } = {}
 
 	constructor(
 		private cfg: Config,
