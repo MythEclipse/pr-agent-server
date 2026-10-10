@@ -9,9 +9,7 @@
  * NEVER throws and never rejects. The Python wraps the whole send path in a bare
  * `except Exception: pass`; a report is a nice-to-have and must not fail a tick.
  */
-import { readFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { opsWebhookUrl } from "./ops-webhook.ts"
 
 const MAX_DESCRIPTION = 4000 // Python `report[:4000]`
 const TIMEOUT_MS = 15_000 // Python `httpx.Client(timeout=15)`
@@ -45,13 +43,9 @@ export class Report {
 			// HERMES_HOME (same precedence as env.ts) rather than the module-scope
 			// `homedir()`, which Bun snapshots at process start and cannot be
 			// redirected afterwards — that made this path untestable in isolation.
-			const cfg = JSON.parse(
-				readFileSync(
-					join(process.env.HERMES_HOME ?? join(homedir(), ".hermes"), ".ops-webhooks.json"),
-					"utf8",
-				),
-			) as Record<string, string | undefined>
-			const url = cfg["pr-agent-ops"]
+			// See ops-webhook.ts for the full precedence rule and why the
+			// DISCORD_WEBHOOK_URL fallback is what keeps this alive in production.
+			const url = opsWebhookUrl()
 			if (!url) return
 			await fetch(url, {
 				method: "POST",

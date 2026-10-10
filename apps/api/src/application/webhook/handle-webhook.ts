@@ -59,7 +59,7 @@ export async function handleWebhook(
 	}
 
 	const pr = payload.pull_request
-	if (!pr || !pr.number || pr.state !== "open" || pr.draft) {
+	if (!pr?.number || pr.state !== "open" || pr.draft) {
 		return { status: 200, body: { ok: true, ignored: true } }
 	}
 

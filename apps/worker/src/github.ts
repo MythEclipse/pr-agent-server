@@ -78,6 +78,7 @@ export class GitHubApi {
 	private readonly privateKeyPem: string
 	private readonly baseUrl: string
 	private readonly retries: number
+	private readonly timeoutMs: number
 	private readonly spawn: Spawner
 	/**
 	 * Cache for `fetchGhToken`, scoped to this instance rather than the module.
@@ -102,6 +103,16 @@ export class GitHubApi {
 		privateKeyPem: string
 		baseUrl?: string
 		retries?: number
+		/**
+		 * Per-attempt transport timeout. Defaults to the Python's
+		 * `httpx.Client(timeout=30)`.
+		 *
+		 * Injection seam for tests: a test asserting on the retry/timeout path
+		 * would otherwise have to wait out the real 30s budget, which is what
+		 * made this suite load-sensitive (16 files in parallel on 8 cores, so a
+		 * starved CPU turned a 30s fetch timeout into a `{status: 0}` sentinel).
+		 */
+		timeoutMs?: number
 		/** Injection seam for tests; production uses the real `gh` binary. */
 		spawn?: Spawner
 	}) {
@@ -109,6 +120,7 @@ export class GitHubApi {
 		this.privateKeyPem = opts.privateKeyPem
 		this.baseUrl = opts.baseUrl ?? GITHUB_BASE_URL
 		this.retries = opts.retries ?? DEFAULT_RETRIES
+		this.timeoutMs = opts.timeoutMs ?? TIMEOUT_MS
 		this.spawn = opts.spawn ?? spawnGh
 	}
 
@@ -144,7 +156,7 @@ export class GitHubApi {
 					body,
 					// Load-bearing: Bun's fetch has no default timeout, so without this
 					// signal a hung connection would block the cron tick indefinitely.
-					signal: AbortSignal.timeout(TIMEOUT_MS),
+					signal: AbortSignal.timeout(this.timeoutMs),
 				})
 				// Python lines 173-174: a completed round trip returns here whatever
 				// the status; a body that will not parse becomes `{}`, not an error.

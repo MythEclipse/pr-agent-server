@@ -25,6 +25,7 @@ import { buildUseCases } from "./application/use-cases.ts"
 import { buildAuth } from "./infrastructure/auth/better-auth.ts"
 import { loadEnv, type TEnv } from "./infrastructure/config/env.ts"
 import { loadConfig } from "./infrastructure/config/legacy-config.ts"
+import { resolvePrivateKeyPem } from "./infrastructure/config/private-key.ts"
 import { createDb } from "./infrastructure/db/client.ts"
 import { createQueueRepository } from "./infrastructure/db/repositories/queue-repository.ts"
 import { createReviewRepository } from "./infrastructure/db/repositories/review-repository.ts"
@@ -57,11 +58,23 @@ export async function startApp(options: StartOptions = {}) {
 
 	// 2. use-cases. The legacy pipeline keeps its original signatures; only the
 	// bound dependencies come from here.
+	//
+	// The App private key MUST be resolved here. The pre-migration server read
+	// it in legacy-server.ts; this composition root is what the Node cutover
+	// actually serves, and it used to pass a literal "" — so every webhook
+	// review failed with `[@octokit/auth-app] privateKey option is required`
+	// while the key sat readable on disk.
+	const privateKeyPem = resolvePrivateKeyPem()
+	if (!privateKeyPem) {
+		console.warn(
+			`[boot] no GitHub App private key found (PR_AGENT_APP_DIR=${process.env.PR_AGENT_APP_DIR ?? "unset"}); reviews will fail until it exists`,
+		)
+	}
 	const { runReview } = await import("./legacy/tools/review.ts")
 	const useCases = buildUseCases({
 		reviews,
 		legacy: {
-			runReview: (owner, repo, pr) => runReview(cfg, owner, repo, pr, ""),
+			runReview: (owner, repo, pr) => runReview(cfg, owner, repo, pr, privateKeyPem),
 			runDescribe: async () => {
 				throw new Error("describe stays CLI-only")
 			},

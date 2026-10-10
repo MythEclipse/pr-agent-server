@@ -10,17 +10,12 @@
  * between stdout (TTY) and Discord, clears its own buffer, and returns void
  * regardless of delivery. `postDiscordOps` (py:1036) always posts a
  * caller-supplied embed and must return whether the status was 200/204, because
- * the sync reporter branches on it. There is no shared POST helper in
- * report.ts to reuse — its fetch call is inlined in `flush` — so extracting one
- * would mean editing a Task-8 module, which this task is forbidden to touch.
- * The one thing that IS shared and is therefore reused is the call-time webhook
- * path resolution: `process.env.HERMES_HOME ?? join(homedir(), ".hermes")`,
- * copied from report.ts:50 so the config can be redirected in a test. Resolving
- * it at module scope would break every test on a host without the real file.
+ * the sync reporter branches on it. Neither module owns the other. The one
+ * thing that IS shared — the call-time webhook lookup, previously copied
+ * verbatim between the two files — now lives in `ops-webhook.ts`, so the
+ * precedence rule and the production fallback are stated exactly once.
  */
-import { readFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { opsWebhookUrl } from "./ops-webhook.ts"
 
 /** Python `post_discord_notification`'s default (line 475). */
 export const PR_AGENT_NOTIFY_URL = "http://127.0.0.1:4023/api/v1/notify_review"
@@ -33,28 +28,6 @@ const MAX_DESCRIPTION = 4000
 const MAX_SUMMARY = 500
 /** Python's default `color=0x5865F2` (line 1036) — Discord blurple. */
 const DEFAULT_COLOR = 0x5865f2
-
-/**
- * Read `pr-agent-ops` out of `$HERMES_HOME/.ops-webhooks.json` (or
- * `~/.hermes/...`). Python hardcodes `~/.hermes` at lines 141 / 1040; HERMES_HOME
- * is honoured at CALL time, matching report.ts and env.ts. Returns "" for a
- * missing file, malformed JSON, or an absent/non-string key.
- */
-function opsWebhookUrl(): string {
-	try {
-		const cfg = JSON.parse(
-			readFileSync(
-				join(process.env.HERMES_HOME ?? join(homedir(), ".hermes"), ".ops-webhooks.json"),
-				"utf8",
-			),
-		) as unknown
-		if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) return ""
-		const url = (cfg as Record<string, unknown>)["pr-agent-ops"]
-		return typeof url === "string" ? url : ""
-	} catch {
-		return "" // Python line 1051-1052: every failure is a False
-	}
-}
 
 /**
  * Python `post_sync_discord(title, lines, color=0x5865F2)` (lines 1036-1052).

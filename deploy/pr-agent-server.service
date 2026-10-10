@@ -25,6 +25,19 @@ Group=pr-agent
 WorkingDirectory=/opt/pr-agent-server
 Environment=NODE_ENV=production
 Environment=PORT=4023
+# Restart-safe queue. The schema default in env.ts is "memory", which keeps the
+# queue in a Set inside the process: a restart (deploy, crash, OOM) silently
+# drops every in-flight review with no record that it was ever queued. The "db"
+# driver stores jobs in review_queue_jobs, claims them with SKIP LOCKED, and
+# requeues anything left `running` on boot, so a restart costs a slow review
+# rather than a lost one.
+#
+# This is production-only on purpose. The in-memory queue is what the unit
+# tests and the local dev loop assert against (env.ts keeps defaulting to
+# "memory"); flipping the code default would silently rewrite that contract.
+# review_queue_jobs is created by the committed drizzle migrations, which CI
+# checks for drift, so the table is present wherever this unit has been migrated.
+Environment=QUEUE_BACKEND=db
 # WEB_DIST_PATH is how the built SPA reaches the browser: Hono serves it and
 # falls through to index.html, so there is no second process to supervise.
 Environment=WEB_DIST_PATH=/opt/pr-agent-server/web-dist

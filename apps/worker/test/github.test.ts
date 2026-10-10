@@ -47,8 +47,22 @@ const json = (body: unknown, status = 200) =>
 		headers: { "content-type": "application/json" },
 	})
 
+// A tight transport timeout so a starved CPU cannot turn a real round trip
+// into the `{status: 0}` failure sentinel. These tests assert on the retry and
+// error paths, and the production 30s budget made the whole 16-file suite
+// load-sensitive: this file alone was observed failing at ~1-in-6 under 12
+// busy-loop processes on 8 cores. Every request here is to a loopback stub, so
+// anything above a second can only be scheduling starvation, never a real wait.
+const TEST_TIMEOUT_MS = 5_000
+
 const api = (baseUrl: string, spawn?: Spawner) =>
-	new GitHubApi({ appId: APP_ID, privateKeyPem: PRIVATE_KEY_PEM, baseUrl, spawn })
+	new GitHubApi({
+		appId: APP_ID,
+		privateKeyPem: PRIVATE_KEY_PEM,
+		baseUrl,
+		spawn,
+		timeoutMs: TEST_TIMEOUT_MS,
+	})
 
 const b64json = (segment: string) =>
 	JSON.parse(Buffer.from(segment, "base64url").toString("utf8")) as Record<string, unknown>

@@ -3,12 +3,12 @@
 // changed in P1 (Bun.serve -> @hono/node-server); the paths, the order they are
 // tested in, and the response shapes are byte-for-byte the same.
 
-import { readFileSync } from "node:fs"
 import { type ServerType, serve } from "@hono/node-server"
 import { ReviewQueue } from "../../application/queue/review-queue.ts"
 import { notifyReviewFailure, notifyReviewSuccess } from "../../application/review/notify-review.ts"
 import { handleWebhook, type WebhookEnv } from "../../application/webhook/handle-webhook.ts"
 import { loadConfig } from "../../infrastructure/config/legacy-config.ts"
+import { resolvePrivateKeyPem } from "../../infrastructure/config/private-key.ts"
 import { sendDiscord } from "../../infrastructure/notify/discord.ts"
 import { runReview } from "../../legacy/tools/review.ts"
 import { analyticsRoutes } from "./analytics.ts"
@@ -16,22 +16,10 @@ import { setupCallback } from "./setup.ts"
 
 export type AppServer = ServerType
 
-function readPrivateKey(path: string): string {
-	try {
-		return readFileSync(path, "utf-8")
-	} catch {
-		return ""
-	}
-}
-
 export function startServer(env?: Partial<WebhookEnv>): AppServer {
 	const cfg = env?.cfg ?? loadConfig()
 	const appDir = process.env.PR_AGENT_APP_DIR || "/var/lib/pr-agent-server"
-	const privateKeyPem =
-		env?.privateKeyPem ??
-		(readPrivateKey(process.env.PRIVATE_KEY_PATH || `${appDir}/private-key.pem`) ||
-			readPrivateKey(`${appDir}/private-key.pem`) ||
-			"")
+	const privateKeyPem = env?.privateKeyPem ?? resolvePrivateKeyPem()
 	const webhookSecret = env?.webhookSecret ?? process.env.GITHUB_WEBHOOK_SECRET ?? ""
 	const analyticsDir =
 		env?.analyticsDir ??
