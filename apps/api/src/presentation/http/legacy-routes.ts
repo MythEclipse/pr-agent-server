@@ -10,6 +10,7 @@ import type { Hono } from "hono"
 import type { ReviewJob } from "../../application/queue/review-queue.ts"
 import { handleWebhook, type WebhookEnv } from "../../application/webhook/handle-webhook.ts"
 import { loadConfig } from "../../infrastructure/config/legacy-config.ts"
+import { resolvePrivateKeyPem } from "../../infrastructure/config/private-key.ts"
 import { sendDiscord } from "../../infrastructure/notify/discord.ts"
 import { analyticsRoutes } from "./analytics.ts"
 import { setupCallback } from "./setup.ts"
@@ -30,7 +31,14 @@ export function startLegacyRoutes(app: Hono, deps: LegacyRouteDeps): void {
 
 	const fullEnv: WebhookEnv = {
 		cfg,
-		privateKeyPem: "",
+		// The App private key, resolved the same way the composition root does.
+		// This used to be a literal "", so the webhook verified the signature,
+		// enqueued the job, and the review that ran afterwards had no key at all:
+		// `[@octokit/auth-app] privateKey option is required`, swallowed by
+		// runJob's catch, recorded by the queue as a successful `done`. The PR
+		// then never gained a review comment, so the worker triggered a review
+		// every tick and never reached merge.
+		privateKeyPem: resolvePrivateKeyPem(),
 		webhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? "",
 		analyticsDir: process.env.PR_AGENT_ANALYTICS_DIR || "/var/lib/pr-agent-server/analytics",
 		discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL ?? "",

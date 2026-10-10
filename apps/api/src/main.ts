@@ -103,7 +103,14 @@ export async function startApp(options: StartOptions = {}) {
 		try {
 			await useCases.legacy.runReview(job.owner, job.repo, job.pr)
 		} catch (err) {
+			// Rethrown, not logged-and-swallowed. `db-review-queue` records a
+			// rejection as `failed` with the error, while a resolved promise is
+			// recorded `done` — so catching here marked every failed review as a
+			// success. The queue drained, nothing was ever retried, and the PR
+			// silently never got its review comment. A failing review must be a
+			// failing job.
 			console.error(`[queue] review FAILED for ${job.owner}/${job.repo}#${job.pr}: ${String(err)}`)
+			throw err
 		}
 	}
 
