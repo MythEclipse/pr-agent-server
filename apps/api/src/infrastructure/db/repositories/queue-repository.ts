@@ -60,8 +60,18 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 				.insert(reviewQueueJobs)
 				.values({ ...input, key, state: "pending", runAfter: now })
 				.onConflictDoUpdate({
-					// Only a live job can absorb a re-request; a terminal row is
-					// left alone so the recorded outcome stays accurate.
+					// Only a live job can absorb a re-request; a `done` row is left
+					// alone so the recorded outcome stays accurate and an
+					// already-reviewed PR is not reviewed twice.
+					//
+					// A `failed` row MUST be re-armed, though, and not left alone: the
+					// comment's "terminal row is left alone" rule was written as if
+					// `failed` meant "decided". It does not — it means a review threw.
+					// Leaving it terminal meant a PR whose review failed could never be
+					// reviewed again, no matter how many times the webhook fired or how
+					// many times the cause was fixed: `claimDue` only selects `pending`,
+					// so the row was dead forever. That is what made the YAML parse bug
+					// unrecoverable — after fixing it, PR #7 still refused to enqueue.
 					//
 					// Raw SQL on purpose: interpolating a Drizzle column into a
 					// `sql` template turns it into a *bound parameter*, which is
@@ -70,6 +80,12 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 					// below are literals matching this file's own schema.
 					target: reviewQueueJobs.key,
 					set: {
+						state: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' THEN 'pending' ELSE "review_queue_jobs"."state" END)`,
+						// The old error described a run that has not been retried; keeping
+						// it would make a job that is pending look failed in every report.
+						lastError: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' THEN NULL ELSE "review_queue_jobs"."last_error" END)`,
+						// Re-queue it for NOW, or it waits out the old backoff.
+						runAfter: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' THEN now() ELSE "review_queue_jobs"."run_after" END)`,
 						rerunRequested: sql`(
 							CASE
 								WHEN "review_queue_jobs"."state" IN ('pending', 'running')
@@ -83,7 +99,23 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 
 			const row = inserted[0]
 			if (!row) throw new Error("enqueue returned no row")
-			return { job: toJob(row), deduped: row.createdAt < now }
+			// Two facts, and neither alone is the answer:
+			//
+			//   `createdAt < now`  the row already existed (conflict path), so this
+			//                    is a re-request rather than a fresh insert.
+			//   `state`/`rerun`   what the conflict clause did with it. It leaves
+			//                    `pending`/`running` in place (flagging a re-run) and
+			//                    leaves `done` alone; ONLY a `failed` row is re-armed
+			//                    to `pending` with `rerunRequested` cleared.
+			//
+			// Testing `state === "done"` alone is wrong — an existing `pending` row is
+			// also not done, and it must still dedupe. Testing `createdAt` alone is
+			// the old bug: a re-armed row is old by definition, so a retry read as
+			// deduped and `db-review-queue` skipped `pump()`, silently dropping the
+			// very retry this change exists to enable.
+			const existed = row.createdAt < now
+			const reArmed = row.state === "pending" && !row.rerunRequested
+			return { job: toJob(row), deduped: existed && !reArmed }
 		},
 
 		async claimDue(limit: number): Promise<TQueueJob[]> {

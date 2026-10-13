@@ -61,6 +61,45 @@ describe("db queue — dedupe", () => {
 		await queue.enqueue({ owner: "o", repo: "r", pr: 2 })
 		await expect(queue.stats()).resolves.toMatchObject({ pending: 2 })
 	})
+
+	// A `failed` row means a review THREW, not that the PR was decided. The
+	// conflict clause used to leave every terminal row alone, so a failed review
+	// was unrecoverable: claimDue only selects `pending`, so the row could never
+	// run again no matter how often the webhook fired or how often the cause was
+	// fixed. Re-enqueue must re-arm it — this is what made the YAML parse bug
+	// permanent even after the parse was fixed.
+	test("re-enqueueing a FAILED job re-arms it so the review can be retried", async () => {
+		await queue.enqueue({ owner: "o", repo: "r", pr: 7 })
+		const [job] = await queue.claimDue(1)
+		await queue.complete(job?.key ?? "", "All models failed: boom")
+		await expect(queue.stats()).resolves.toMatchObject({ failed: 1 })
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 7 })
+		expect(again.job.state).toBe("pending")
+		// The stale error must not survive: it describes a run that is now pending.
+		expect(again.job.lastError).toBeNull()
+		// CRITICAL: not deduped, or db-review-queue skips pump() and the row sits
+		// pending until something else claims it.
+		expect(again.deduped).toBe(false)
+
+		const claimed = await queue.claimDue(1)
+		expect(claimed.map((j) => j.pr)).toEqual([7])
+		expect(claimed[0]?.attempts).toBe(2)
+	})
+
+	test("re-enqueueing a DONE job stays deduped — a reviewed PR is not reviewed twice", async () => {
+		await queue.enqueue({ owner: "o", repo: "r", pr: 8 })
+		const [job] = await queue.claimDue(1)
+		await queue.complete(job?.key ?? "")
+		await expect(queue.stats()).resolves.toMatchObject({ done: 1 })
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 8 })
+		expect(again.deduped).toBe(true)
+		expect(again.job.state).toBe("done")
+		// A re-armed row is old by definition, so `createdAt < now` must not be the
+		// dedupe test — it would read a retry as deduped and silently drop it.
+		await expect(queue.claimDue(1)).resolves.toHaveLength(0)
+	})
 })
 
 describe("db queue — claiming", () => {
