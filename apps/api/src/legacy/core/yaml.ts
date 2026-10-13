@@ -37,6 +37,22 @@ const KEYS_YAML = [
 	"suggestion_summary:",
 ]
 
+/**
+ * The column of the most recent top-level `- ` list item, or undefined.
+ *
+ * A recovered list item must rejoin the sequence it belongs to, and that
+ * sequence's own dash column is the only correct answer. Used by fallback 1.6,
+ * which splits two items the model collapsed onto one line.
+ */
+function listDashIndent(lines: string[]): number | undefined {
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i] ?? ""
+		const m = /^(\s*)-\s+\S/.exec(line)
+		if (m) return (m[1] ?? "").length
+	}
+	return undefined
+}
+
 export function tryFixYaml(
 	responseText: string,
 	keysFixYaml: string[] = [],
@@ -72,6 +88,107 @@ export function tryFixYaml(
 		return l
 	})
 	data = tryParse(copyB.join("\n"))
+	if (data) return data
+
+	// fallback 1.5: re-indent block-scalar continuation lines that the model got
+	// wrong by one space.
+	//
+	// Observed live: the models emit
+	//
+	//     ticket_url: |
+	//      dependabot/npm_and_yarn/vite-8.3.4      <-- ONE space
+	//       ticket_requirements: |                  <-- six spaces
+	//
+	// A block scalar's content must be indented MORE than its key. One space is
+	// not more than zero, so `YAML.parse` reads the line as a continuation of the
+	// scalar and then chokes on the next line's indentation — a hard parse error
+	// on structurally valid intent. This is non-deterministic across models and
+	// across runs of the same model, which is why it presented as an intermittent
+	// "failed to parse review response" rather than a consistent failure.
+	//
+	// The fix is to derive each block's content indent from the INDENT OF ITS KEY
+	// plus a fixed step, rather than from whatever the first content line happens
+	// to carry. Reading the baseline off the content line cannot work here: the
+	// defective line IS the first content line, so it defines its own baseline and
+	// is never repaired. The key's own column is the one thing the model always
+	// gets right.
+	const reindentBlocks = (src: string): string => {
+		const out = src.split("\n")
+		const indentOf = (l: string): number => l.length - l.trimStart().length
+		// A `key: |` / `key: >` header: the content must sit further right.
+		const isHeader = (l: string): boolean => /^\s*[^#\s][^:]*:\s*[|>][-+]?\s*$/.test(l)
+		const isKey = (l: string): boolean => /^\s*[^#\s][^:]*:/.test(l)
+
+		let keyIndent = -1
+		let blockIndent = -1
+		for (let i = 0; i < out.length; i++) {
+			const line = out[i] ?? ""
+			if (line.trim() === "") continue
+
+			// A key AT the open block's own column, or further left, closes it.
+			// This test must come FIRST: a sibling header is indented by exactly
+			// the block's content step, so treating headers first would open a new
+			// block and leave the previous scalar unterminated — the content line
+			// then reads as an implicit key and YAML.parse still throws.
+			if (isKey(line) && blockIndent !== -1 && indentOf(line) <= keyIndent) {
+				blockIndent = -1
+				keyIndent = -1
+				continue
+			}
+			if (isKey(line)) {
+				if (isHeader(line)) {
+					keyIndent = indentOf(line)
+					// Content must be indented MORE than its key, and a sibling key
+					// sits exactly `keyIndent + 2`. Using that same column for the
+					// content is what left `ticket_requirements` being read as the
+					// tail of `ticket_url`'s scalar ("Implicit keys need to be on a
+					// single line"). Step past the sibling column.
+					blockIndent = keyIndent + 4
+				}
+				continue
+			}
+
+			if (blockIndent === -1) continue
+
+			// Content left of the block's own column is mis-indented by
+			// construction; pull it right to that column. Content already at or
+			// deeper than it is left exactly as the model wrote it, so this never
+			// reindents a well-formed block.
+			const indent = indentOf(line)
+			if (indent < blockIndent) {
+				out[i] = " ".repeat(blockIndent) + line.trimStart()
+			}
+		}
+		return out.join("\n")
+	}
+
+	// The structural repairs run on the ORIGINAL text, not on `copy`: fallback 1
+	// above rewrites `key: value` into `key: |\n        value`, which destroys the
+	// very indentation these repairs read. Applying them to a mangled copy was
+	// why they never fired.
+	copy = reindentBlocks(responseText).split("\n")
+	data = tryParse(copy.join("\n"))
+	if (data) return data
+
+	// fallback 1.6: split list items the model emitted onto one line.
+	//
+	// Observed live: `end_line: 1    - relevant_file: |` — two `- ` items run
+	// together, which YAML reads as one scalar and then rejects ("A block
+	// sequence may not be used as an implicit map key").
+	//
+	// The recovered item must land at the SAME column as the list items already
+	// in the document, which is the dash column of the enclosing sequence — not
+	// the column of the `key: value` it was glued to. Those differ: `end_line`
+	// sits one level deeper than the `- ` it belongs to, so using its column
+	// produced a sequence nested inside the previous item's mapping.
+	copy = copy
+		.map((l) => {
+			const m = /^(\s*[^#\s][^:]*:\s*(?:\||>|-?\d*)\s*\S.*?)\s{2,}(-\s+\S.*)$/.exec(l)
+			if (!m) return l
+			return `${m[1]}\n${" ".repeat(listDashIndent(copy) ?? l.length - l.trimStart().length)}${m[2]}`
+		})
+		.flatMap((l) => l.split("\n"))
+	data = tryParse(copy.join("\n"))
 	if (data) return data
 
 	// fallback 2: extract yaml fenced block

@@ -169,6 +169,83 @@ describe("yaml", () => {
 		// The prose after the fence must NOT leak into the rendered comment.
 		expect(convertToMarkdownV2(data as never, true, true)).not.toContain("Review summary")
 	})
+
+	// Both of these are transcribed from REAL failing reviews on the live model,
+	// not invented. They are non-deterministic — the same model and prompt parse
+	// on one run and fail on the next — which is why this presented as an
+	// intermittent failure rather than a consistent one, and why the fallback
+	// chain was rebuilt rather than the prompt.
+	test("loadYaml recovers a block scalar whose content is under-indented", () => {
+		// `ticket_url: |` with ONE space of content indent. A block scalar needs
+		// content deeper than its key, so YAML.parse threw "All mapping items must
+		// start at the same column".
+		const text = [
+			"```yaml",
+			"review:",
+			"  ticket_compliance_check:",
+			"    - ticket_url: |",
+			" dependabot/npm_and_yarn/vite-8.3.4",
+			"      ticket_requirements: |",
+			"        - Bump the vite dev dependency.",
+			"  estimated_effort_to_review_[1-5]: 1",
+			"  key_issues_to_review:",
+			"    - relevant_file: |",
+			"        package.json",
+			"      issue_header: |",
+			"        Major Version Bump",
+			"      start_line: 1",
+			"      end_line: 1",
+			"  security_concerns: |",
+			"    No",
+			"```",
+		].join("\n")
+		const data = loadYaml(text, [], "review", "security_concerns")
+		expect(data).not.toBeNull()
+		const review = (data as Record<string, unknown>).review as Record<string, unknown>
+		expect(String(review.security_concerns).trim()).toBe("No")
+		const issues = review.key_issues_to_review as unknown[]
+		expect(issues).toHaveLength(1)
+		// The sibling key must NOT be swallowed into ticket_url's scalar, and the
+		// under-indented content must be recovered intact.
+		const compliance = review.ticket_compliance_check as Record<string, unknown>[]
+		expect(String(compliance[0]?.ticket_url).trim()).toBe("dependabot/npm_and_yarn/vite-8.3.4")
+		expect(String(compliance[0]?.ticket_requirements)).toContain("Bump the vite dev dependency")
+	})
+
+	test("loadYaml splits two list items the model collapsed onto one line", () => {
+		// `end_line: 1    - relevant_file: |` — two items run together, which YAML
+		// rejects with "A block sequence may not be used as an implicit map key".
+		const text = [
+			"```yaml",
+			"review:",
+			"  ticket_compliance_check: []",
+			"  estimated_effort_to_review_[1-5]: |",
+			"    2",
+			"",
+			"  key_issues_to_review:",
+			"    - relevant_file: |",
+			"        package.json",
+			"      issue_header: |",
+			"        Major version bump",
+			"      start_line: 1",
+			"      end_line: 1    - relevant_file: |",
+			"        package.json",
+			"      issue_header: |",
+			"        Lockfile not updated",
+			"      start_line: 1",
+			"      end_line: 1",
+			"",
+			"  security_concerns: |",
+			"    No",
+			"```",
+		].join("\n")
+		const data = loadYaml(text, [], "review", "security_concerns")
+		expect(data).not.toBeNull()
+		const review = (data as Record<string, unknown>).review as Record<string, unknown>
+		// TWO issues, not one merged item — that is the whole point of the split.
+		expect(review.key_issues_to_review as unknown[]).toHaveLength(2)
+		expect(String(review.security_concerns).trim()).toBe("No")
+	})
 })
 
 describe("tokens", () => {
