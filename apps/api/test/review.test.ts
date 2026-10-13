@@ -151,6 +151,24 @@ describe("yaml", () => {
 		const data = loadYaml(text, [], "review", "security_concerns")
 		expect((data as Record<string, unknown>)?.review).toBeDefined()
 	})
+
+	// The fence extractor used to require the closing fence to be the END of the
+	// text. Current models append a prose summary after the block, so the regex
+	// missed, YAML.parse was handed prose, and the review failed as "failed to
+	// parse review response into markdown" while the YAML itself was valid. That
+	// is what the `failed` rows in review_queue_jobs were.
+	test("loadYaml recovers from fenced yaml followed by prose", () => {
+		const text =
+			"```yaml\nreview:\n  estimated_effort_to_review_[1-5]: 1\n  security_concerns: |\n    No\n```\n\n" +
+			"**Review summary:**\n\nThis is a Dependabot patch-level dependency bump.\nNothing to flag."
+		const data = loadYaml(text, [], "review", "security_concerns")
+		expect(data).not.toBeNull()
+		const review = (data as Record<string, unknown>).review as Record<string, unknown>
+		expect(review["estimated_effort_to_review_[1-5]"]).toBe(1)
+		expect(String(review.security_concerns).trim()).toBe("No")
+		// The prose after the fence must NOT leak into the rendered comment.
+		expect(convertToMarkdownV2(data as never, true, true)).not.toContain("Review summary")
+	})
 })
 
 describe("tokens", () => {

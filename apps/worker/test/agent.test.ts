@@ -111,9 +111,11 @@ describe("AgentClient.post — HTTP contract", () => {
 			expect(call.headers.authorization).toBe(`Bearer ${KEY}`)
 			expect(call.headers["content-type"]).toBe("application/json")
 			expect(call.body.model).toBe("hermes-agent")
-			// The slug must name a real `custom_providers` entry. The old value
-			// "custom:9router" matched nothing and every AI-fix turn came back as
-			// "Unknown provider" inside a 200 response, so it never failed loudly.
+			// The slug must name a real `providers` entry in config.yaml. Two wrong
+			// values shipped here ("custom:9router" on some installs, then
+			// "custom:9router.asepharyana.my.id"), and both failed the same way: the
+			// gateway answered 200 with "Unknown provider" inside `content`, so the
+			// run looked successful and every AI-fix silently committed nothing.
 			expect(call.body.provider).toBe(DEFAULT_API_PROVIDER)
 			expect(call.body.provider.startsWith("custom:")).toBe(true)
 			expect(call.body.stream).toBe(false)
@@ -146,6 +148,42 @@ describe("AgentClient.post — HTTP contract", () => {
 				gw2.stop()
 			}
 			expect(gw2.seen[0].body.provider).toBe("custom:from-env.example")
+		} finally {
+			gw.stop()
+		}
+	})
+
+	// THE FAILURE THIS EXISTS FOR: the gateway reports an unusable provider or
+	// rejected auth as a 200 whose `content` is the complaint. Treating that as a
+	// successful run is what let a wrong provider slug disable auto-fix for weeks
+	// with no error anywhere — the agent "ran", committed nothing, and the report
+	// said so in a phrase that reads like normal behaviour.
+	test("a 200 whose content is the gateway's own refusal is an INFRA failure", async () => {
+		const gw = await fakeGateway(() =>
+			choices(
+				"⚠️ Provider authentication failed: Unknown provider 'custom:9router.asepharyana.my.id'. Check 'hermes model' for available providers, or run 'hermes doctor' to diagnose config issues.",
+			),
+		)
+		try {
+			const r = await client(gw.baseUrl).post("x")
+			expect(r.ok).toBe(false)
+			// The `[INFRA]` prefix is the skip-once contract the pipeline keys on, so
+			// this must be present or the PR is retried every 5 minutes forever.
+			expect(r.snippet.startsWith("[INFRA] ")).toBe(true)
+			expect(r.snippet).toContain("Unknown provider")
+		} finally {
+			gw.stop()
+		}
+	})
+
+	test("a real answer that merely mentions a provider is still a success", async () => {
+		const gw = await fakeGateway(() =>
+			choices("I updated the provider default in agent.ts and committed it."),
+		)
+		try {
+			const r = await client(gw.baseUrl).post("x")
+			expect(r.ok).toBe(true)
+			expect(r.snippet).toBe("I updated the provider default in agent.ts and committed it.")
 		} finally {
 			gw.stop()
 		}

@@ -75,11 +75,19 @@ export function tryFixYaml(
 	if (data) return data
 
 	// fallback 2: extract yaml fenced block
-	const snippetPattern = /```(yaml|yml)?([\s\S]*?)```(?=\s*$|")/
+	//
+	// The lookahead used to be `(?=\s*$|")`, which only matches when the closing
+	// fence is the END of the text. Modern models append a prose summary after
+	// the block ("**Review summary:** …"), so the regex missed, `YAML.parse` was
+	// handed prose and threw, and every fallback returned null — the review died
+	// as "failed to parse review response into markdown" while the model's YAML
+	// was perfectly valid. A fenced block needs no end anchor: the first complete
+	// fence pair IS the block, whatever follows it.
+	const snippetPattern = /```(?:yaml|yml)?\r?\n([\s\S]*?)```/
 	let m = snippetPattern.exec(copy.join("\n"))
 	if (!m) m = snippetPattern.exec(original)
-	if (m?.[2]) {
-		data = tryParse(m[2])
+	if (m?.[1]) {
+		data = tryParse(m[1])
 		if (data) return data
 	}
 

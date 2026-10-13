@@ -38,18 +38,28 @@ export const DEFAULT_API_SERVER_URL = "http://127.0.0.1:8642/v1"
 /**
  * The provider slug sent on every AI-fix turn.
  *
- * Hermes resolves a `custom:<name>` slug against the `custom_providers` entries
- * in ~/.hermes/config.yaml, where <name> must match that entry's `name:` field
- * exactly. It used to be hardcoded as "custom:9router", which resolves to
- * nothing: the entry is named after its HOSTNAME, so the gateway answered
- * "Unknown provider 'custom:9router'" and every AI-fix turn failed.
+ * Hermes resolves a `custom:<name>` slug against the `providers` entries in
+ * ~/.hermes/config.yaml, where <name> must match that entry's `name:` field
+ * exactly. Two wrong values have lived here, and both failed in the same
+ * invisible way:
+ *
+ *   - `custom:9router` resolved on some installs and not others.
+ *   - `custom:9router.asepharyana.my.id` matched nothing at all: the entry is
+ *     named `9router` (its HOSTNAME is not part of the entry), so the gateway
+ *     answered "Unknown provider" and every AI-fix turn failed.
+ *
+ * THE FAILURE IS A 200 WITH AN ERROR STRING, not a non-2xx. The gateway returns
+ * a normal completion whose `content` is the warning text, which this client
+ * cannot distinguish from a real answer — so the run "succeeds", the agent
+ * commits nothing, and the pipeline reports "Hermes ran but no commit/push"
+ * instead of an infra fault. Verified live against 127.0.0.1:8642:
+ * `custom:9router` answers a real turn; both other spellings do not.
  *
  * The hostname is per-install configuration, not a constant, so it comes from
- * the environment with a default that matches this host's config. A wrong value
- * here is loud — the gateway returns 200 with an error string in `content`, not
- * a non-2xx — so it is also logged in the infra snippet by the caller.
+ * the environment with a default that matches this host's config. Set
+ * `API_SERVER_PROVIDER` to override without a rebuild.
  */
-export const DEFAULT_API_PROVIDER = "custom:9router.asepharyana.my.id"
+export const DEFAULT_API_PROVIDER = "custom:9router"
 /** Python `SYNC_CLAUDE_TIMEOUT` (line 988) — conflict resolution + verification. */
 export const SYNC_CLAUDE_TIMEOUT = 3600
 /** Python `r.text[:300]` on the non-200 branch (line 1240). */
@@ -261,6 +271,13 @@ export class AgentClient {
 			// reach the ops Discord channel unredacted.
 			const text = choices[0].message?.content || ""
 			if (!text) return { ok: true, snippet: "" }
+			// A gateway that cannot use the requested provider/auth answers with a
+			// 200 and puts the complaint in `content`. That is an INFRA fault, not an
+			// answer: returning it as a success made every AI-fix turn look like it ran
+			// and then committed nothing, so the pipeline logged "Hermes ran but no
+			// commit/push" and moved on with no skip recorded and no alert.
+			const refusal = gatewayErrorIn(text)
+			if (refusal) return infra(`[INFRA] ${refusal}`, key)
 			return { ok: true, snippet: redactApiKey(text.slice(-SNIPPET_TAIL).replace(/\n/g, " "), key) }
 		} catch (err) {
 			// Python lines 1248-1253. Two runtimes report a refused TCP connect
@@ -339,6 +356,28 @@ function writeBestEffort(dir: string, name: string, contents: string): void {
 /** Every failure return passes through here so the key cannot leak. */
 function infra(message: string, key: string): PostResult {
 	return { ok: false, snippet: redactApiKey(message, key) }
+}
+
+/**
+ * Does this "answer" actually carry the gateway's own refusal?
+ *
+ * The gateway reports an unusable provider or rejected auth as a normal
+ * completion whose entire content is a warning, so `choices` is non-empty and
+ * the HTTP status is 200. Matched at the START of the content (and short, so a
+ * real answer that merely discusses the word "provider" cannot match), which is
+ * what the live responses look like:
+ *
+ *   "⚠️ Provider authentication failed: Unknown provider 'custom:9router…'…"
+ *   "Error: model 'x' not found"
+ *
+ * Returns the matched first line for the snippet, or null when the content is a
+ * real answer.
+ */
+function gatewayErrorIn(text: string): string | null {
+	const head = text.trimStart()
+	const match = /^(?:⚠️\s*)?(?:Provider authentication failed|Provider .*failed)[:\s]/i.exec(head)
+	if (match) return head.slice(0, DETAIL_HEAD).replace(/\n/g, " ")
+	return null
 }
 
 /** `str(exc)` — a DOMException's own `toString` would add an "Error:" prefix. */
