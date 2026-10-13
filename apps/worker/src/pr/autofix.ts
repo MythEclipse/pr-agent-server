@@ -6,8 +6,8 @@
  * `AI_FIX_TIMEOUT` constant from line 76.
  *
  * THE SHAPE OF THE FLOW: clone the PR branch, work out which files it touches,
- * ask the Hermes gateway agent to improve them, then decide whether it actually
- * did anything, and if so push for it. Three properties of that are contracts:
+ * ask Claude Code to improve them, then decide whether it actually did anything,
+ * and if so push for it. Three properties of that are contracts:
  *
  * 1. THE AGENT NEVER PUSHES. The prompt says so, and is transcribed byte-exact
  *    because it is the agent's only instruction boundary. The worker pushes,
@@ -25,7 +25,7 @@
  *    kills the orphan before starting a second agent on the branch.
  */
 import { statSync } from "node:fs"
-import type { PostResult } from "../agent.ts"
+import type { PostResult } from "../claude-agent.ts"
 import type { GitRunner } from "../git.ts"
 import { clonePr, head, reportable, TMP_BASE, type Workdirs } from "./lockfix.ts"
 import type { GhClient } from "./scan.ts"
@@ -63,7 +63,7 @@ export type AgentPort = {
 	post(prompt: string, opts: PostOptions): Promise<PostResult>
 }
 
-/** `agent.ts`'s `PostOptions`, narrowed to the two fields set here. */
+/** `claude-agent.ts`'s `PostOptions`, narrowed to the two fields set here. */
 export type PostOptions = { workdir?: string; label?: string; timeoutSec?: number }
 
 /** The report buffer (report.ts) — optional, so a caller can drop the line. */
@@ -263,7 +263,7 @@ export function buildAiFixPrompt(
  *     swallowed (lines 864-876) — git's answer is authoritative. That `try` also
  *     holds the `f["filename"]` lookup, so a malformed entry ends the fallback
  *     rather than yielding `undefined`;
- *   - the agent's prompt is written to disk by `AgentClient.post` (agent.ts),
+ *   - the agent's prompt is written to disk by `AgentClient.post` (claude-agent.ts),
  *     not here. Python line 917 does it inline, but doing it twice would let
  *     the file's content drift from what the agent received.
  */
@@ -347,9 +347,11 @@ export async function runAiFix(
 
 	const prompt = buildAiFixPrompt(pr, repo, title, baseRef, changedFiles)
 	// Python line 913.
-	deps.report?.push(`   🤖 Running Hermes AI fix (${AI_FIX_MAX_TURNS} turns max)...`)
+	// The turn cap is the CLI's `--max-turns` budget. Reported for the operator's
+	// benefit; the CLI enforces its own default when the flag is omitted.
+	deps.report?.push(`   🤖 Running Claude Code AI fix (max ${AI_FIX_MAX_TURNS} turns)...`)
 
-	const label = `hermes_pr_${pr}` // Python line 919
+	const label = `claude_pr_${pr}`
 	const { ok, snippet } = await agent.post(prompt, {
 		workdir,
 		timeoutSec: AI_FIX_TIMEOUT,
@@ -397,10 +399,13 @@ export async function runAiFix(
 	workdirs.remove(pidFile) // Python lines 955-956
 
 	if (committed)
-		return { ok: true, summary: `Hermes AI pushed ${newCommits} improvement commit(s)` } // line 959
+		return { ok: true, summary: `Claude Code pushed ${newCommits} improvement commit(s)` } // line 959
 	// `reportable` BEFORE `head()`: same untrusted-agent-text reasoning as the
 	// `[INFRA]` site above, and truncating first would not help — the credential
 	// sits near the start of a quoted `.git/config` line, well inside 300 points.
 	const said = reportable(snippet ?? "")
-	return { ok: false, summary: `Hermes ran but no commit/push. Output: ${head(said, SNIPPET)}` } // line 961
+	return {
+		ok: false,
+		summary: `Claude Code ran but no commit/push. Output: ${head(said, SNIPPET)}`,
+	} // line 961
 }

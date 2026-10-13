@@ -29,7 +29,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
-import type { PostResult } from "../src/agent.ts"
+import type { PostResult } from "../src/claude-agent.ts"
 import type { GitResult, GitRunner } from "../src/git.ts"
 import { WorkerLock } from "../src/lock.ts"
 import type { ProcRunner, Workdirs } from "../src/pr/lockfix.ts"
@@ -411,7 +411,7 @@ describe("case 3 — a permanent skip at this SHA skips without calling the agen
 				[REPO]: {
 					[String(PR_NUM)]: {
 						sha: HEAD,
-						skip_reason: "Hermes API server unreachable",
+						skip_reason: "Claude Code not available",
 						notified: false,
 					},
 				},
@@ -425,21 +425,20 @@ describe("case 3 — a permanent skip at this SHA skips without calling the agen
 		expect(approves(h.calls)).toBe(0)
 		expect(merges(h.calls)).toBe(0)
 		expect(h.lines).toContain(
-			"   ⏭️  Permanently skipped: Hermes API server unreachable (until head SHA changes)",
+			"   ⏭️  Permanently skipped: Claude Code not available (until head SHA changes)",
 		)
 		// Python 1947 calls `notify_skip_once` as a bare statement: the notification
 		// DOES fire (asserted below), but no `🔔 Skip notified` line is appended.
 		// Only the three `if notify_skip_once(...):` sites report it — on those,
 		// this line would appear in the ops channel on every single cron tick of
 		// every permanently-skipped PR. Asserting its ABSENCE is the whole point.
-		expect(h.lines).not.toContain("   🔔 Skip notified: Hermes API server unreachable")
+		expect(h.lines).not.toContain("   🔔 Skip notified: Claude Code not available")
 		expect(h.notifies).toEqual([
 			{
 				repo: REPO,
 				pr: PR_NUM,
 				status: "skipped",
-				summary:
-					"⏭️ Skipped: Hermes API server unreachable — will not retry until the PR head changes",
+				summary: "⏭️ Skipped: Claude Code not available — will not retry until the PR head changes",
 				score: "",
 				url: `https://github.com/${REPO}/pull/${PR_NUM}`,
 			},
@@ -452,16 +451,16 @@ describe("case 4 — an [INFRA] agent failure skips permanently and never re-run
 		const h = harness({
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
-			agent: [{ ok: false, snippet: "[INFRA] Hermes API server timed out after 1800s" }],
+			agent: [{ ok: false, snippet: "[INFRA] Claude Code timed out after 1800s" }],
 		})
 
 		const first = await runTick(h.deps)
 		expect(h.agentPosts).toHaveLength(1)
-		expect(first).toContain("   ⏭️  AI fix skipped: [INFRA] Hermes API server timed out after 1800s")
-		expect(first).toContain("   🔔 Skip notified: Hermes API server timed out after 1800s")
+		expect(first).toContain("   ⏭️  AI fix skipped: [INFRA] Claude Code timed out after 1800s")
+		expect(first).toContain("   🔔 Skip notified: Claude Code timed out after 1800s")
 		// The recorded reason is the [INFRA] text with the prefix stripped.
 		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBe(
-			"Hermes API server timed out after 1800s",
+			"Claude Code timed out after 1800s",
 		)
 		// The skip notification, and ONLY it: the same tick goes on to approve and
 		// merge (the [INFRA] skip is recorded, not enforced, on a PR whose safety
@@ -479,9 +478,9 @@ describe("case 4 — an [INFRA] agent failure skips permanently and never re-run
 		expect(skipNotices(h)).toHaveLength(1)
 		expect(merges(h.calls)).toBe(1)
 		expect(second).toContain(
-			"   ⏭️  Permanently skipped: Hermes API server timed out after 1800s (until head SHA changes)",
+			"   ⏭️  Permanently skipped: Claude Code timed out after 1800s (until head SHA changes)",
 		)
-		expect(second).not.toContain("   🤖 Running Hermes AI fix (100 turns max)...")
+		expect(second).not.toContain("   🤖 Running Claude Code AI fix (max 100 turns)...")
 		expect(second).toContain("   ⏭️  Skipped: 1")
 	})
 
@@ -666,7 +665,7 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 			prs: [makePr({ mergeable: false })],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [
-				{ ok: false, snippet: "[INFRA] Hermes API server unreachable at http://127.0.0.1:8642/v1" },
+				{ ok: false, snippet: "[INFRA] Claude Code not available at http://127.0.0.1:8642/v1" },
 			],
 		})
 
@@ -677,7 +676,7 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 		})
 
 		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBe(
-			"Hermes API server unreachable at http://127.0.0.1:8642/v1",
+			"Claude Code not available at http://127.0.0.1:8642/v1",
 		)
 	})
 
@@ -695,7 +694,7 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 		})
 
 		expect(out).toEqual({ merged: false, triggered: false, fixed: true, skipped: true })
-		expect(h.lines).toContain("   ✨ Conflict resolved: Hermes AI pushed 1 improvement commit(s)")
+		expect(h.lines).toContain("   ✨ Conflict resolved: Claude Code pushed 1 improvement commit(s)")
 		expect(merges(h.calls)).toBe(0)
 	})
 

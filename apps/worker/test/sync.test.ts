@@ -23,7 +23,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
-import type { PostResult } from "../src/agent.ts"
+import type { PostResult } from "../src/claude-agent.ts"
 import {
 	type GitResult,
 	type GitRunner,

@@ -24,7 +24,7 @@ bootstrapEnv()
 
 import { readFileSync, realpathSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { AgentClient } from "./agent.ts"
+import { AgentClient } from "./claude-agent.ts"
 import { notifyReview, postDiscordOps } from "./discord.ts"
 import { runGit } from "./git.ts"
 import { GitHubApi } from "./github.ts"

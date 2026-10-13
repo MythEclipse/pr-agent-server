@@ -266,8 +266,7 @@ describe("mergePr", () => {
 
 describe("runAiFix", () => {
 	test("an [INFRA] agent failure is returned verbatim — the skip-once contract", async () => {
-		const snippet =
-			"[INFRA] Hermes API server unreachable at http://127.0.0.1:8642/v1 (gateway up? API_SERVER_ENABLED?)"
+		const snippet = "[INFRA] Claude Code binary not found"
 		const proc = fakeProc({ "diff --name-only": { code: 0, stdout: "src/a.ts\n" } })
 		const fs = fakeWorkdirs()
 		const { agent } = fakeAgent({ ok: false, snippet })
@@ -306,7 +305,7 @@ describe("runAiFix", () => {
 		expect(r.ok).toBe(false)
 		expect(r.summary).toContain("no commit/push")
 		expect(r.summary).toBe(
-			"Hermes ran but no commit/push. Output: I looked at the code and changed nothing.",
+			"Claude Code ran but no commit/push. Output: I looked at the code and changed nothing.",
 		)
 		expect(proc.calls.map((c) => c.args[0])).not.toContain("push")
 	})
@@ -585,7 +584,7 @@ describe("credential redaction", () => {
 	 * worker just cloned. Git persists the credentialed clone URL in plaintext in
 	 * `.git/config` there, and "here is what I found" is a natural thing for the
 	 * agent to say. So these two summaries are the reachable path from a live
-	 * installation token to the ops Discord channel. `redactApiKey` in agent.ts
+	 * installation token to the ops Discord channel. `redactApiKey` in claude-agent.ts
 	 * does NOT cover it — that only strips `API_SERVER_KEY`, a different secret.
 	 */
 	const LEAKED = "ghp_FIXTUREnotAreal000000000000000000"
@@ -638,7 +637,7 @@ describe("credential redaction", () => {
 		expect(r.ok).toBe(false)
 		expect(r.summary).not.toContain(LEAKED)
 		expect(r.summary).not.toContain("ghp_")
-		expect(r.summary.startsWith("Hermes ran but no commit/push. Output: ")).toBe(true)
+		expect(r.summary.startsWith("Claude Code ran but no commit/push. Output: ")).toBe(true)
 		expect(r.summary).toContain("I read .git/config and found the remote url")
 		expect(r.summary).toContain("https://[REDACTED]@github.com/owner/repo.git")
 	})
@@ -726,7 +725,7 @@ describe("runAiFix", () => {
 			"main",
 			"appTok",
 		)
-		expect(r).toEqual({ ok: true, summary: "Hermes AI pushed 2 improvement commit(s)" })
+		expect(r).toEqual({ ok: true, summary: "Claude Code pushed 2 improvement commit(s)" })
 		// The count comes from `rev-list --count <headSha[:12]>..HEAD` (line 930) —
 		// twelve characters, and the WORKER pushes, never the agent.
 		const rev = proc.calls.find((c) => c.args[0] === "rev-list")!
@@ -754,10 +753,10 @@ describe("runAiFix", () => {
 		expect(calls[0].prompt).toBe(expectedPrompt("feat: x", "main", ["src/a.ts", "src/b.ts"]))
 		expect(calls[0].prompt).toContain("Do NOT push — a separate step pushes your commit.")
 		expect(calls[0].prompt).toContain('git commit --message="fix: auto-fix code quality [skip ci]"')
-		expect(calls[0].opts).toEqual({ workdir: AI_WD, timeoutSec: 1800, label: "hermes_pr_7" })
+		expect(calls[0].opts).toEqual({ workdir: AI_WD, timeoutSec: 1800, label: "claude_pr_7" })
 		expect(AI_FIX_TIMEOUT).toBe(1800)
-		expect(notes).toEqual(["   🤖 Running Hermes AI fix (100 turns max)..."])
-		// The prompt file is AgentClient.post's job (agent.ts), not a second write.
+		expect(notes).toEqual(["   🤖 Running Claude Code AI fix (max 100 turns)..."])
+		// The prompt file is AgentClient.post's job (claude-agent.ts), not a second write.
 		expect(fs.written).toEqual([])
 	})
 
@@ -801,7 +800,7 @@ describe("runAiFix", () => {
 			"tok",
 		)
 		expect(r.ok).toBe(false)
-		expect(r.summary).toBe("Hermes ran but no commit/push. Output: fatal: bad revision")
+		expect(r.summary).toBe("Claude Code ran but no commit/push. Output: fatal: bad revision")
 	})
 
 	test("a failed push reports stderr, then stdout, then nothing", async () => {

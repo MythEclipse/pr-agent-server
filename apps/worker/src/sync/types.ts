@@ -16,7 +16,7 @@
  * import them from `./run`. Re-exporting means this move touched no caller.
  */
 
-import type { PostResult } from "../agent.ts"
+import type { PostResult } from "../claude-agent.ts"
 import type { GitRunner } from "../git.ts"
 import type { Workdirs } from "../pr/lockfix.ts"
 import type { GhAppClient } from "../pr/scan.ts"
