@@ -45,10 +45,32 @@ export async function callWithFallback(opts: {
 	cfg: Config
 	retries?: number
 	call?: ChatCall
+	/**
+	 * Judge a response BODY, not just the HTTP round trip.
+	 *
+	 * WHY THIS EXISTS. `callWithFallback` only knew about transport failures, so a
+	 * 200 whose content was unusable counted as success and the fallback models
+	 * were never tried. For the review tool that meant an unparseable-but-valid
+	 * YAML body ended the whole review — "All models failed: failed to parse
+	 * review response into markdown" — even though two more models were configured
+	 * and would very likely have answered cleanly. The YAML was also
+	 * non-deterministic: the same model and prompt parsed on one run and not the
+	 * next, so the outcome depended on which sample happened to arrive first.
+	 *
+	 * Returning a string makes this response a failure and the loop moves to the
+	 * next model (reason included in the final error). Returning null accepts it.
+	 * A THROW is treated as a rejection, same as a failed call, so a validator can
+	 * simply assert.
+	 *
+	 * This is what makes the fallback chain mean something: the unit that varies
+	 * across attempts is the RESPONSE, not just the connection.
+	 */
+	validate?: (content: string, model: string) => string | null
 }) {
 	const call = opts.call ?? chatCompletion
 	const retries = opts.retries ?? 2
 	let last: unknown
+	const rejected: string[] = []
 	for (const model of opts.models) {
 		for (let attempt = 0; attempt <= retries; attempt++) {
 			try {
@@ -59,6 +81,25 @@ export async function callWithFallback(opts: {
 					temperature: opts.temperature,
 					cfg: opts.cfg,
 				})
+				if (opts.validate) {
+					let complaint: string | null = null
+					try {
+						complaint = opts.validate(r.content, model)
+					} catch (e) {
+						complaint = e instanceof Error ? e.message : String(e)
+					}
+					if (complaint) {
+						// A body this model could not get right is not a transport
+						// fault: retrying the SAME model may well fix it (the outputs
+						// are non-deterministic), so it keeps its retries and only
+						// moves on once they are spent.
+						rejected.push(`${model}: ${complaint}`)
+						last = new Error(complaint)
+						if (attempt === retries) break
+						await new Promise((r2) => setTimeout(r2, 1000 * 2 ** attempt))
+						continue
+					}
+				}
 				return {
 					content: r.content,
 					model,
@@ -75,7 +116,13 @@ export async function callWithFallback(opts: {
 			}
 		}
 	}
-	throw new Error(`All models failed: ${(last as Error)?.message ?? "unknown"}`)
+	// Every model's own reason is more useful than the last one alone: the caller
+	// used to see only the final complaint and could not tell a bad body from a
+	// dead endpoint.
+	throw new Error(
+		`All models failed: ${(last as Error)?.message ?? "unknown"}` +
+			(rejected.length > 1 ? ` (rejected: ${rejected.join("; ")})` : ""),
+	)
 }
 
 const NO_SUPPORT_TEMPERATURE_MODELS = new Set([

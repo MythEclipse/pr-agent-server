@@ -102,15 +102,6 @@ export async function runReview(
 	const systemPrompt = renderTemplate(REVIEW_SYSTEM_TEMPLATE, { ...vars, diff })
 	const userPrompt = renderTemplate(REVIEW_USER_TEMPLATE, { ...vars, diff })
 
-	// LLM call with per-model retry + fallback models
-	const llm = await callWithFallback({
-		models: [cfg.modelReview, ...cfg.fallbackModels],
-		system: systemPrompt,
-		user: userPrompt,
-		temperature: cfg.temperature,
-		cfg,
-	})
-
 	// parse YAML (resilient)
 	const keysFix = [
 		"ticket_compliance_check",
@@ -121,27 +112,58 @@ export async function runReview(
 		"relevant_line:",
 		"suggestion:",
 	]
-	let data = loadYaml(llm.content, keysFix, "review", "security_concerns") as Record<
-		string,
-		unknown
-	> | null
-	// loadYaml returns { review: ... } — keep as is
-	if (data && !("review" in data) && "review" in (data as object)) {
-		data = { review: (data as { review: unknown }).review }
+
+	/**
+	 * Parse one response and render it, or return null if it is unusable.
+	 *
+	 * Parsing is NOT a transport concern, so it is fed to `callWithFallback` as a
+	 * `validate` hook: an unparseable-but-HTTP-200 body now moves on to the next
+	 * configured model instead of failing the whole review on the first sample.
+	 *
+	 * This matters because the models' YAML is non-deterministic — the same model
+	 * and prompt parse on one run and not the next — so any single sample is a
+	 * coin flip. Falling through the chain turns that coin flip into "one of N
+	 * samples was usable", which is the difference between reviews landing and
+	 * reviews failing at random.
+	 */
+	const render = (content: string): { markdown: string; data: Record<string, unknown> } | null => {
+		let parsed = loadYaml(content, keysFix, "review", "security_concerns") as Record<
+			string,
+			unknown
+		> | null
+		// loadYaml returns { review: ... } — keep as is
+		if (parsed && !("review" in parsed) && "review" in (parsed as object)) {
+			parsed = { review: (parsed as { review: unknown }).review }
+		}
+		if (!parsed || !("review" in parsed)) return null
+		const md = convertToMarkdownV2(
+			parsed as { review: Record<string, unknown> },
+			true,
+			r.enableIntroText,
+		)
+		return md ? { markdown: md, data: parsed } : null
 	}
 
-	// render markdown
-	const markdown =
-		data && "review" in data
-			? convertToMarkdownV2(data as { review: Record<string, unknown> }, true, r.enableIntroText)
-			: ""
-	// A malformed/empty response must not be reported as a completed review:
-	// the old code threw All models failed here; callWithFallback only checks
-	// that the HTTP call didn't throw, so an unparseable-but-2xx body would
-	// otherwise return status:"success" with a 0-char comment.
-	if (!markdown) {
+	// LLM call with per-model retry + fallback models. A body that will not parse
+	// is treated as a failed attempt, so the remaining models get their turn.
+	const llm = await callWithFallback({
+		models: [cfg.modelReview, ...cfg.fallbackModels],
+		system: systemPrompt,
+		user: userPrompt,
+		temperature: cfg.temperature,
+		cfg,
+		validate: (content) =>
+			render(content) === null ? "failed to parse review response into markdown" : null,
+	})
+
+	// Re-render the accepted body. `validate` guarantees this is non-null; the
+	// guard below is the belt-and-braces check that a malformed response is never
+	// reported as a completed review with a 0-char comment.
+	const accepted = render(llm.content)
+	if (!accepted) {
 		throw new Error("All models failed: failed to parse review response into markdown")
 	}
+	const { markdown, data } = accepted
 
 	// publish
 	if (opts?.publish !== false) {
