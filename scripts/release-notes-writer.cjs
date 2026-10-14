@@ -24,46 +24,84 @@
  * on an unrelated dependency bump.
  */
 
-const LIMIT = Number(process.env.RELEASE_NOTES_LIMIT || 120000);
-const MARKER = '_… earlier changes omitted; see the repository history for the full list._';
+/** Fallback cap when RELEASE_NOTES_LIMIT is unset or unusable. */
+const DEFAULT_LIMIT = 120000
+
+/** Appended when whole sections had to be dropped to fit under {@link limit}. */
+const MARKER = "_… earlier changes omitted; see the repository history for the full list._"
+
+/** Sections are Markdown blocks separated by a blank line. */
+const SECTION_SEPARATOR = /\n{2,}/
 
 /**
- * @param {object} context  semantic-release context
- * @param {object} options  plugin options
- * @returns {string} markdown release body
+ * Headroom, in characters, reserved inside the budget for the elision marker,
+ * surrounding blank lines and the trailing newline. The elision is accounted
+ * for separately; this covers the rest of the assembly slack.
  */
-function writeReleaseNotes(context, options) {
-  const opts = options || {};
-  const next = context.nextRelease || {};
+const ASSEMBLY_HEADROOM = 200
 
-  if (!next.notes) return '';
+/**
+ * Resolves the character cap from the environment.
+ *
+ * An unparseable or non-positive RELEASE_NOTES_LIMIT would otherwise become
+ * NaN, and every comparison against NaN is false — the writer would then take
+ * the "under the limit" path for arbitrarily large bodies and fail the same way
+ * it was written to prevent. Fall back to the default instead.
+ *
+ * @returns {number} the cap in characters, guaranteed to be a positive number
+ */
+function resolveLimit() {
+	const raw = process.env.RELEASE_NOTES_LIMIT
+	if (raw === undefined || raw.trim() === "") return DEFAULT_LIMIT
 
-  // Under the limit: hand back the generator's own text untouched, so a normal
-  // release is byte-identical to what the built-in writer would produce.
-  if (next.notes.length <= LIMIT) return next.notes;
+	const parsed = Number(raw)
+	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LIMIT
 
-  // Over the limit: keep whole sections from the top until the budget is spent.
-  // Splitting on a blank line keeps Markdown intact — a slice taken mid-heading
-  // emits broken output, which is worse than a shorter body.
-  const sections = next.notes.split(/\n{2,}/);
-  const kept = [];
-  let size = 0;
-  const budget = LIMIT - MARKER.length - 200;
-
-  for (const section of sections) {
-    const cost = section.length + 2;
-    if (size + cost > budget) break;
-    kept.push(section);
-    size += cost;
-  }
-
-  // Always keep at least the first section, even if it alone exceeds the budget:
-  // a heading plus a truncated marker beats an empty release body.
-  if (kept.length === 0) kept.push(sections[0]);
-
-  const omitted = sections.length - kept.length;
-  const elision = omitted > 0 ? `\n\n${MARKER}\n` : '';
-  return kept.join('\n\n') + elision;
+	return parsed
 }
 
-module.exports = writeReleaseNotes;
+/**
+ * semantic-release `writeReleaseNotes` that caps the release body length.
+ *
+ * @param {{ nextRelease?: { notes?: string } }} [context] semantic-release context
+ * @param {object} [options] plugin options; accepted for signature parity with
+ *   @semantic-release/release-notes-generator's own writer, but unused here
+ * @returns {string} markdown release body, guaranteed not to exceed the cap
+ *   by more than the elision marker's own length
+ */
+function writeReleaseNotes(context, options) {
+	const limit = resolveLimit()
+	const notes = context && context.nextRelease ? context.nextRelease.notes : undefined
+
+	if (!notes) return ""
+
+	// Under the limit: hand back the generator's own text untouched, so a normal
+	// release is byte-identical to what the built-in writer would produce.
+	if (notes.length <= limit) return notes
+
+	// Over the limit: keep whole sections from the top until the budget is spent.
+	// Splitting on a blank line keeps Markdown intact — a slice taken mid-heading
+	// emits broken output, which is worse than a shorter body.
+	const sections = notes.split(SECTION_SEPARATOR)
+	const budget = limit - MARKER.length - ASSEMBLY_HEADROOM
+	const kept = []
+	let size = 0
+
+	for (const section of sections) {
+		// +2 accounts for the blank line rejoined with SECTION_SEPARATOR below.
+		const cost = section.length + 2
+		if (size + cost > budget) break
+		kept.push(section)
+		size += cost
+	}
+
+	// Always keep at least the first section, even if it alone exceeds the budget:
+	// a heading plus a truncated marker beats an empty release body.
+	if (kept.length === 0) kept.push(sections[0])
+
+	const omitted = sections.length - kept.length
+	const elision = omitted > 0 ? `\n\n${MARKER}\n` : ""
+	return kept.join("\n\n") + elision
+}
+
+module.exports = writeReleaseNotes

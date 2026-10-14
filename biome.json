@@ -1,5 +1,5 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.2.4/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
 	"formatter": {
 		"enabled": true,
 		"formatWithErrors": false,
@@ -16,7 +16,7 @@
 	"linter": {
 		"enabled": true,
 		"rules": {
-			"recommended": true,
+			"preset": "recommended",
 			"correctness": {
 				"noUnusedVariables": "off"
 			},
@@ -39,7 +39,7 @@
 			"includes": ["**/routeTree.gen.ts", "**/fixtures/**", "**/generated/**"],
 			"linter": {
 				"rules": {
-					"recommended": false
+					"preset": "none"
 				}
 			}
 		}
