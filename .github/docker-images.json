@@ -1,0 +1,19 @@
+{
+  "images": [
+    {
+      "package": "pr-agent-api",
+      "context": ".",
+      "file": "apps/api/Dockerfile"
+    },
+    {
+      "package": "pr-agent-worker",
+      "context": ".",
+      "file": "apps/worker/Dockerfile"
+    },
+    {
+      "package": "pr-agent-web",
+      "context": ".",
+      "file": "apps/web/Dockerfile"
+    }
+  ]
+}

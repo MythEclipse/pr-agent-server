@@ -1,0 +1,305 @@
+name: Release
+
+# One workflow, three jobs: derive the version from conventional commits, read
+# the image list, then build and publish those images at that version.
+#
+# Deliberately NOT two workflows chained by `release: published` or
+# `push: tags: v*`. GitHub suppresses workflow runs for events created with
+# GITHUB_TOKEN, so an event semantic-release creates never starts a downstream
+# workflow. Measured on kbbi-api: the release job published v1.0.0 while the
+# separate publish workflow recorded 0 runs for event=release. A tag trigger
+# fails identically — the tag is pushed with the same token. Keeping it in one
+# workflow needs no PAT.
+#
+# The three jobs are separate because a job-level `strategy.matrix` cannot read
+# `steps.*`: the matrix is evaluated before any step runs. A matrix built from
+# `steps.prepare.outputs` makes GitHub reject the whole workflow at parse time,
+# and the symptom is a run with zero jobs and no log to explain it. So the image
+# list is resolved by a job (whose output the next job's matrix CAN read).
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  # Without packages: write the GHCR push fails with 403. Declared at workflow
+  # level so a future job cannot silently lose it; the token is still scoped to
+  # THIS repository's packages only.
+  packages: write
+
+jobs:
+  release:
+    # Dependabot's conventional commits are dependency churn, not intent.
+    if: github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # One release at a time, repo-wide, and never cancel one half-published. A
+    # per-ref group would let two pushes both read the same "latest tag" and
+    # race to create the same version.
+    #
+    # Scoped to this job on purpose: applying it workflow-wide would make a
+    # ten-minute image build block the next push's release run, and those two do
+    # not contend for anything.
+    concurrency:
+      group: semantic-release
+      cancel-in-progress: false
+    outputs:
+      # Empty when this push produced no release. That is the only gate the
+      # image jobs trust: a chore-only push leaves it empty and builds nothing.
+      version: ${{ steps.publish.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # semantic-release reads every commit since the last tag to decide the
+          # bump, so a shallow clone makes it see nothing and publish nothing.
+          # Depth 0 is a requirement here, not an optimisation.
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Installed with --prefix, not as a devDependency: it must not touch
+      # package.json or the lockfile, because semantic-release commits
+      # package.json and a lockfile churn here would fight that commit.
+      - name: Install semantic-release
+        run: |
+          npm install --prefix "$RUNNER_TEMP/sr" --no-save \
+            semantic-release@^24 \
+            @semantic-release/changelog@^6 \
+            @semantic-release/exec@^6 \
+            @semantic-release/git@^10 \
+            @semantic-release/npm@^12
+          echo "$RUNNER_TEMP/sr/node_modules/.bin" >> "$GITHUB_PATH"
+
+      # successCmd in .releaserc.json runs only when a release was really
+      # published, and writes the version to GITHUB_OUTPUT. The image jobs read
+      # that one value, so no second place derives a version and the two can
+      # never disagree about what v1.4.2 means.
+      - name: Run semantic-release
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          semantic-release
+          echo "release version: ${version:-<none — this push needs no release>}"
+
+  prepare:
+    name: Resolve images
+    needs: release
+    # No version out of the release job means no release happened on this push.
+    if: needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      images: ${{ steps.resolve.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: resolve
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -Eeuo pipefail
+          version="$VERSION"
+          # semantic-release emits X.Y.Z or X.Y.Z-rc.1. Validate anyway: this
+          # value becomes an image tag, and `1` and `latest` are both legal tags
+          # that would quietly overwrite the wrong thing.
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version '$version' is not a Docker-safe semver version"
+            exit 1
+          fi
+
+          # Normalise build_args HERE, in prepare, not in the publish job.
+          #
+          # docker/build-push-action parses `build-args` as newline-separated
+          # KEY=VALUE. A JSON object is accepted and handed through literally,
+          # so every ARG resolves EMPTY and the build still succeeds.
+          #
+          # It has to happen here rather than in a step of the publish job:
+          # `toJSON()` pretty-prints, and GitHub renders a multi-line env value
+          # verbatim into the step's env block, so the value never arrives as the
+          # single token a step could split. Passing it through the matrix keeps
+          # it intact — newlines included, which is the format wanted here.
+          images=$(jq -c '
+            .images
+            | map(select(.enabled != false))
+            | map(
+                # Both of these are flattened here for the same reason: the
+                # matrix carries them intact, and the consumer parses KEY=VALUE.
+                # Doing it in a step of the publish job cannot work — toJSON()
+                # pretty-prints and GitHub renders a multi-line env value
+                # verbatim, so the step never sees a single token.
+                (if (.build_args | type) == "object" then
+                   .build_args = ([.build_args | to_entries[] | "\(.key)=\(.value)"] | join("\n"))
+                 else . end)
+                | (if (.labels | type) == "object" then
+                     .labels = ([.labels | to_entries[] | "\(.key)=\(.value)"] | join("\n"))
+                   else . end)
+              )
+          ' .github/docker-images.json)
+          if [[ "$(jq 'length' <<<"$images")" -eq 0 ]]; then
+            echo "::error::.github/docker-images.json enables no images"
+            exit 1
+          fi
+
+          # Every entry needs its Dockerfile and .dockerignore present AND
+          # git-tracked. buildx builds from this checkout, so an untracked
+          # Dockerfile fails later as a bare "unable to prepare context" naming
+          # neither the image nor the cause. A missing .dockerignore does not
+          # fail at all: it ships node_modules and .git inside the image.
+          while IFS= read -r img; do
+            package=$(jq -r '.package' <<<"$img")
+            context=$(jq -r '.context' <<<"$img")
+            file=$(jq -r '.file' <<<"$img")
+            # The package name becomes a repository name in the registry path,
+            # where only lowercase alphanumerics and separators are legal.
+            [[ "$package" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]] \
+              || { echo "::error::$package is not a valid GHCR package name (lowercase [a-z0-9._-])"; exit 1; }
+            # $context/.dockerignore, NOT the repo root's: buildx reads the
+            # ignore file from the CONTEXT. A repo whose contexts are service
+            # subdirectories (each its own package with its own lockfile) has no
+            # root .dockerignore to find, and the root copy would be ignored.
+            for path in "$context/$file" "$context/.dockerignore"; do
+              [[ -f "$path" ]] || { echo "::error::$package: missing $path"; exit 1; }
+              git ls-files --error-unmatch "$path" >/dev/null \
+                || { echo "::error::$package: $path is not tracked by git — CI cannot see it"; exit 1; }
+            done
+          done < <(jq -c '.[]' <<<"$images")
+
+          echo "images=${images}" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Publishing ${version}"
+            echo ""
+            echo "| Image | Tag |"
+            echo "|---|---|"
+            # A bash loop rather than a jq interpolation program: the jq form
+            # needs backticks and \(...) inside a single-quoted program nested
+            # in a YAML run: block, which is hard to review and untestable
+            # offline. The package name is already validated as [a-z0-9._-].
+            while IFS= read -r package; do
+              echo "| \`ghcr.io/${GHCR_OWNER,,}/${package}\` | \`ghcr.io/${GHCR_OWNER,,}/${package}:${version}\` |"
+            done < <(jq -r '.[].package' <<<"$images")
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  docker:
+    name: Publish ${{ matrix.image.package }}
+    needs: [release, prepare]
+    if: needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Job-level matrix, reading the PREVIOUS JOB's output — which is legal in
+    # this context, unlike a step output from the same job.
+    strategy:
+      # One broken image must not cancel its siblings: a monorepo where web
+      # fails should still publish api, rather than leaving the release with no
+      # images at all.
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.prepare.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build inputs that are fetched rather than committed. A repo whose
+      # Dockerfile COPYs a gitignored dataset needs it in the checkout first, and
+      # its absence surfaces only as buildx's "failed to calculate checksum of
+      # ref" — which names the missing path but not the reason it is missing.
+      #
+      # Repo-supplied: a shell command from .github/docker-images.json, so this
+      # workflow needs no per-repo knowledge and no new template per repo.
+      - name: Fetch build inputs
+        if: ${{ matrix.image.prebuild }}
+        env:
+          PREBUILD: ${{ matrix.image.prebuild }}
+        run: |
+          set -Eeuo pipefail
+          echo "$PREBUILD" | bash -euxo pipefail
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The default GITHUB_TOKEN is scoped to this repo's packages and is all a
+      # publish needs. A PAT would work and would be a credential with a much
+      # wider blast radius than this job requires.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.context }}/${{ matrix.image.file }}
+          push: true
+          platforms: ${{ matrix.image.platforms || 'linux/amd64' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image.package }}:${{ needs.release.outputs.version }}
+          # Newline-separated KEY=VALUE, which is what this action parses.
+          # Passing a JSON object is accepted and handed through literally, so
+          # every ARG in the Dockerfile resolves empty and the build still
+          # succeeds — a green run that configured nothing.
+          build-args: ${{ matrix.image.build_args || '' }}
+          # Repo-supplied labels are appended, so an image can record facts the
+          # standard cannot know — which dataset revision it was built against,
+          # for instance. They were being dropped: docker-images.json accepted a
+          # `labels` key that this fixed list silently ignored, so a pinned input
+          # was documented in config and absent from the artifact.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
+            org.opencontainers.image.title=${{ matrix.image.package }}
+            ${{ matrix.image.labels || '' }}
+          cache-from: type=gha,scope=${{ matrix.image.package }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.package }}
+
+      # The action reporting success proves layers were uploaded, not that the
+      # registry accepted a manifest under the tag we asked for. Read the tag
+      # back; the digest comparison also catches a concurrent publish silently
+      # overwriting this tag.
+      - name: Verify the published tag resolves
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image.package }}:${{ needs.release.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$DIGEST" ]] || { echo "::error::buildx reported no digest"; exit 1; }
+          if ! published=$(docker buildx imagetools inspect "$IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null); then
+            echo "::error::$IMAGE is not visible in the registry after push"
+            exit 1
+          fi
+          if [[ "$published" != "$DIGEST" ]]; then
+            echo "::error::$IMAGE resolves to $published, expected $DIGEST — a concurrent push overwrote it"
+            exit 1
+          fi
+          echo "$IMAGE -> $published"
+
+      # Here rather than in its own job: each matrix leg promotes only its own
+      # image, so one image failing cannot leave another unpromoted, and a
+      # prerelease can never move latest — the suffix is part of the version.
+      - name: Promote latest
+        if: ${{ !contains(needs.release.outputs.version, '-') }}
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -Eeuo pipefail
+          if [[ '${{ matrix.image.latest }}' == 'false' ]]; then
+            echo "${{ matrix.image.package }} opts out of the latest tag"
+            exit 0
+          fi
+          docker buildx imagetools create \
+            --tag "ghcr.io/${GHCR_OWNER,,}/${{ matrix.image.package }}:latest" \
+            "ghcr.io/${GHCR_OWNER,,}/${{ matrix.image.package }}:${VERSION}"
+          echo "ghcr.io/${GHCR_OWNER,,}/${{ matrix.image.package }}:latest -> ${VERSION}"

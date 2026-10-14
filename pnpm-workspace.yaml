@@ -1,2 +1,25 @@
 packages:
   - apps/*
+
+# pnpm blocks dependency build scripts unless they are declared, and fails the
+# install rather than warning:
+#   Error: ERR_PNPM_IGNORED_BUILDS
+#     Ignored build scripts: esbuild@0.18.20, esbuild@0.25.12, esbuild@0.28.2
+# esbuild's postinstall fetches its platform binary, and it arrives here three
+# times as a direct devDependency of apps/api and apps/worker and transitively
+# through vite and drizzle-kit.
+#
+# `allowBuilds` is the map form: a package name to true/false, and `false` records
+# a DENIAL so pnpm stops offering it for approval. Four other places look right and
+# are not, which is what this comment is for:
+#
+#   onlyBuiltDependencies: [...]   the pnpm 10 list form. Silently IGNORED by
+#                                  10.33.2 — the field is present in the file, the
+#                                  error is unchanged, and nothing warns.
+#   the `pnpm` block in package.json   not read for this setting at all.
+#   pnpm config set --json             ERR_PNPM_CONFIG_SET_UNSUPPORTED_YAML_CONFIG_KEY
+#   --config.dangerouslyAllowAllBuilds accepted, does nothing. The real setting
+#                                  has no `--config` prefix.
+#   pnpm approve-builds                interactive; there is no TTY in a build.
+allowBuilds:
+  esbuild: true

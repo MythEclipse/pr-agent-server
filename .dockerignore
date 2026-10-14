@@ -1,0 +1,60 @@
+# Build context exclusions for the three service images
+# (apps/{api,worker,web}). All three are built with the REPO ROOT as the context
+# and `-f apps/<svc>/Dockerfile`.
+#
+# This lives at the REPO ROOT on purpose: buildx reads .dockerignore from the
+# CONTEXT, and a per-app copy would be ignored entirely.
+#
+# WHAT MUST NOT BE LISTED HERE
+#   package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json
+#     The workspace install resolves @pr-agent/* through these. Excluding any of
+#     them makes `pnpm install --frozen-lockfile` fail outright, or silently
+#     produce a different dependency graph than the one CI's gate verified.
+#   apps/*/package.json
+#     Same reason: pnpm links workspace packages from these manifests, so the
+#     manifest list in each Dockerfile has to be complete.
+#   apps/api/drizzle/, apps/*/dist/
+#     apps/api's Dockerfile copies dist/ from the BUILDER stage, never from the
+#     context, so host build output must not leak in. A stale host dist/ shipped
+#     into an image would masquerade as a fresh build.
+#   pnpm-workspace.yaml's allowBuilds
+#     Removing the file removes the only record of which dependency build
+#     scripts are permitted, and the install fails with ERR_PNPM_IGNORED_BUILDS.
+
+# Dependencies — always reinstalled inside the image from the lockfile. Sending
+# them also risks copying absolute paths from a machine that is not this one.
+node_modules
+.pnpm-store
+**/node_modules
+
+# Version control / CI — hundreds of MB, and it busts the layer cache on every
+# unrelated commit.
+.git
+.gitignore
+.github
+.moon
+.hermes
+
+# Build and tool output — regenerated inside the image.
+dist
+**/dist
+.next
+out
+*.tsbuildinfo
+.moon/cache
+
+# Logs and editor state
+*.log
+.DS_Store
+.idea
+.vscode
+
+# Local env files. Credentials belong in the environment at `docker run`, never
+# baked into a layer.
+.env
+.env.*
+!.env.example
+
+# NOTE: .npmrc is deliberately NOT ignored. It carries the pnpm settings that
+# decide what gets installed, so excluding it would change the resolved tree
+# without any visible difference in the build log.
