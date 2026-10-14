@@ -7,24 +7,25 @@
  * two conditions that make a review untrustworthy (a generator error, or a
  * real security / breaking-change finding).
  *
- * THREE REGEX FACTS THIS PORT DOES NOT CHANGE. They are the whole module:
+ * TWO REGEX FACTS THIS PORT DOES NOT CHANGE. They are most of the module:
  *
- * 1. THE DOT IS LINE-SCOPED. Neither Python's `.` nor JS's `.` matches a
- *    newline, so every `emoji.*marker` pattern can only see the line the emoji
- *    is on. A security concern mentioned three lines below a clean line is
- *    invisible to the danger pattern. Do not add the `s` flag.
+ * 1. THE DOT IS LINE-SCOPED, for the PHRASE patterns. Neither Python's `.` nor
+ *    JS's `.` matches a newline, so every `⚡`/`🧪`/`⏱️` phrase pattern can only
+ *    see the line the emoji is on. Do not add the `s` flag to those.
  *
- * 2. THE FLAGS ARE ASYMMETRIC, and that is intentional. The "danger" patterns
- *    are case-insensitive (the bot may write "Security concern" or "security
- *    concerns"); the "clear" patterns are NOT, because their wording is
- *    load-bearing — `No security concerns identified` must match literally, and
+ * 2. THE PHRASE FLAGS ARE ASYMMETRIC, and that is intentional. The "danger"
+ *    patterns are case-insensitive (the bot may write "Security concern" or
+ *    "security concerns"); the "clear" patterns are NOT, because their wording
+ *    is load-bearing — `No major issues detected` must match literally, and
  *    lowercasing would also make a negated line match.
  *
- * 3. THE SECURITY PATTERN USES LOOKAROUND, and the lookarounds are
- *    complementary, not decoration: `(?<!No )` refuses to fire on the cleared
- *    line, `(?!s identified)` refuses to fire on the plural of the same clear
- *    phrase. Together they let one alternation reject the clean case without
- *    hardcoding a separate negative list. Both are supported by Bun.
+ * THE `🔒` ROW IS THE ONE PLACE THAT IS NO LONGER PHRASE-MATCHED. It used to be,
+ * and it was wrong in a way that cost a merge: the renderer can emit a
+ * negation it failed to recognise (`No` plus a leaked code fence) under the
+ * bare "Security concerns" HEADING, and a pattern requiring the phrase after
+ * the emoji read that shape as safe. `readSecurityRow` below reads the row's
+ * content instead. `SEC_ROW` uses `[\s\S]` for the opposite reason — it is
+ * reading a whole row, not a phrase on one line.
  *
  * The effort pattern is LAZY (`.*?(\d+)`): it takes the FIRST digit on the
  * ⏱️ line, which is the rating, not any number the surrounding prose mentions.
@@ -53,10 +54,93 @@ const ERROR_PATTERNS = [
 	"Internal Server Error",
 ] as const
 
-/** Python line 361. No flag: the clear phrasing is exact. */
-const SEC_CLEAR = /🔒.*No security concerns identified/
-/** Python line 362. See fact 3 above. */
-const SEC_DANGER = /🔒.*(?<!No )Security concern(?!s identified)/i
+/**
+ * The verdict a `🔒` row carries: `clear` (the reviewer found nothing),
+ * `concern` (it reported something), or `absent` (no such row in the body).
+ */
+export type SecurityVerdict = "clear" | "concern" | "absent"
+
+/**
+ * The boundary of one review section: a cell close (`</td>`), an `### ` heading,
+ * or the next emoji-led row heading.
+ *
+ * NEITHER a bare newline NOR a blank line is a boundary, and each was tried and
+ * was wrong in a different way:
+ *
+ *   - `\n` ends the row at the renderer's own `<br><br>` line break, so the
+ *     content comes back empty and an empty row reads as "clean" — a review
+ *     reporting a real SQL injection passed.
+ *   - `\n\s*\n` looks safer and is worse: the table renderer emits
+ *     `</strong><br><br>\n\n` between a row's HEADING and its CONTENT, so that
+ *     IS a blank line, and the row was truncated to its heading before the
+ *     verdict was ever read.
+ *
+ * The general rule: a boundary must be something the format emits ONLY when a
+ * section ends. `</td>` and the next emoji heading are exactly that.
+ */
+const SEC_SECTION_END = /<\/td>|^\s*###\s|\n\s*(?:🔒|⚡|🧪|⏱️|🏅|🔫|📝|🔀|✨|🎫|🔍)\s/m
+
+/**
+ * The verdict words a model's YAML produced for "nothing wrong here". Matched
+ * against the row's CONTENT with the heading already stripped, so the leading
+ * word is the verdict and any prose after it cannot flip the reading.
+ */
+const SEC_NEGATION = /^(?:no|none|n\/a|na)\b/i
+
+/**
+ * Read the `🔒` row's VERDICT rather than matching a phrase in it.
+ *
+ * The renderer emits this row in three shapes and a phrase-matching gate can
+ * only recognise one of them:
+ *
+ *   clear    → `🔒&nbsp;<strong>No security concerns identified</strong>`
+ *   concern  → `🔒&nbsp;<strong>Security concerns</strong><br><br>\n\n<real prose>`
+ *   degenerate → `🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nNo\n``` `
+ *              — a NEGATION the renderer failed to recognise as one, so it fell
+ *              into the `concern` template and emitted the heading followed by
+ *              a negation. This is GMW#109, byte for byte.
+ *
+ * A gate keyed on the literal phrase `Security concern` reads the third shape
+ * as "no concern found" — the exact opposite of its meaning — because the
+ * heading sits BEFORE the emoji's line ends and nothing after it repeats the
+ * phrase. So the verdict is computed from the row's CONTENT: strip the heading,
+ * and if what remains is a negation (or nothing at all), it is clean. Everything
+ * else is a concern.
+ *
+ * This inverts the failure mode. The old default for an unrecognised shape was
+ * "unclear", which the caller scored as a point off and, on the `⚡` row, as a
+ * hard block; here an unrecognised shape is a block, and only an explicitly
+ * empty or negated one is a pass. A shape we have never seen cannot buy a merge.
+ *
+ * `SEC_ROW` is non-greedy to the row terminator, so it captures one row and
+ * not the rest of the table — a second `🔒` further down cannot overwrite this
+ * row's verdict.
+ */
+function readSecurityRow(body: string): { verdict: SecurityVerdict; detail: string } {
+	const start = body.indexOf("🔒")
+	if (start < 0) return { verdict: "absent", detail: "" }
+	// From the emoji to the next section boundary. Scanning forward rather than
+	// matching `🔒…` lazily keeps the two concerns separate: the row's own text
+	// may legitimately contain an emoji, and only the FIRST `🔒` is the row.
+	const rest = body.slice(start + "🔒".length)
+	const end = SEC_SECTION_END.exec(rest)?.index
+	const row = end === undefined ? rest : rest.slice(0, end)
+	// The row, with HTML unwrapped, the emoji and `&nbsp;` gone, and the
+	// HEADING removed — what remains is the model's own value for the field.
+	//
+	// The heading is matched as a phrase (`No security concerns identified` OR
+	// `Security concerns`) rather than as a leading-run, because in the clear
+	// template the verdict lives INSIDE the heading. Stripping lazily up to the
+	// first "concern" would leave the trailing "identified" and then read that
+	// stray word as the value.
+	const detail = row
+		.replace(/<[^>]*>/g, " ")
+		.replace(/```[a-z]*|~~~|&nbsp;/gi, " ")
+		.replace(/no security concerns identified|security concerns?/i, " ")
+		.replace(/^[>\s*+-]+/gm, " ")
+		.trim()
+	return { verdict: SEC_NEGATION.test(detail) || detail === "" ? "clear" : "concern", detail }
+}
 /** Python line 370. */
 const ISSUES_CLEAR = /⚡.*No major (issues|problems) detected/
 /** Python line 371. */
@@ -90,14 +174,17 @@ export function analyzeReviewSafety(body: string): SafetyResult {
 		}
 	}
 
-	if (SEC_CLEAR.test(body)) {
+	const sec = readSecurityRow(body)
+	if (sec.verdict === "clear") {
 		reasons.push("✅ Security: clean")
 		score += 2
-	} else if (SEC_DANGER.test(body)) {
+	} else if (sec.verdict === "concern") {
 		return { safe: false, reasons: ["🔴 Security concern — blocking"], score: 0 }
 	} else {
-		reasons.push("⚠️ Security unclear")
-		score -= 1
+		// No `🔒` row at all. The old code read this as "unclear" and docked a
+		// point, which punished a review format that simply omits the row. There
+		// is nothing to distrust, so it is neither a pass nor a penalty.
+		reasons.push("⚠️ No security row in the review")
 	}
 
 	if (ISSUES_CLEAR.test(body)) {

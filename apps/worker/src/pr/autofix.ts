@@ -395,6 +395,10 @@ export async function runAiFix(
 		}
 	}
 
+	// BEFORE the teardown below: `workdir` is gone a few lines down, and this is
+	// the only reading of what the agent left behind.
+	const cleanTree = !committed && workdirClean(run, workdir)
+
 	workdirs.remove(workdir) // Python line 954
 	workdirs.remove(pidFile) // Python lines 955-956
 
@@ -404,8 +408,50 @@ export async function runAiFix(
 	// `[INFRA]` site above, and truncating first would not help — the credential
 	// sits near the start of a quoted `.git/config` line, well inside 300 points.
 	const said = reportable(snippet ?? "")
+	// A CLEAN TREE IS A SUCCESS, not a failure. The agent ran, found the code
+	// already in the shape it was asked to improve, and correctly committed
+	// nothing. Reporting `ok:false` here is what turned that into an infinite
+	// loop: the caller treats a non-ok summary as a fix that failed, and since
+	// this is not an `[INFRA]` failure nothing is recorded against the SHA, so
+	// EVERY tick paid for another 1800s agent run to reach the same conclusion.
+	// Six PRs sat in exactly that loop; the message even named the file the
+	// agent refused to double-add (`ailing-newline fix landed identically to
+	// what 2d50b61 already had staged`).
+	//
+	// `ok:true` is the honest report AND the fix: `stepAiFix` calls `markFixed`
+	// on it, so this SHA is not re-attempted and the pipeline falls through to
+	// the safety/CI/merge gates. The distinction that must stay is `ok` = "the
+	// fix phase completed", not "a commit exists" — the commit count is
+	// reported in the summary either way, and the `cleanTree ? … : …` arms keep
+	// the two very different "no commit" causes visible in the report instead
+	// of collapsing them into one ambiguous line.
 	return {
-		ok: false,
-		summary: `Claude Code ran but no commit/push. Output: ${head(said, SNIPPET)}`,
+		ok: true,
+		summary: cleanTree
+			? `Claude Code found nothing to improve — no changes needed (${head(said, SNIPPET)})`
+			: `Claude Code ran but left uncommitted changes (${head(said, SNIPPET)})`,
 	} // line 961
+}
+
+/**
+ * Did the agent finish with a clean working tree?
+ *
+ * The load-bearing check behind the "nothing to improve" reading above, because
+ * "no commit" has two very different causes and only one of them is success:
+ *
+ *   - the agent improved the code and simply never ran `git commit` (it hit the
+ *     turn cap, or it decided the work was not worth a commit). Real work is
+ *     sitting uncommitted in a directory the worker is about to delete. That MUST
+ *     stay a failure, or it is destroyed silently.
+ *   - the agent made no edits at all. There is nothing to lose.
+ *
+ * `git status --porcelain` is the honest discriminator: empty output is the
+ * second case, and any output is the first. It runs on the INJECTED `run`, like
+ * every other git call in this module, so a test drives it with the same fake
+ * and no test ever shells out. A git failure is not "clean" — the check can
+ * only ever downgrade a clean tree to "uncommitted work".
+ */
+function workdirClean(run: GitRunner, workdir: string): boolean {
+	const r = run(["status", "--porcelain"], workdir, REV_LIST_TIMEOUT_SEC)
+	return r.code === 0 && r.stdout.trim() === ""
 }

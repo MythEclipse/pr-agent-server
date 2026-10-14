@@ -155,9 +155,36 @@ export function convertToMarkdownV2(
 	return `${md.trimEnd()}\n`
 }
 
+/**
+ * Is this review cell a NEGATION?
+ *
+ * The obvious implementation is `value.trim().toLowerCase() === "no"`, and it
+ * is wrong: the value comes from a model that emits YAML, so the same "no"
+ * arrives as `no`, `No`, `"No."`, `no\n``` ` (a value whose fence leaked into
+ * the scalar), or `none detected`. Exact equality misses all of those, and the
+ * miss is EXPENSIVE — a security cell that should read "No security concerns
+ * identified" is rendered as a bare "Security concerns" heading instead, which
+ * is the exact string the worker's safety gate pattern-matches on to BLOCK the
+ * merge. That is how GMW#109 sat blocked at score 0/10 against a review whose
+ * security verdict was, in plain English, "No".
+ *
+ * So: strip markdown noise, then judge the FIRST token. Only the first token
+ * carries the verdict — "none of the above" is a negation, "no, the input is
+ * sanitised but see line 40" is not, and reading only the first token is what
+ * tells those two apart.
+ */
 export function isValueNo(value: string): boolean {
-	const v = value.trim().toLowerCase()
-	return v === "no" || v === "none" || v === "n/a" || v === "na"
+	const v = value
+		// A leaked code fence, blockquote marker or list bullet is formatting,
+		// not content.
+		.replace(/```[a-z]*|~~~/gi, " ")
+		.replace(/^[>\s*+-]+/gm, " ")
+		.trim()
+		.toLowerCase()
+	// The verdict is the first WORD: `no`/`none`/`n/a`/`na`. Anything after it
+	// is prose the model added, and must not be able to flip the reading.
+	const first = /^([a-z/]+)\b/.exec(v)?.[1]
+	return first === "no" || first === "none" || first === "n/a" || first === "na"
 }
 
 export function expandMinuteSuffix(s: string): string {

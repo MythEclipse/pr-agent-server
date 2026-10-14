@@ -37,6 +37,7 @@
  * human is a tick that never finishes.
  */
 import { accessSync, constants, writeFileSync } from "node:fs"
+import { dirname } from "node:path"
 import { type ProcResult, spawnSyncCompat } from "./lib/proc.ts"
 
 /** Where the Claude Code binary is expected, in priority order. */
@@ -233,7 +234,28 @@ export class AgentClient {
 		if (opts.workdir && opts.label) {
 			// The prompt is written to disk so a failed run can be replayed by hand
 			// with the exact same instructions.
-			writeBestEffort(opts.workdir, `${opts.label}.prompt.txt`, prompt)
+			//
+			// OUTSIDE the worktree, and this is load-bearing. `workdir` is the git
+			// clone of the PR branch, and the prompt is written BEFORE the agent
+			// runs — so the agent then sees an untracked `claude_pr_<n>.prompt.txt`
+			// sitting in its working directory, and its own instruction is
+			// `git add -A`. That `add -A` swept the audit file onto the PR branch:
+			// 50+ commits titled `fix: auto-fix code quality [skip ci]` across
+			// six PRs, each carrying a prompt file that has nothing to do with the
+			// dependency bump it was fixing. The file also made `git status`
+			// permanently dirty, so a later tick that legitimately found nothing
+			// to change read as "the agent did nothing" and reported
+			// `ran but no commit/push` forever.
+			//
+			// Writing beside the workdir instead keeps the audit trail without
+			// putting it inside the tree the agent commits from.
+			//
+			// `node:path`'s `dirname`, not string surgery: `dirname("/tmp/wd/")`
+			// is `/tmp`, where a trailing-slash strip followed by "remove the last
+			// component" collapses the real parent one level too far. The worker
+			// builds its paths by string concatenation, so a trailing separator is
+			// a shape this can actually be handed.
+			writeBestEffort(dirname(opts.workdir), `${opts.label}.prompt.txt`, prompt)
 		}
 
 		try {

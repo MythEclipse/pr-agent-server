@@ -136,12 +136,73 @@ describe("safety — detail beyond the brief table", () => {
 			score: 0,
 		})
 	})
-	test("an unclear section costs a point rather than blocking", () => {
-		// Security present but neither "no concerns" nor a danger marker.
-		const r = analyzeReviewSafety("🔒 unclear\n⚡ unclear\n⏱️ effort: 2")
-		expect(r.reasons).toEqual(["⚠️ Security unclear", "⚠️ Issues unclear"])
-		expect(r.score).toBe(4) // 5 -1 -1 +1
-		expect(r.safe).toBe(false) // 4 < 6, so this one blocks
+	test("a security row with content that is neither clear nor empty is a concern", async () => {
+		// The load-bearing new case. A `🔒` row whose value is real prose must
+		// BLOCK, including when the prose sits below the heading across the
+		// renderer's `<br><br>` line break — that break is INSIDE a row, so
+		// treating a newline as a row boundary truncated the row to its heading,
+		// read the empty remainder as "clean", and waved a real SQL injection
+		// through. The row ends at `</td>` or the next emoji heading, never at a
+		// line break.
+		const gfm = analyzeReviewSafety(
+			"🔒&nbsp;<strong>Security concerns</strong><br><br>\n\n**src/auth.ts** — SQL injection risk\n</td></tr>\n</table>",
+		)
+		expect(gfm.safe).toBe(false)
+		expect(gfm.reasons).toContain("🔴 Security concern — blocking")
+
+		// Same content, plain (non-GFM) format.
+		const plain = analyzeReviewSafety(
+			"### 🔒 Security concerns\n\nSQL injection in src/auth.ts\n### ⚡ No major issues detected",
+		)
+		expect(plain.safe).toBe(false)
+	})
+
+	test("the GMW#109 body — a negation under a bare heading — reads as clean", async () => {
+		// The body that produced the 0/10 block, byte for byte from the PR. The
+		// model's YAML said the security verdict was `No`, but a leaked code
+		// fence rode along in the value, so the renderer's `isValueNo` missed it
+		// and emitted the bare "Security concerns" heading followed by a
+		// negation. A phrase-matching gate read that shape as a concern and
+		// blocked a PR whose security verdict was, in plain English, "No".
+		const body =
+			"🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nNo\n```\n</td></tr>\n</table>"
+		const r = analyzeReviewSafety(body)
+		expect(r.reasons).toContain("✅ Security: clean")
+		expect(r.safe).toBe(true)
+	})
+
+	test("the other two renderings of a clean verdict also pass", async () => {
+		// Same verdict, three renderer output shapes. All must clear — this is
+		// the axis the old phrase-gate could not cover.
+		for (const body of [
+			"🔒&nbsp;<strong>No security concerns identified</strong></td></tr>",
+			"🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nNo security concerns identified\n</td>",
+			"🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nNone detected\n</td>",
+			"### 🔒 No security concerns identified",
+		]) {
+			const r = analyzeReviewSafety(body)
+			expect(r.reasons, body).toContain("✅ Security: clean")
+		}
+	})
+
+	test("a missing security row is neither a pass nor a penalty", async () => {
+		// No `🔒` row at all is not evidence of anything. It used to cost a
+		// point as "Security unclear", which docked a review merely for using a
+		// format without that row.
+		const r = analyzeReviewSafety("⚡ No major issues detected\n⏱️ effort: 2")
+		expect(r.reasons).toEqual(["⚠️ No security row in the review", "✅ No major issues"])
+		expect(r.score).toBe(8) // 5 +0 +2 +1
+		expect(r.safe).toBe(true)
+	})
+
+	test("an unclear ISSUES section still costs a point rather than blocking", async () => {
+		// The `⚡` row keeps its original phrase-matching semantics. Only the
+		// security row was rebuilt, because only it had a renderer shape that
+		// inverted the verdict.
+		const r = analyzeReviewSafety("🔒 No security concerns identified\n⚡ unclear\n⏱️ effort: 2")
+		expect(r.reasons).toEqual(["✅ Security: clean", "⚠️ Issues unclear"])
+		expect(r.score).toBe(7) // 5 +2 -1 +1
+		expect(r.safe).toBe(true)
 	})
 	test("effort >= 4 on the same line costs a point", () => {
 		// The effort regex is LAZY (`.*?(\d+)`) and `.` does not cross a newline, so
@@ -168,25 +229,35 @@ describe("safety — detail beyond the brief table", () => {
 		expect(r.reasons).toContain("⚠️ Tests missing")
 		expect(r.safe).toBe(true)
 	})
-	test("an unclear section can push a review below the threshold", () => {
-		// 5 -1 (security) -1 (issues) -1 (tests) -1 (effort 5) = 1 → blocked.
-		const r = analyzeReviewSafety("🔒 ?\n⚡ ?\n🧪 Test required\n⏱️ effort: 5")
+	test("unclear sections and no security row can still push a review below threshold", () => {
+		// The security row no longer has an "unclear" state — it is clear, a
+		// concern (an early return at 0), or absent (no penalty). The remaining
+		// deductions are the `⚡` row, the tests row and the effort rating, and
+		// together they still reach a blocking score:
+		//   5 +0 (no security row) −1 (issues) −1 (tests) −1 (effort 5) = 2.
+		const r = analyzeReviewSafety("⚡ ?\n🧪 Test required\n⏱️ effort: 5")
 		expect(r.safe).toBe(false)
-		expect(r.score).toBe(1)
+		expect(r.score).toBe(2)
 	})
-	test("the reachable score range is 1..10, so neither clamp in safety.ts can bind", () => {
+	test("the reachable score range is 2..10 once the security row is rebuilt", () => {
 		// WHAT THIS PINS, precisely. `Math.max(0, Math.min(10, score))` is a
 		// byte-for-byte port of Python line 390 and stays in safety.ts. This test
 		// does NOT claim to exercise the floor — it proves the floor is
 		// unreachable, and pins the real bounds:
-		//   * every body that REACHES the clamp scores in 1..10, so `max(0, ·)` is
+		//   * every body that REACHES the clamp scores in 2..10, so `max(0, ·)` is
 		//     dead defensive code against the current scoring and
 		//   * 10 is the maximum, reached at the all-clear body, so `min(10, ·)`
 		//     passes that value through unchanged.
-		// The two clamping-zero paths (a security concern, a major issue) are the
-		// EARLY RETURNS at lines 97 / 107 — they never reach line 137, which is
-		// why they are excluded from the enumeration below.
-		const SEC = { clear: "🔒 No security concerns identified", unclear: "🔒 ?" }
+		// The security row is ENUMERATED, unlike before, because its verdict is
+		// now read from the row's content and so has exactly three states: clean
+		// (+2), a blocking concern (an EARLY RETURN at 0, never reaching the
+		// clamp), and absent (0, no penalty). The early-return states are
+		// excluded from the enumeration below for that reason.
+		const SEC = {
+			clear: "🔒 No security concerns identified",
+			degenerate: "🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nNo\n```\n</td>",
+			absent: null,
+		}
 		const ISS = { clear: "⚡ No major issues detected", unclear: "⚡ ?" }
 		const TST = { absent: null, missing: "🧪 tests missing", irrelevant: "🧪 No relevant tests" }
 		const EFF = { absent: null, small: "⏱️ effort: 1", large: "⏱️ effort: 4" }
@@ -199,16 +270,20 @@ describe("safety — detail beyond the brief table", () => {
 						const body = [s, i, t, e].filter(Boolean).join("\n")
 						reached.push(analyzeReviewSafety(body).score)
 					}
-		// The bound itself. Run against the REAL Python (line 390) this array is
-		// [1..10] there too — see the task-12 fix report for the cross-check.
-		expect([...new Set(reached)].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+		expect([...new Set(reached)].sort((a, b) => a - b)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
 
-		// Every all-negative path converges on 1: 5 −1 (security) −1 (issues)
-		// −1 (tests) −1 (effort). The rating is 5 vs 9, and it makes NO difference,
-		// which is the fact the old "second missing-tests hit" comment invented a
-		// mechanism for and never had.
-		expect(analyzeReviewSafety("🔒 ?\n⚡ ?\n🧪 Test required\n⏱️ effort: 5").score).toBe(1)
-		expect(analyzeReviewSafety("🔒 ?\n⚡ ?\n🧪 Test required\n⏱️ effort: 9").score).toBe(1)
+		// The floor: 5 +0 (no security row) −1 (issues) −1 (tests) −1 (effort).
+		// The rating is 5 vs 9, and it makes NO difference, which is the fact the
+		// old "second missing-tests hit" comment invented a mechanism for and
+		// never had.
+		expect(analyzeReviewSafety("⚡ ?\n🧪 Test required\n⏱️ effort: 5").score).toBe(2)
+		expect(analyzeReviewSafety("⚡ ?\n🧪 Test required\n⏱️ effort: 9").score).toBe(2)
+
+		// BOTH clean renderings of the security verdict score identically — the
+		// degenerate one is the GMW#109 shape and used to score 0 (a hard block).
+		// 5 +2 (security clean) −1 (issues `⚡ ?`) +1 (effort 1) = 7.
+		expect(analyzeReviewSafety(SEC.clear + "\n⚡ ?\n⏱️ effort: 1").score).toBe(7)
+		expect(analyzeReviewSafety(SEC.degenerate + "\n⚡ ?\n⏱️ effort: 1").score).toBe(7)
 
 		// The ceiling: 5 +2 (security clean) +2 (issues clear) +1 (small effort).
 		expect(

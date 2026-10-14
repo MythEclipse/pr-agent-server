@@ -285,10 +285,17 @@ describe("runAiFix", () => {
 		expect(fs.removed).toContain(AI_WD)
 	})
 
-	test("no commit means no push and a 'no commit/push' summary", async () => {
+	test("a clean tree is success: no commit, and reported as 'nothing to improve'", async () => {
+		// GMW#109 and five sibling PRs. The agent ran, the code was already in
+		// the shape it was asked to improve, and it correctly committed nothing.
+		// Reporting `ok:false` made every tick pay for another 1800s agent run to
+		// reach the same conclusion, forever, because a non-`[INFRA]` failure
+		// records nothing against the SHA.
 		const proc = fakeProc({
 			"diff --name-only": { code: 0, stdout: "src/a.ts\n" },
 			"rev-list --count": { code: 0, stdout: "0\n" },
+			// Empty `git status --porcelain` output = the agent edited nothing.
+			"status --porcelain": { code: 0, stdout: "" },
 		})
 		const fs = fakeWorkdirs()
 		const { agent } = fakeAgent({ ok: true, snippet: "I looked at the code and changed nothing." })
@@ -302,12 +309,59 @@ describe("runAiFix", () => {
 			"main",
 			"appTok",
 		)
-		expect(r.ok).toBe(false)
-		expect(r.summary).toContain("no commit/push")
-		expect(r.summary).toBe(
-			"Claude Code ran but no commit/push. Output: I looked at the code and changed nothing.",
-		)
+		expect(r.ok).toBe(true)
+		expect(r.summary).toContain("nothing to improve")
 		expect(proc.calls.map((c) => c.args[0])).not.toContain("push")
+	})
+
+	test("uncommitted work is reported distinctly from a clean tree", async () => {
+		// The other half of "no commit", and the reason the summary is not a
+		// single generic line: the agent improved the code but never ran
+		// `git commit`. Real work is sitting in a directory the worker is about
+		// to delete, so the report must not read as a routine no-op.
+		const proc = fakeProc({
+			"diff --name-only": { code: 0, stdout: "src/a.ts\n" },
+			"rev-list --count": { code: 0, stdout: "0\n" },
+			"status --porcelain": { code: 0, stdout: " M src/a.ts\n?? src/b.ts\n" },
+		})
+		const fs = fakeWorkdirs()
+		const { agent } = fakeAgent({ ok: true, snippet: "Improved naming in two files." })
+		const r = await runAiFix(
+			aiFixDeps(proc, fs, agent),
+			REPO,
+			PR,
+			"t",
+			"abc123def456",
+			"dep/x",
+			"main",
+			"appTok",
+		)
+		expect(r.ok).toBe(true)
+		expect(r.summary).toContain("left uncommitted changes")
+		expect(r.summary).not.toContain("nothing to improve")
+	})
+
+	test("a failing git status is never read as a clean tree", async () => {
+		// The probe can only ever DOWNGRADE a clean tree to "uncommitted work",
+		// never the reverse: an unreadable status is not evidence of tidiness.
+		const proc = fakeProc({
+			"diff --name-only": { code: 0, stdout: "src/a.ts\n" },
+			"rev-list --count": { code: 0, stdout: "0\n" },
+			"status --porcelain": { code: 128, stderr: "fatal: not a git repository" },
+		})
+		const fs = fakeWorkdirs()
+		const { agent } = fakeAgent({ ok: true, snippet: "done" })
+		const r = await runAiFix(
+			aiFixDeps(proc, fs, agent),
+			REPO,
+			PR,
+			"t",
+			"abc123def456",
+			"dep/x",
+			"main",
+			"appTok",
+		)
+		expect(r.summary).toContain("left uncommitted changes")
 	})
 })
 
@@ -621,6 +675,7 @@ describe("credential redaction", () => {
 		const proc = fakeProc({
 			"diff --name-only": { code: 0, stdout: "src/a.ts\n" },
 			"rev-list --count": { code: 0, stdout: "0\n" },
+			"status --porcelain": { code: 0, stdout: "" },
 		})
 		const fs = fakeWorkdirs()
 		const { agent } = fakeAgent({ ok: true, snippet: quotedConfig })
@@ -634,12 +689,19 @@ describe("credential redaction", () => {
 			"main",
 			"appTok",
 		)
-		expect(r.ok).toBe(false)
+		expect(r.ok).toBe(true)
 		expect(r.summary).not.toContain(LEAKED)
 		expect(r.summary).not.toContain("ghp_")
-		expect(r.summary.startsWith("Claude Code ran but no commit/push. Output: ")).toBe(true)
+		expect(r.summary).toContain("nothing to improve")
 		expect(r.summary).toContain("I read .git/config and found the remote url")
+		// The redactor replaces the ENTIRE userinfo with `[REDACTED]`, so neither the
+		// token nor the `x-access-token` username survives. Asserting the
+		// replacement alone would pass even if a real secret rode along after it,
+		// so the negative assertions carry the weight.
 		expect(r.summary).toContain("https://[REDACTED]@github.com/owner/repo.git")
+		expect(r.summary).not.toContain("x-access-token")
+		expect(r.summary).not.toContain(LEAKED)
+		expect(r.summary).not.toContain("ghp_")
 	})
 })
 
@@ -786,6 +848,7 @@ describe("runAiFix", () => {
 		const proc = fakeProc({
 			...DIFF,
 			"rev-list --count": { code: 128, stderr: "fatal: bad revision" },
+			"status --porcelain": { code: 0, stdout: "" },
 		})
 		const fs = fakeWorkdirs()
 		const { agent } = fakeAgent({ ok: true, snippet: "fatal: bad revision" })
@@ -799,8 +862,14 @@ describe("runAiFix", () => {
 			"main",
 			"tok",
 		)
-		expect(r.ok).toBe(false)
-		expect(r.summary).toBe("Claude Code ran but no commit/push. Output: fatal: bad revision")
+		// Zero commits, and a tree the agent left tidy → the fix phase completed.
+		// The unparseable count still means "no push", which is the point of the
+		// test: a bad revision must not be mistaken for a commit to push.
+		expect(proc.calls.map((c) => c.args[0])).not.toContain("push")
+		expect(r.ok).toBe(true)
+		expect(r.summary).toBe(
+			"Claude Code found nothing to improve — no changes needed (fatal: bad revision)",
+		)
 	})
 
 	test("a failed push reports stderr, then stdout, then nothing", async () => {
@@ -947,7 +1016,7 @@ describe("runAiFix", () => {
 			},
 		}
 		const { agent, calls } = fakeAgent({ ok: true, snippet: "" })
-		const r = await runAiFix(
+		await runAiFix(
 			aiFixDeps(proc, fs, agent, api),
 			REPO,
 			PR,
@@ -957,7 +1026,8 @@ describe("runAiFix", () => {
 			"main",
 			"tok",
 		)
-		expect(r.ok).toBe(false) // nothing committed in this scripted run
+		// The point of this test is the FILE LIST, not the outcome: the files
+		// endpoint threw and git's answer must still reach the prompt.
 		expect(calls[0].prompt).toContain("  - src/a.ts")
 	})
 })

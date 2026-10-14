@@ -201,17 +201,54 @@ describe("AgentClient — Claude Code CLI", () => {
 		expect(r.snippet).toContain("failed to launch")
 	})
 
-	test("writes the prompt beside the workdir for replay, best-effort", async () => {
+	test("writes the prompt BESIDE the workdir, never inside it", async () => {
 		const spawn = fakeSpawn()
 		process.env.ANTHROPIC_AUTH_TOKEN = KEY
 		// Drive the real write path against a temp dir.
-		const { mkdtempSync, readFileSync } = await import("node:fs")
+		const { existsSync, mkdirSync, mkdtempSync, readFileSync } = await import("node:fs")
 		const { tmpdir } = await import("node:os")
 		const { join } = await import("node:path")
-		const dir = mkdtempSync(join(tmpdir(), "pr-agent-prompt-"))
+		// The workdir is a real subdirectory, mirroring the clone layout the
+		// worker builds — the prompt must land in its PARENT.
+		const parent = mkdtempSync(join(tmpdir(), "pr-agent-prompt-"))
+		const dir = join(parent, "work")
+		mkdirSync(dir)
 		const c = new AgentClient({ bin: "/usr/local/bin/claude", spawn, isRoot: () => false })
 		await c.post("the exact prompt", { workdir: dir, label: "claude_pr_7" })
-		expect(readFileSync(join(dir, "claude_pr_7.prompt.txt"), "utf8")).toBe("the exact prompt")
+
+		// Replayable from the parent…
+		expect(readFileSync(join(parent, "claude_pr_7.prompt.txt"), "utf8")).toBe("the exact prompt")
+		// …and NOT inside the tree the agent commits from. This is the assertion
+		// that matters: the prompt is written BEFORE the agent runs, its own
+		// instruction is `git add -A`, and an in-worktree audit file was swept
+		// onto six PR branches as 50+ `fix: auto-fix code quality [skip ci]`
+		// commits. It also left the tree permanently dirty, which made a later
+		// tick's legitimate "nothing to change" read as "the agent did nothing".
+		expect(existsSync(join(dir, "claude_pr_7.prompt.txt"))).toBe(false)
+	})
+
+	test("the prompt still lands beside a workdir given with a trailing slash", async () => {
+		// `dirname("/x/wd/")` is `/x`, so a workdir written with a trailing
+		// separator still puts the audit file in its real parent. The worker
+		// builds workdir paths by string concatenation, so this shape is
+		// reachable — and a string-surgery "strip the slash, drop the last
+		// segment" implementation would instead write to the grandparent.
+		const spawn = fakeSpawn()
+		process.env.ANTHROPIC_AUTH_TOKEN = KEY
+		const { existsSync, mkdirSync, mkdtempSync, readFileSync } = await import("node:fs")
+		const { tmpdir } = await import("node:os")
+		const { join } = await import("node:path")
+		const parent = mkdtempSync(join(tmpdir(), "pr-agent-slash-"))
+		const work = join(parent, "wd")
+		mkdirSync(work)
+		const c = new AgentClient({ bin: "/usr/local/bin/claude", spawn, isRoot: () => false })
+		await c.post("p", { workdir: `${work}/`, label: "claude_pr_9" })
+
+		// `dirname` of the trailing-slash path is the parent, which is where the
+		// audit belongs.
+		expect(readFileSync(join(parent, "claude_pr_9.prompt.txt"), "utf8")).toBe("p")
+		// Not in the worktree itself.
+		expect(existsSync(join(work, "claude_pr_9.prompt.txt"))).toBe(false)
 	})
 
 	test("never throws — every path returns a PostResult", async () => {
