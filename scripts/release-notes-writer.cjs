@@ -24,32 +24,45 @@
  * on an unrelated dependency bump.
  */
 
-const LIMIT = Number(process.env.RELEASE_NOTES_LIMIT || 120000)
+/** Default body-length cap, in characters, when RELEASE_NOTES_LIMIT is unset. */
+const DEFAULT_LIMIT = 120000
+
+/** Footer appended in place of the sections that did not fit in the budget. */
 const MARKER = "_… earlier changes omitted; see the repository history for the full list._"
 
 /**
- * @param {object} context  semantic-release context
- * @param {object} options  plugin options
- * @returns {string} markdown release body
+ * Resolve the effective body-length cap from the environment.
+ *
+ * A non-numeric, negative, or zero value would silently disable truncation (or
+ * drop every section), so it falls back to the default rather than failing the
+ * release.
+ *
+ * @returns {number} maximum number of characters allowed in the release body
  */
-function writeReleaseNotes(context, options) {
-	const opts = options || {}
-	const next = context.nextRelease || {}
+function resolveLimit() {
+	const configured = Number(process.env.RELEASE_NOTES_LIMIT || DEFAULT_LIMIT)
+	if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_LIMIT
+	return configured
+}
 
-	if (!next.notes) return ""
+/**
+ * Keep whole Markdown sections from the top of `notes` until the budget is spent.
+ *
+ * Splitting on a blank line keeps Markdown intact — a slice taken mid-heading
+ * emits broken output, which is worse than a shorter body.
+ *
+ * @param {string} notes       full generated release body
+ * @param {number} limit       maximum characters allowed for the whole body
+ * @returns {string} truncated body, with an elision marker when sections were dropped
+ */
+function truncateToBudget(notes, limit) {
+	// Reserve room for the marker itself plus a small safety margin, so the
+	// elided body still lands under `limit` even on the boundary.
+	const budget = limit - MARKER.length - 200
+	const sections = notes.split(/\n{2,}/)
 
-	// Under the limit: hand back the generator's own text untouched, so a normal
-	// release is byte-identical to what the built-in writer would produce.
-	if (next.notes.length <= LIMIT) return next.notes
-
-	// Over the limit: keep whole sections from the top until the budget is spent.
-	// Splitting on a blank line keeps Markdown intact — a slice taken mid-heading
-	// emits broken output, which is worse than a shorter body.
-	const sections = next.notes.split(/\n{2,}/)
 	const kept = []
 	let size = 0
-	const budget = LIMIT - MARKER.length - 200
-
 	for (const section of sections) {
 		const cost = section.length + 2
 		if (size + cost > budget) break
@@ -64,6 +77,21 @@ function writeReleaseNotes(context, options) {
 	const omitted = sections.length - kept.length
 	const elision = omitted > 0 ? `\n\n${MARKER}\n` : ""
 	return kept.join("\n\n") + elision
+}
+
+/**
+ * Build the release body, capped so GitHub accepts it.
+ *
+ * @param {{nextRelease?: {notes?: string}}} context  semantic-release context
+ * @returns {string} markdown release body
+ */
+function writeReleaseNotes(context) {
+	// Under the limit: hand back the generator's own text untouched, so a normal
+	// release is byte-identical to what the built-in writer would produce.
+	const notes = (context && context.nextRelease && context.nextRelease.notes) || ""
+	if (notes.length <= resolveLimit()) return notes
+
+	return truncateToBudget(notes, resolveLimit())
 }
 
 module.exports = writeReleaseNotes
