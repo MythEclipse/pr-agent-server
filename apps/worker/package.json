@@ -10,7 +10,6 @@
 		"test": "vitest run",
 		"typecheck": "tsc --noEmit"
 	},
-	"dependencies": {},
 	"devDependencies": {
 		"@types/node": "^26.6.5",
 		"esbuild": "^0.28.2",
