@@ -27,6 +27,22 @@ if [[ ! -d "$SRC/dist" ]]; then
   echo "deploy-worker: $SRC/dist missing — run 'pnpm run build' first" >&2
   exit 1
 fi
+# A STALE dist is the same failure as a missing one, and quieter. `dist/` is a
+# build artifact, so it is routinely older than the sources it came from: a
+# deploy after a commit but before a rebuild copies the PREVIOUS build and every
+# check below passes — 397 green tests, all against sources that were never
+# compiled. That really happened: the anti-stuck guard was committed and
+# "deployed" while the running bundle was the pre-guard one, and the greps that
+# were supposed to catch it were the only thing that noticed.
+#
+# So: refuse to deploy a bundle older than the newest source file.
+NEWEST_SRC="$(find "$SRC/src" -type f -name '*.ts' -newer "$SRC/dist/index.js" -print -quit)"
+if [[ -n "$NEWEST_SRC" ]]; then
+  echo "deploy-worker: dist is STALE — $NEWEST_SRC is newer than dist/index.js." >&2
+  echo "              Run 'pnpm run build' before deploying; a stale bundle passes every" >&2
+  echo "              check below while shipping the previous build." >&2
+  exit 1
+fi
 sudo rsync -a --delete "$SRC/dist/" "$DEST/dist/"
 sudo install -m 0644 "$SRC/package.json" "$DEST/package.json"
 
