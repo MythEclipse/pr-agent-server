@@ -82,16 +82,17 @@ function truncateToBudget(notes, limit) {
 /**
  * Build the release body, capped so GitHub accepts it.
  *
- * @param {{nextRelease?: {notes?: string}}} context  semantic-release context
+ * @param {{nextRelease?: {notes?: string}}} [context]  semantic-release context
  * @returns {string} markdown release body
  */
 function writeReleaseNotes(context) {
 	// Under the limit: hand back the generator's own text untouched, so a normal
 	// release is byte-identical to what the built-in writer would produce.
-	const notes = (context && context.nextRelease && context.nextRelease.notes) || ""
-	if (notes.length <= resolveLimit()) return notes
+	const notes = context?.nextRelease?.notes || ""
+	const limit = resolveLimit()
+	if (notes.length <= limit) return notes
 
-	return truncateToBudget(notes, resolveLimit())
+	return truncateToBudget(notes, limit)
 }
 
 module.exports = writeReleaseNotes
