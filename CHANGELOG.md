@@ -1,3 +1,17 @@
+## [1.0.3](https://github.com/asepharyana/pr-agent-server/compare/v1.0.2...v1.0.3) (2026-10-14)
+
+
+### Bug Fixes
+
+* auto-fix code quality [skip ci] ([32c38fd](https://github.com/asepharyana/pr-agent-server/commit/32c38fd3b4981b17efed37c27e3e5437f0d903c3))
+* auto-fix code quality [skip ci] ([262acc4](https://github.com/asepharyana/pr-agent-server/commit/262acc4068f6da3f26c978c0b879ea5d83486dd0))
+* auto-fix code quality [skip ci] ([0d97c7d](https://github.com/asepharyana/pr-agent-server/commit/0d97c7d394e237d59f4ace13c4a79f6541e4896f))
+* auto-fix code quality [skip ci] ([d6bc9a3](https://github.com/asepharyana/pr-agent-server/commit/d6bc9a3e535557b705d7d706ea186d2c8f9d5fd5))
+* auto-fix code quality [skip ci] ([11e41d3](https://github.com/asepharyana/pr-agent-server/commit/11e41d3ff054fa8c095fce604fe40f6db0e3befc))
+* auto-fix code quality [skip ci] ([6c22cfc](https://github.com/asepharyana/pr-agent-server/commit/6c22cfce5289f85dc8683c12f6179c6d777992c9))
+* auto-fix code quality [skip ci] ([8ceca5e](https://github.com/asepharyana/pr-agent-server/commit/8ceca5e1c5b33a909ce60e65014ba224733647b0))
+* auto-fix code quality [skip ci] ([1a501fe](https://github.com/asepharyana/pr-agent-server/commit/1a501fec1eeefd5d1f9aea76e20746efc3d8ab84))
+
 ## [1.0.2](https://github.com/asepharyana/pr-agent-server/compare/v1.0.1...v1.0.2) (2026-10-14)
 
 
