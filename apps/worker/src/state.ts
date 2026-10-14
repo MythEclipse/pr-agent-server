@@ -33,7 +33,71 @@ export interface PrEntry {
 	sha?: string
 	skip_reason?: string
 	notified?: boolean
+	/**
+	 * Consecutive failed attempts at `sha`, cleared by `markFixed`/`markSkip`.
+	 *
+	 * THE ANTI-STUCK COUNTER. `skip_reason` only ever got set for `[INFRA]`
+	 * failures (CLI missing, timeout, gateway down) — a class that is obviously
+	 * worth suppressing. An ORDINARY failure recorded nothing at all, so the
+	 * next tick saw a PR with no state and did the identical expensive work
+	 * again. GMW#109 sat that way for days: `🔴 SAFETY BLOCKED (score: 0/10)`
+	 * every five minutes, and neither the block nor the "agent ran but no
+	 * commit" line below it left a single byte behind. Nothing in the design
+	 * said "this has already been tried N times" — so nothing could stop it.
+	 *
+	 * A bounded counter is what converts "retry forever" into "retry, then
+	 * escalate": past `MAX_ATTEMPTS` the failure is recorded as a skip with its
+	 * reason, which is a state the pipeline already respects and the operator
+	 * already gets notified about. The attempt is still counted from scratch
+	 * whenever the head SHA moves, because a new head is new work.
+	 */
+	attempts?: number
 	[key: string]: unknown
+}
+
+/**
+ * How many times the same head SHA may fail before the failure is pinned.
+ *
+ * Deliberately small. The unit is "a 5-minute tick plus a paid agent run", so
+ * even 3 is over an hour of the same dead end — long enough to ride out a
+ * transient (a webhook outage, a model blip, GitHub 5xx), short enough that a
+ * permanent condition surfaces to a human instead of accruing cost silently.
+ */
+export const MAX_ATTEMPTS = 3
+
+/**
+ * Record a failed attempt at `headSha` and return the running count.
+ *
+ * Idempotent per SHA: calling it for a different head resets to 1, because the
+ * previous head's failures say nothing about this one. Only ever increments
+ * when the SHA still matches, so a PR that moved does not inherit a stale
+ * tally.
+ */
+export function bumpAttempt(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): number {
+	const entry = prEntry(state, repo, pr)
+	const prior = entry.sha === headSha ? Number(entry.attempts ?? 0) : 0
+	const next = (Number.isFinite(prior) ? prior : 0) + 1
+	entry.sha = headSha
+	entry.attempts = next
+	return next
+}
+
+/** The attempt count for `headSha`, or 0 if this head was never tried. */
+export function attemptCount(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): number {
+	const entry = prEntry(state, repo, pr)
+	if (entry.sha !== headSha) return 0
+	const n = Number(entry.attempts ?? 0)
+	return Number.isFinite(n) ? n : 0
 }
 
 /** `{ "owner/repo": { "<pr>": PrEntry } }` */
@@ -119,6 +183,10 @@ export function markFixed(
 	entry.sha = headSha
 	delete entry.skip_reason
 	entry.notified = false
+	// Success resets the tally: the next failure at this SHA starts from 1, not
+	// from wherever a previous run left it. Without this a PR that fails once,
+	// succeeds, then fails again would skip straight to escalation.
+	delete entry.attempts
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }
@@ -146,6 +214,10 @@ export function markSkip(
 	const entry = prEntry(state, repo, pr)
 	entry.sha = headSha
 	entry.skip_reason = reason
+	// A skip RESOLVES the condition, so the tally goes with it. Leaving it
+	// behind would mean that if the skip were ever cleared by hand, the very next
+	// failure would escalate straight back to a pin with no fresh attempts.
+	delete entry.attempts
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }

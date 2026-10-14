@@ -357,6 +357,127 @@ describe("case 1 — a PR with no review triggers one and stops for this tick", 
 	})
 })
 
+describe("anti-stuck — a repeating failure escalates instead of looping", () => {
+	// The failure this pins is not a bug in any one gate; it is the ABSENCE of a
+	// rule. `skip_reason` was only ever written for `[INFRA]` failures, so an
+	// ordinary one — a blocked safety review, a standing merge refusal — left no
+	// state at all, and the next tick saw an untouched PR and did the identical
+	// expensive work. GMW#109 sat that way for days, printing the identical
+	// block every five minutes. Each arm must now leave a tally, and past the
+	// bound it must pin the PR so a human is told.
+
+	/** A review the gate refuses: a real security finding. */
+	const BLOCKED_REVIEW = [
+		"## PR Reviewer Guide 🔍",
+		"⏱️ Estimated effort to review: 1 🔵⚪⚪⚪⚪",
+		"🔒&nbsp;<strong>Security concerns</strong><br><br>",
+		"",
+		"SQL injection in src/auth.ts",
+		"</td></tr>",
+	].join("\n")
+
+	const stateFor = (attempts: number): FixState => ({
+		[REPO]: { [String(PR_NUM)]: { sha: HEAD, attempts } },
+	})
+
+	test("a blocked safety gate counts the attempt and says so", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(BLOCKED_REVIEW)],
+			fixState: stateFor(1),
+		})
+		await processPr(h.deps, ctx)
+
+		expect(h.lines).toContain("   🔴 SAFETY BLOCKED (score: 0/10)")
+		expect(h.lines.some((l) => l.includes("🔁") && l.includes("attempt 2/3"))).toBe(true)
+		// The tally must SURVIVE the tick, or the bound can never be reached.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(2)
+	})
+
+	test("the third consecutive block pins the PR and notifies the operator", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(BLOCKED_REVIEW)],
+			fixState: stateFor(2),
+		})
+		await processPr(h.deps, ctx)
+
+		// Pinned as a skip — a state the pipeline already honours next tick.
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toContain("Unresolvable")
+		expect(h.lines.some((l) => l.includes("🛑"))).toBe(true)
+		expect(skipNotices(h).length).toBe(1)
+	})
+
+	test("once pinned, the next tick skips without re-running the agent", async () => {
+		// The property that actually stops the loop: the pinned state is honoured
+		// on the very next tick, so no further agent run is paid for.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(BLOCKED_REVIEW)],
+			fixState: {
+				[REPO]: {
+					[String(PR_NUM)]: {
+						sha: HEAD,
+						skip_reason: "Unresolvable: safety gate blocked the review",
+						notified: true,
+					},
+				},
+			},
+		})
+		await processPr(h.deps, ctx)
+
+		expect(h.lines.some((l) => l.includes("Permanently skipped"))).toBe(true)
+		expect(h.agentPosts).toEqual([])
+	})
+
+	test("a blocked human PR is NOT pinned after one attempt — only dependabot escalates", async () => {
+		// The judgement call the guard has to respect: a human's PR can be
+		// blocked because their review is malformed today and they push a fix
+		// tomorrow. A new head resets the tally, so three failures across three
+		// real attempts still does not pin it.
+		const h = harness({
+			prs: [makePr({ user: { login: "asepharyana" } })],
+			comments: [reviewComment(BLOCKED_REVIEW)],
+			fixState: stateFor(0),
+		})
+		await processPr(h.deps, ctx)
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(1)
+	})
+
+	test("branch protection pins after repeated 405s, because a rule change moves no SHA", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: stateFor(2),
+			merge: { status: 405, data: {} },
+		})
+		await processPr(h.deps, ctx)
+
+		expect(h.lines).toContain("   ⚠️  Branch protection blocks merge")
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toContain("405")
+	})
+
+	test("CI unknown is never counted — an outage must not pin a PR", async () => {
+		// The arm that must NOT escalate. A 5xx or rate-limited gate is transient
+		// by definition; counting it would pin every PR in the queue during a
+		// GitHub incident.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: stateFor(0),
+			checkRunsReply: { status: 500, data: {} },
+		})
+		await processPr(h.deps, ctx)
+
+		expect(h.lines.some((l) => l.includes("CI unknown"))).toBe(true)
+		// Untouched at 0 — the arm did not touch the counter at all. Asserted as
+		// 0 rather than `undefined` because the fixture seeds it; the point is
+		// that it did NOT become 1.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(0)
+	})
+})
+
 describe("case 2 — review + clean safety + green CI + mergeable merges once", () => {
 	test("merged, with exactly one approve and one merge", async () => {
 		// `already` short-circuits the AI-fix block: this case is about the merge

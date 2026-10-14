@@ -23,6 +23,7 @@ import {
 	type Ctx,
 	isInfra,
 	movedSha,
+	noteFailure,
 	persist,
 	refetchHead,
 	reportSkipNotice,
@@ -107,6 +108,10 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 	for (const reason of safety.reasons) deps.report.push(`   ${reason}`)
 	if (!safety.safe) {
 		deps.report.push(`   🔴 SAFETY BLOCKED (score: ${safety.score}/10)`)
+		// Counted, because this arm used to be invisible: a block is not an
+		// `[INFRA]` failure, so nothing was written and the identical block
+		// recurred every five minutes indefinitely. Now it escalates.
+		await noteFailure(deps, c, `safety gate blocked the review (score ${safety.score}/10)`)
 		c.out.skipped = true
 		return true
 	}
@@ -119,6 +124,9 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 	// branch below — otherwise "we do not know" gets answered with a close.
 	if (ci.unknown) {
 		deps.report.push("   ⏳ CI unknown — not merging on an unverified gate; will retry next tick")
+		// NOT counted. An unknown gate is transient by definition — GitHub 5xx,
+		// a rate limit, a runner registering — and the whole point of this arm
+		// is to wait it out. Counting it would pin a PR for a GitHub outage.
 		c.out.skipped = true
 		return true
 	}
@@ -146,6 +154,15 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 		}
 	}
 	deps.report.push("   ⏳ Waiting for green CI")
+	// Counted, but only for dependabot. Red CI on a human PR is legitimately
+	// fixed by the author pushing a fix, and the head SHA moving is the signal
+	// to retry — counting it would pin a PR whose author is mid-push. A
+	// dependabot bump cannot be rescued that way: nobody is editing it, so
+	// identical red CI recurs on every tick until the stale-close above takes
+	// it. That is the arm that used to loop silently.
+	if (c.author === "dependabot[bot]") {
+		await noteFailure(deps, c, `CI still red: ${ci.msg}`)
+	}
 	c.out.skipped = true
 	return true
 }
@@ -193,6 +210,11 @@ export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 	}
 	if (status === 405) {
 		deps.report.push("   ⚠️  Branch protection blocks merge")
+		// Counted: a 405 is a standing policy refusal that no retry can clear,
+		// so without a tally this line repeats forever. A branch-protection rule
+		// change on the repo side does NOT move the head SHA — which is exactly
+		// why this needed counting and not just "retry until the head moves".
+		await noteFailure(deps, c, "branch protection blocks the merge (HTTP 405)")
 		return false
 	}
 	if (status === 409) {
@@ -219,6 +241,11 @@ export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 		return false
 	}
 	deps.report.push(`   ⚠️  Merge: HTTP ${status}`)
+	// Counted. A 4xx that is not 405/409 is a standing refusal — a bad merge
+	// method, a missing permission, a draft PR — and none of those clear by
+	// trying again. The head SHA cannot move for any of them, so this arm would
+	// report the same HTTP status on every tick forever.
+	await noteFailure(deps, c, `merge refused with HTTP ${status}`)
 	await deps.notify(
 		c.repo,
 		c.prNum,

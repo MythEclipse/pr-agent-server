@@ -5,14 +5,89 @@ import { join } from "node:path"
 import { describe, expect, test } from "vitest"
 import {
 	alreadyFixed,
+	attemptCount,
+	bumpAttempt,
+	type FixState,
 	getSkipReason,
 	loadFixState,
+	MAX_ATTEMPTS,
 	markFixed,
 	markSkip,
 	markSkipNotified,
 	prEntry,
 	wasSkipNotified,
 } from "../src/state.ts"
+
+describe("attempt counter — the anti-stuck guard", () => {
+	const REPO = "asepharyana/GMW"
+	const PR = 109
+	const SHA = "aaaa1111"
+
+	test("counts consecutive failures at the same head", () => {
+		const s = {}
+		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(1)
+		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(2)
+		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(3)
+		expect(attemptCount(s, REPO, PR, SHA)).toBe(3)
+	})
+
+	test("a new head starts from 1 — new work is not a continuation", () => {
+		const s = {}
+		bumpAttempt(s, REPO, PR, SHA)
+		bumpAttempt(s, REPO, PR, SHA)
+		// The head moved, so the previous head's failures say nothing about this
+		// one. Carrying the tally over would escalate a PR that is now genuinely
+		// being fixed.
+		expect(bumpAttempt(s, REPO, PR, "bbbb2222")).toBe(1)
+		expect(attemptCount(s, REPO, PR, "bbbb2222")).toBe(1)
+		// And the old head reads as untried again.
+		expect(attemptCount(s, REPO, PR, SHA)).toBe(0)
+	})
+
+	test("success clears the tally", () => {
+		// The reset that keeps "fail, succeed, fail" from skipping straight to
+		// escalation.
+		const s = {}
+		bumpAttempt(s, REPO, PR, SHA)
+		bumpAttempt(s, REPO, PR, SHA)
+		markFixed(s, REPO, PR, SHA)
+		expect(attemptCount(s, REPO, PR, SHA)).toBe(0)
+		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(1)
+	})
+
+	test("a skip clears the tally too", () => {
+		const s = {}
+		bumpAttempt(s, REPO, PR, SHA)
+		markSkip(s, REPO, PR, SHA, "Unresolvable: safety gate")
+		expect(attemptCount(s, REPO, PR, SHA)).toBe(0)
+	})
+
+	test("a corrupt attempts value cannot poison the count", () => {
+		// The state file is hand-editable and survives across a Python/TS cutover,
+		// so `attempts` can arrive as anything at runtime even though the type
+		// says `number`. A NaN here would make every comparison false and the
+		// guard would silently never fire — the worst possible failure for a
+		// safety mechanism, so it is cast through `as unknown` deliberately to
+		// reproduce the untrusted input the state file really is.
+		const s = {
+			[REPO]: { [String(PR)]: { sha: SHA, attempts: "not a number" } },
+		} as unknown as FixState
+		// Reading it is finite and treated as zero…
+		expect(attemptCount(s, REPO, PR, SHA)).toBe(0)
+		// …and the NEXT increment starts from that zero, not from NaN. NaN would
+		// be the dangerous case: `NaN >= MAX_ATTEMPTS` is false forever, so the
+		// guard would never fire and the loop would continue indefinitely.
+		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(1)
+	})
+
+	test("MAX_ATTEMPTS is a small, finite number", () => {
+		// Pins the unit cost. The interval is a 5-minute tick plus a paid agent
+		// run, so a large bound would mean paying for the same dead end many
+		// times before anyone is told.
+		expect(MAX_ATTEMPTS).toBeGreaterThan(0)
+		expect(MAX_ATTEMPTS).toBeLessThanOrEqual(5)
+	})
+})
 
 describe("fix state", () => {
 	test("missing file loads the empty shape", () => {

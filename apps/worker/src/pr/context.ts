@@ -19,7 +19,7 @@
 
 import type { GitRunner } from "../git.ts"
 import type { FixState } from "../state.ts"
-import { markSkipNotified, wasSkipNotified } from "../state.ts"
+import { bumpAttempt, MAX_ATTEMPTS, markSkip, markSkipNotified, wasSkipNotified } from "../state.ts"
 import type { RepoOverrides, SyncState } from "../sync/config.ts"
 import type { PostDiscord } from "../sync/run.ts"
 import type { AgentPort, ProcessDeps, ReportPort } from "./autofix.ts"
@@ -235,6 +235,42 @@ export async function notifySkipOnce(deps: WorkerDeps, c: Ctx, reason: string): 
 	markSkipNotified(c.fixState, c.repo, c.prNum, c.headSha)
 	persist(deps, c.fixState)
 	return true
+}
+
+/**
+ * Record a failed attempt, and pin the PR once the same head has failed too
+ * many times. Returns the attempt count so a caller can word its report line.
+ *
+ * THE ONE PLACE AN ORDINARY FAILURE IS ALLOWED TO LEAVE STATE. Every arm that
+ * ends a PR's turn without succeeding must call this, because "no state" is
+ * what makes a stuck PR invisible to the pipeline: the next tick sees a clean
+ * entry, concludes the PR is untried, and pays for the identical work. That is
+ * not a bug in any one arm — it is the absence of a rule, and rules are the only
+ * thing a rule-less loop needs.
+ *
+ * `label` is the report/notification phrase for this failure class, so the
+ * operator sees WHICH condition pinned it rather than a generic "gave up".
+ * Past `MAX_ATTEMPTS` the failure becomes a `skip_reason` — a state the
+ * pipeline already honours on the next tick and already notifies about — so the
+ * escalation path reuses machinery that is already proven rather than adding a
+ * second one that could itself be wrong.
+ */
+export async function noteFailure(deps: WorkerDeps, c: Ctx, label: string): Promise<number> {
+	const attempts = bumpAttempt(c.fixState, c.repo, c.prNum, c.headSha)
+	if (attempts >= MAX_ATTEMPTS) {
+		const why = `Unresolvable: ${label} — failed ${attempts}x at this SHA (max ${MAX_ATTEMPTS})`
+		// Report BEFORE the pin so the line is emitted even if the notify throws.
+		deps.report.push(`   🛑 ${why}`)
+		markSkip(c.fixState, c.repo, c.prNum, c.headSha, why)
+		persist(deps, c.fixState)
+		await reportSkipNotice(deps, c, why)
+	} else {
+		// Persist the tally even while still retrying: the counter has to survive
+		// the tick boundary, or it can never reach the threshold at all.
+		persist(deps, c.fixState)
+		deps.report.push(`   🔁 ${label} (attempt ${attempts}/${MAX_ATTEMPTS} at this SHA)`)
+	}
+	return attempts
 }
 
 /** Python line 2029/2103/2159: report the notify only when it actually sent. */
