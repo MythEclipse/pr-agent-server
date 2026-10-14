@@ -10,7 +10,6 @@ import {
 	type FixState,
 	getSkipReason,
 	loadFixState,
-	MAX_ATTEMPTS,
 	markFixed,
 	markSkip,
 	markSkipNotified,
@@ -18,7 +17,7 @@ import {
 	wasSkipNotified,
 } from "../src/state.ts"
 
-describe("attempt counter — the anti-stuck guard", () => {
+describe("attempt tally — a diagnostic, never a deadline", () => {
 	const REPO = "asepharyana/GMW"
 	const PR = 109
 	const SHA = "aaaa1111"
@@ -29,6 +28,19 @@ describe("attempt counter — the anti-stuck guard", () => {
 		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(2)
 		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(3)
 		expect(attemptCount(s, REPO, PR, SHA)).toBe(3)
+	})
+
+	test("the count is unbounded — a stuck PR keeps being retried", () => {
+		// The policy an earlier version got wrong. There is deliberately no
+		// ceiling: nothing may read this number to decide a PR is hopeless,
+		// because writing it off is a permanent stall, not an escalation. A PR
+		// that cannot be fixed must stay in the queue and be retried until it
+		// can, or until a human sees "attempt 47" and intervenes.
+		const s = {}
+		for (let i = 0; i < 50; i++) bumpAttempt(s, REPO, PR, SHA)
+		expect(attemptCount(s, REPO, PR, SHA)).toBe(50)
+		// And no skip_reason was invented along the way.
+		expect(prEntry(s, REPO, PR).skip_reason).toBeUndefined()
 	})
 
 	test("a new head starts from 1 — new work is not a continuation", () => {
@@ -74,18 +86,11 @@ describe("attempt counter — the anti-stuck guard", () => {
 		} as unknown as FixState
 		// Reading it is finite and treated as zero…
 		expect(attemptCount(s, REPO, PR, SHA)).toBe(0)
-		// …and the NEXT increment starts from that zero, not from NaN. NaN would
-		// be the dangerous case: `NaN >= MAX_ATTEMPTS` is false forever, so the
-		// guard would never fire and the loop would continue indefinitely.
+		// …and the NEXT increment starts from that zero, not from NaN. A NaN tally
+		// would be silently swallowed: `NaN + 1` is NaN, so the count would stay
+		// NaN forever and the report would read "attempt NaN" — losing the one
+		// signal a human uses to see that a PR is stuck.
 		expect(bumpAttempt(s, REPO, PR, SHA)).toBe(1)
-	})
-
-	test("MAX_ATTEMPTS is a small, finite number", () => {
-		// Pins the unit cost. The interval is a 5-minute tick plus a paid agent
-		// run, so a large bound would mean paying for the same dead end many
-		// times before anyone is told.
-		expect(MAX_ATTEMPTS).toBeGreaterThan(0)
-		expect(MAX_ATTEMPTS).toBeLessThanOrEqual(5)
 	})
 })
 

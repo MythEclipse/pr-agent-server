@@ -46,6 +46,8 @@ const AI_FIX_MAX_TURNS = 100
 
 // ── Timeout budgets, one per Python `subprocess.run(..., timeout=N)` ─────────
 const FETCH_TIMEOUT_SEC = 30 // lines 851-854
+/** The fast-forward / hard-reset checkout when reusing a worktree. */
+const CHECKOUT_TIMEOUT_SEC = 30
 const DIFF_TIMEOUT_SEC = 15 // lines 857-860
 const REV_LIST_TIMEOUT_SEC = 10 // lines 929-932
 const PUSH_TIMEOUT_SEC = 60 // lines 943-946
@@ -284,13 +286,42 @@ export async function runAiFix(
 	const workdir = `${TMP_BASE}/${String(repo).replace(/\//g, "_")}_${pr}`
 	const pidFile = pidFileFor(repo, pr)
 
-	if (workdirs.exists(workdir)) workdirs.remove(workdir) // Python lines 833-835
-	workdirs.mkdir(workdir)
-
-	const cloned = clonePr(run, repo, headRef, token, workdir, 20) // Python line 840
-	if (cloned.code !== 0) {
-		workdirs.remove(workdir)
-		return { ok: false, summary: `clone failed: ${head(reportable(cloned.stderr), 200)}` } // line 845
+	// REUSE THE CLONE ACROSS TICKS. `git workdirs.remove(workdir)` on entry (the
+	// Python's line 833) deleted the clone and re-cloned from scratch on EVERY
+	// attempt, so a PR that needed several passes started from zero each time:
+	// same shallow history, same diff, same prompt, same ground — and any work an
+	// earlier pass had done locally was thrown away. That is the "restart from
+	// the initial state instead of continuing" behaviour, and it is why an agent
+	// that should converge instead oscillated.
+	//
+	// A reused worktree is safe only if it is FAST-FORWARDED to the head we are
+	// about to act on, because the head may have moved since the last tick. A
+	// dirty tree is dropped rather than reused: an earlier pass left uncommitted
+	// edits, and continuing from them would let one agent's abandoned scratch work
+	// become the next agent's starting point.
+	const reuse = workdirs.exists(workdir) && workdirClean(run, workdir)
+	if (!reuse) {
+		if (workdirs.exists(workdir)) workdirs.remove(workdir)
+		workdirs.mkdir(workdir)
+		const cloned = clonePr(run, repo, headRef, token, workdir, 20) // Python line 840
+		if (cloned.code !== 0) {
+			workdirs.remove(workdir)
+			return { ok: false, summary: `clone failed: ${head(reportable(cloned.stderr), 200)}` } // line 845
+		}
+	} else {
+		// Fast-forward onto the current head; fall back to a fresh clone if the
+		// worktree cannot get there (diverged, or the branch moved under us).
+		const ff = run(["fetch", "origin", headRef], workdir, FETCH_TIMEOUT_SEC)
+		const co = run(["checkout", "-B", headRef, `FETCH_HEAD`], workdir, CHECKOUT_TIMEOUT_SEC)
+		if (ff.code !== 0 || co.code !== 0) {
+			workdirs.remove(workdir)
+			workdirs.mkdir(workdir)
+			const cloned = clonePr(run, repo, headRef, token, workdir, 20)
+			if (cloned.code !== 0) {
+				workdirs.remove(workdir)
+				return { ok: false, summary: `clone failed: ${head(reportable(cloned.stderr), 200)}` }
+			}
+		}
 	}
 
 	// Python lines 851-854: the shallow clone lacks the base, so fetch it before
@@ -399,8 +430,23 @@ export async function runAiFix(
 	// the only reading of what the agent left behind.
 	const cleanTree = !committed && workdirClean(run, workdir)
 
-	workdirs.remove(workdir) // Python line 954
+	// The PID file is always cleared — that is the orphan lease, and leaving it
+	// would make the next tick kill a process that no longer exists.
 	workdirs.remove(pidFile) // Python lines 955-956
+
+	// The workdir itself is KEPT, and this is the change that makes progress
+	// survive a tick. The Python removed it here (line 954) unconditionally, so
+	// every attempt began from a brand-new clone and an agent working on a
+	// multi-pass problem restarted from the same ground forever.
+	//
+	// Kept only when CLEAN. A dirty tree means an agent abandoned edits, and
+	// making the next agent continue from another agent's scratch is how a
+	// half-finished idea becomes an unreviewed commit. A dirty workdir is
+	// discarded and the next tick re-clones.
+	if (!cleanTree) workdirs.remove(workdir)
+	// A committed-and-pushed workdir is stale by definition — its commit is on
+	// the branch now — so it is dropped rather than carried.
+	else if (committed) workdirs.remove(workdir)
 
 	if (committed)
 		return { ok: true, summary: `Claude Code pushed ${newCommits} improvement commit(s)` } // line 959

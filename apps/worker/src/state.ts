@@ -36,34 +36,26 @@ export interface PrEntry {
 	/**
 	 * Consecutive failed attempts at `sha`, cleared by `markFixed`/`markSkip`.
 	 *
-	 * THE ANTI-STUCK COUNTER. `skip_reason` only ever got set for `[INFRA]`
-	 * failures (CLI missing, timeout, gateway down) — a class that is obviously
-	 * worth suppressing. An ORDINARY failure recorded nothing at all, so the
-	 * next tick saw a PR with no state and did the identical expensive work
-	 * again. GMW#109 sat that way for days: `🔴 SAFETY BLOCKED (score: 0/10)`
-	 * every five minutes, and neither the block nor the "agent ran but no
-	 * commit" line below it left a single byte behind. Nothing in the design
-	 * said "this has already been tried N times" — so nothing could stop it.
+	 * THE ATTEMPT TALLY. `skip_reason` only ever got set for `[INFRA]` failures
+	 * (CLI missing, timeout, gateway down). An ORDINARY failure recorded nothing
+	 * at all, so the next tick saw a PR with no state, concluded it was untried,
+	 * and paid for the identical work again. GMW#109 sat that way for days:
+	 * `🔴 SAFETY BLOCKED (score: 0/10)` every five minutes, and neither the block
+	 * nor the "agent ran but no commit" line below it left a single byte behind.
 	 *
-	 * A bounded counter is what converts "retry forever" into "retry, then
-	 * escalate": past `MAX_ATTEMPTS` the failure is recorded as a skip with its
-	 * reason, which is a state the pipeline already respects and the operator
-	 * already gets notified about. The attempt is still counted from scratch
-	 * whenever the head SHA moves, because a new head is new work.
+	 * It is a DIAGNOSTIC, NOT A DEADLINE. An earlier version capped it with
+	 * `MAX_ATTEMPTS` and pinned the PR past the cap, which was wrong — a PR that
+	 * cannot be fixed must keep being retried, not be written off, and pinning it
+	 * is a permanent stall rather than an escalation. Nothing reads this to
+	 * decide whether to give up; it exists so the report can say "attempt 47" and
+	 * so a human can see at a glance that a PR is stuck rather than merely slow.
+	 *
+	 * Counted from scratch whenever the head SHA moves, because a new head is
+	 * new work and must not inherit the previous head's tally.
 	 */
 	attempts?: number
 	[key: string]: unknown
 }
-
-/**
- * How many times the same head SHA may fail before the failure is pinned.
- *
- * Deliberately small. The unit is "a 5-minute tick plus a paid agent run", so
- * even 3 is over an hour of the same dead end — long enough to ride out a
- * transient (a webhook outage, a model blip, GitHub 5xx), short enough that a
- * permanent condition surfaces to a human instead of accruing cost silently.
- */
-export const MAX_ATTEMPTS = 3
 
 /**
  * Record a failed attempt at `headSha` and return the running count.
@@ -72,6 +64,9 @@ export const MAX_ATTEMPTS = 3
  * previous head's failures say nothing about this one. Only ever increments
  * when the SHA still matches, so a PR that moved does not inherit a stale
  * tally.
+ *
+ * NO CEILING. There is deliberately no maximum and no "give up" behaviour here
+ * or anywhere that reads this number — see the `attempts` field's doc comment.
  */
 export function bumpAttempt(
 	state: FixState,

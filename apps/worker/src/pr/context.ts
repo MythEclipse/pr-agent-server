@@ -19,7 +19,7 @@
 
 import type { GitRunner } from "../git.ts"
 import type { FixState } from "../state.ts"
-import { bumpAttempt, MAX_ATTEMPTS, markSkip, markSkipNotified, wasSkipNotified } from "../state.ts"
+import { bumpAttempt, markSkipNotified, wasSkipNotified } from "../state.ts"
 import type { RepoOverrides, SyncState } from "../sync/config.ts"
 import type { PostDiscord } from "../sync/run.ts"
 import type { AgentPort, ProcessDeps, ReportPort } from "./autofix.ts"
@@ -257,19 +257,21 @@ export async function notifySkipOnce(deps: WorkerDeps, c: Ctx, reason: string): 
  */
 export async function noteFailure(deps: WorkerDeps, c: Ctx, label: string): Promise<number> {
 	const attempts = bumpAttempt(c.fixState, c.repo, c.prNum, c.headSha)
-	if (attempts >= MAX_ATTEMPTS) {
-		const why = `Unresolvable: ${label} — failed ${attempts}x at this SHA (max ${MAX_ATTEMPTS})`
-		// Report BEFORE the pin so the line is emitted even if the notify throws.
-		deps.report.push(`   🛑 ${why}`)
-		markSkip(c.fixState, c.repo, c.prNum, c.headSha, why)
-		persist(deps, c.fixState)
-		await reportSkipNotice(deps, c, why)
-	} else {
-		// Persist the tally even while still retrying: the counter has to survive
-		// the tick boundary, or it can never reach the threshold at all.
-		persist(deps, c.fixState)
-		deps.report.push(`   🔁 ${label} (attempt ${attempts}/${MAX_ATTEMPTS} at this SHA)`)
-	}
+	// Persisted even though nothing is escalated, for one reason: it is the ONLY
+	// record that this PR was tried and failed, so it is what the report and the
+	// next tick's diagnostics can cite. One file write buys an answerable "why is
+	// this PR still here".
+	//
+	// DELIBERATELY NO GIVE-UP BRANCH. An earlier version pinned the PR after
+	// MAX_ATTEMPTS and called it "escalation". That was wrong: it converts a
+	// retry-until-resolved into a permanent stall, which is the exact failure
+	// this worker is supposed to prevent. A PR that cannot be fixed stays open
+	// and keeps being retried until it can — or until someone looks, which the
+	// repeated `🔁` line and the Discord report both make obvious. The attempt
+	// number is kept because "attempt 47" is itself the escalation signal to a
+	// human; silently capping it would hide that.
+	persist(deps, c.fixState)
+	deps.report.push(`   🔁 ${label} (attempt ${attempts} at this SHA — retrying next tick)`)
 	return attempts
 }
 

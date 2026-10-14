@@ -770,7 +770,80 @@ describe("runAiFix", () => {
 			"main",
 			"tok",
 		)
-		expect(fs.removed).toContain(`${TMP_BASE}/owner_repo_${PR}`)
+		// NOT removed. The clone survives a clean no-commit run so the next tick
+		// can fast-forward it and continue from the same ground; only the PID file
+		// is cleared. This is the assertion that distinguishes "resume" from
+		// "re-clone from zero every attempt".
+		expect(fs.removed).not.toContain(`${TMP_BASE}/owner_repo_${PR}`)
+		expect(fs.removed).toContain(pidFileFor(REPO, PR))
+	})
+
+	test("a clean run keeps the clone; a dirty one discards it", async () => {
+		// The safety half of the resume rule. Keeping a clone is only safe while
+		// it is CLEAN — otherwise the next agent would continue from another
+		// agent's abandoned scratch edits, and an unreviewed half-finished change
+		// becomes the starting point for a commit.
+		const clean = fakeProc({
+			...DIFF,
+			"rev-list --count": { code: 0, stdout: "0\n" },
+			"status --porcelain": { code: 0, stdout: "" },
+		})
+		const cleanFs = fakeWorkdirs()
+		await runAiFix(
+			aiFixDeps(clean, cleanFs, fakeAgent({ ok: true, snippet: "" }).agent),
+			REPO,
+			PR,
+			"t",
+			"abc123def456",
+			"dep/x",
+			"main",
+			"tok",
+		)
+		expect(cleanFs.removed).not.toContain(`${TMP_BASE}/owner_repo_${PR}`)
+
+		const dirty = fakeProc({
+			...DIFF,
+			"rev-list --count": { code: 0, stdout: "0\n" },
+			"status --porcelain": { code: 0, stdout: " M src/a.ts\n" },
+		})
+		const dirtyFs = fakeWorkdirs()
+		await runAiFix(
+			aiFixDeps(dirty, dirtyFs, fakeAgent({ ok: true, snippet: "edited" }).agent),
+			REPO,
+			PR,
+			"t",
+			"abc123def456",
+			"dep/x",
+			"main",
+			"tok",
+		)
+		expect(dirtyFs.removed).toContain(`${TMP_BASE}/owner_repo_${PR}`)
+	})
+
+	test("an existing clean worktree is fast-forwarded, not re-cloned", async () => {
+		// The resume path itself. A second attempt must fetch and check out the
+		// current head rather than `git clone` again — that is the whole point,
+		// and it is also what keeps the head SHA authoritative even though the
+		// clone is being carried over.
+		const proc = fakeProc({
+			...DIFF,
+			"rev-list --count": { code: 0, stdout: "0\n" },
+			"status --porcelain": { code: 0, stdout: "" },
+		})
+		const fs = fakeWorkdirs({ [`${TMP_BASE}/owner_repo_${PR}`]: "existing clone" })
+		await runAiFix(
+			aiFixDeps(proc, fs, fakeAgent({ ok: true, snippet: "" }).agent),
+			REPO,
+			PR,
+			"t",
+			"abc123def456",
+			"dep/x",
+			"main",
+			"tok",
+		)
+		const cmds = proc.calls.map((c) => c.args.join(" "))
+		expect(cmds.some((c) => c.includes("checkout -B dep/x FETCH_HEAD"))).toBe(true)
+		expect(cmds).not.toContain("clone")
 	})
 
 	test("a committed fix is pushed by the worker and counted", async () => {
