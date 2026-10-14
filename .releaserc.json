@@ -1,53 +1,53 @@
 {
-  "$schema": "https://json.schemastore.org/package.json",
-  "branches": ["main", "master"],
-  "plugins": [
-    [
-      "@semantic-release/commit-analyzer",
-      {
-        "releaseRules": [
-          { "type": "refactor", "release": "patch" },
-          { "type": "test", "release": "patch" },
-          { "type": "build", "release": "patch" },
-          { "type": "ci", "release": "patch" },
-          { "type": "docs", "release": "patch" },
-          { "type": "chore", "scope": "deps", "release": "patch" },
-          { "type": "chore", "scope": "release", "release": false },
-          { "type": "chore", "release": false }
-        ]
-      }
-    ],
-    [
-      "@semantic-release/release-notes-generator",
-      {
-        "writerOpts": { "path": "./scripts/release-notes-writer.cjs" }
-      }
-    ],
-    [
-      "@semantic-release/changelog",
-      {
-        "changelogFile": "CHANGELOG.md"
-      }
-    ],
-    [
-      "@semantic-release/npm",
-      {
-        "npmPublish": false
-      }
-    ],
-    [
-      "@semantic-release/git",
-      {
-        "assets": ["CHANGELOG.md", "package.json", "Cargo.toml", "Cargo.lock", "flake.nix"],
-        "message": "chore(release): ${nextRelease.version}"
-      }
-    ],
-    "@semantic-release/github",
-    [
-      "@semantic-release/exec",
-      {
-        "successCmd": "echo \"version=${nextRelease.version}\" >> \"$GITHUB_OUTPUT\""
-      }
-    ]
-  ]
+	"$schema": "https://json.schemastore.org/package.json",
+	"branches": ["main", "master"],
+	"plugins": [
+		[
+			"@semantic-release/commit-analyzer",
+			{
+				"releaseRules": [
+					{ "type": "refactor", "release": "patch" },
+					{ "type": "test", "release": "patch" },
+					{ "type": "build", "release": "patch" },
+					{ "type": "ci", "release": "patch" },
+					{ "type": "docs", "release": "patch" },
+					{ "type": "chore", "scope": "deps", "release": "patch" },
+					{ "type": "chore", "scope": "release", "release": false },
+					{ "type": "chore", "release": false }
+				]
+			}
+		],
+		[
+			"@semantic-release/release-notes-generator",
+			{
+				"writerOpts": { "path": "./scripts/release-notes-writer.cjs" }
+			}
+		],
+		[
+			"@semantic-release/changelog",
+			{
+				"changelogFile": "CHANGELOG.md"
+			}
+		],
+		[
+			"@semantic-release/npm",
+			{
+				"npmPublish": false
+			}
+		],
+		[
+			"@semantic-release/git",
+			{
+				"assets": ["CHANGELOG.md", "package.json", "Cargo.toml", "Cargo.lock", "flake.nix"],
+				"message": "chore(release): ${nextRelease.version}"
+			}
+		],
+		"@semantic-release/github",
+		[
+			"@semantic-release/exec",
+			{
+				"successCmd": "echo \"version=${nextRelease.version}\" >> \"$GITHUB_OUTPUT\""
+			}
+		]
+	]
 }
