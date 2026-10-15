@@ -1,3 +1,10 @@
+## [1.0.6](https://github.com/asepharyana/pr-agent-server/compare/v1.0.5...v1.0.6) (2026-10-15)
+
+
+### Bug Fixes
+
+* **worker:** never approve a PR whose mergeability is unknown ([8b34c58](https://github.com/asepharyana/pr-agent-server/commit/8b34c58f6f17cfedc0bbc79b81bb872de4ff5f81))
+
 ## [1.0.5](https://github.com/asepharyana/pr-agent-server/compare/v1.0.4...v1.0.5) (2026-10-15)
 
 
