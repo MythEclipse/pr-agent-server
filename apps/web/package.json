@@ -10,8 +10,8 @@
 		"typecheck": "tsr generate && tsc --noEmit"
 	},
 	"dependencies": {
-		"@orpc/client": "^1.15.5",
-		"@orpc/tanstack-query": "^1.15.5",
+		"@orpc/client": "^1.15.6",
+		"@orpc/tanstack-query": "^1.15.6",
 		"@pr-agent/api": "workspace:*",
 		"@tanstack/react-query": "^5.104.2",
 		"@tanstack/react-router": "^1.170.42",
