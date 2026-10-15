@@ -1,3 +1,10 @@
+## [1.0.5](https://github.com/asepharyana/pr-agent-server/compare/v1.0.4...v1.0.5) (2026-10-15)
+
+
+### Bug Fixes
+
+* **worker:** a merge 405 is not necessarily branch protection ([71dfa00](https://github.com/asepharyana/pr-agent-server/commit/71dfa00f1e97057287d38ba4e464c73719e59b9c)), closes [hub#46](https://github.com/hub/issues/46) [pr-agent-server#5](https://github.com/pr-agent-server/issues/5) [#7](https://github.com/asepharyana/pr-agent-server/issues/7)
+
 ## [1.0.4](https://github.com/asepharyana/pr-agent-server/compare/v1.0.3...v1.0.4) (2026-10-15)
 
 
