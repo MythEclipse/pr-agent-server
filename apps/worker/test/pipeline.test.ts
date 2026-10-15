@@ -458,14 +458,61 @@ describe("attempt tally — failures are recorded, never written off", () => {
 			comments: [reviewComment(SAFE_REVIEW)],
 			fixState: stateFor(0),
 			merge: { status: 405, data: {} },
+			// `mergeable_state: blocked` is what an unsatisfied required-check or
+			// required-review rule actually looks like. It is what the 405 arm now
+			// reads back instead of asserting a cause it cannot see.
+			pullReply: { status: 200, data: makePr({ mergeable_state: "blocked" }) },
 		})
 		await processPr(h.deps, ctx)
 
-		expect(h.lines).toContain("   ⚠️  Branch protection blocks merge")
+		expect(h.lines).toContain("   ⚠️  Branch protection blocks merge (mergeable_state: blocked)")
 		// Counted for visibility, never escalated: the fix is a repo-side rule
 		// change, and until it lands the honest state is "still trying".
 		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(1)
 		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+	})
+
+	test("a 405 from merge CONFLICTS is not reported as branch protection", async () => {
+		// The live bug. hub#46 and pr-agent-server#5 were both printed as
+		// "⚠️  Branch protection blocks merge" while NEITHER repo had any
+		// protection or ruleset at all — `GET /branches/main/protection` was a
+		// 404. The real cause was `mergeable_state: "dirty"`, i.e. a stale
+		// conflict, so the message sent a human after the one thing that was not
+		// broken. A 405 alone cannot tell the two apart; `mergeable_state` can.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: stateFor(0),
+			merge: { status: 405, data: {} },
+			pullReply: { status: 200, data: makePr({ mergeable_state: "dirty" }) },
+		})
+		await processPr(h.deps, ctx)
+
+		expect(h.lines.some((l) => l.includes("merge CONFLICTS"))).toBe(true)
+		// The specific misdiagnosis must be gone, not merely supplemented.
+		expect(h.lines.some((l) => l.includes("Branch protection"))).toBe(false)
+		// Still counted — a conflict is retryable, so it is a standing refusal
+		// here, but never escalated.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(1)
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+	})
+
+	test("a 405 with no readable mergeable_state names the ambiguity", async () => {
+		// GitHub reports `mergeable_state: null` while it computes. Guessing
+		// "branch protection" there is exactly the original defect, so the
+		// unknown case is stated rather than invented.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: stateFor(0),
+			merge: { status: 405, data: {} },
+			pullReply: { status: 200, data: makePr({ mergeable_state: null }) },
+		})
+		await processPr(h.deps, ctx)
+
+		expect(h.lines.some((l) => l.includes("Merge refused HTTP 405"))).toBe(true)
+		expect(h.lines.some((l) => l.includes("unknown"))).toBe(true)
+		expect(h.lines.some((l) => l.includes("Branch protection"))).toBe(false)
 	})
 
 	test("CI unknown is not counted — a transient outage must not accumulate", async () => {

@@ -29,6 +29,7 @@ import {
 	refetchHead,
 	reportSkipNotice,
 	stripInfra,
+	strOf,
 	subDeps,
 	UNRESOLVABLE_CONFLICT,
 	type WorkerDeps,
@@ -222,12 +223,44 @@ export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 		return true
 	}
 	if (status === 405) {
-		deps.report.push("   ⚠️  Branch protection blocks merge")
-		// Counted: a 405 is a standing policy refusal that no retry can clear,
-		// so without a tally this line repeats forever. A branch-protection rule
-		// change on the repo side does NOT move the head SHA — which is exactly
-		// why this needed counting and not just "retry until the head moves".
-		await noteFailure(deps, c, "branch protection blocks the merge (HTTP 405)")
+		// A 405 does NOT mean branch protection. GitHub returns it for two
+		// genuinely different reasons, and this report used to assert the wrong
+		// one unconditionally: `mergeable_state: "dirty"` (real conflicts) and an
+		// unsatisfied required-check rule. On 2026-10-15 hub#46 and
+		// pr-agent-server#5 were both reported "⚠️  Branch protection blocks
+		// merge" while BOTH repos had no protection and no rulesets at all —
+		// `GET /branches/main/protection` was 404. The real cause was a stale
+		// conflict, and the message pointed a human at the one thing that was
+		// not wrong.
+		//
+		// `mergeable_state` is readable BEFORE merging and is the field that
+		// actually separates the cases: `dirty` = conflicts, `blocked` = policy
+		// (required reviews / required checks), `behind` = base moved,
+		// `unstable` = a non-required check is failing.
+		//
+		// So read it back and report what it says. `mergeable_state` is `null`
+		// while GitHub computes, which is why the unknown case is named instead
+		// of guessed.
+		const fresh = await refetchHead(deps, c)
+		// `refetchHead` returns `any | null`, narrowed by an inline shape rather
+		// than an `asObject` helper this module does not have.
+		const ms = strOf((fresh as { mergeable_state?: unknown } | null)?.mergeable_state)
+		deps.report.push(
+			ms === "dirty"
+				? "   ⚠️  Merge refused — merge CONFLICTS (mergeable_state: dirty)"
+				: ms === "blocked"
+					? "   ⚠️  Branch protection blocks merge (mergeable_state: blocked)"
+					: ms === "unstable"
+						? "   ⚠️  Merge refused — a check is failing (mergeable_state: unstable)"
+						: ms === "behind"
+							? "   ⚠️  Merge refused — base branch moved (mergeable_state: behind)"
+							: `   ⚠️  Merge refused HTTP 405 (mergeable_state: ${ms || "unknown"})`,
+		)
+		// Counted: a 405 is a standing refusal that no retry can clear on its
+		// own, so without a tally this line repeats forever. A repo-side rule
+		// change does NOT move the head SHA — which is exactly why this needed
+		// counting and not just "retry until the head moves".
+		await noteFailure(deps, c, `merge refused HTTP 405 (${ms || "mergeable_state unknown"})`)
 		return false
 	}
 	if (status === 409) {
