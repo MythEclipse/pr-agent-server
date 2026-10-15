@@ -23,3 +23,23 @@ packages:
 #   pnpm approve-builds                interactive; there is no TTY in a build.
 allowBuilds:
   esbuild: true
+
+# `minimumReleaseAge: 0` is DELIBERATE and load-bearing for Dependabot, not a
+# preference.
+#
+# Dependabot resolves and installs with its OWN bundled pnpm (11.x/12.x), which
+# IGNORES this repo's `packageManager` pin. Since pnpm 11 that bundled version
+# defaults `minimumReleaseAge` to 1440 minutes, so any dependency released within
+# the last day is refused with `ERR_PNPM_NO_MATURE_MATCHING_VERSION` and the whole
+# update job dies. This has bitten this fleet before — hub hit it, and the fix
+# needed BOTH halves:
+#
+#   1. a `cooldown: default-days: 3` in .github/dependabot.yml, so Dependabot
+#      stops PROPOSING versions that are too young;
+#   2. this setting, read by whatever pnpm actually runs, so the install cannot
+#      fail even when a young version slips past the cooldown.
+#
+# With only (1), a version published just before the cooldown window rolls over
+# is still proposed and still fails. With only (2), Dependabot's job runs but
+# proposes releases that are days old and unreviewable. Both are required.
+minimumReleaseAge: 0

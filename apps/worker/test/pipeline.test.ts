@@ -1242,3 +1242,98 @@ describe("the lock is released on every exit", () => {
 		}
 	})
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PREVENTION — the recurrence guards for the 2026-10-15 incident
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("prevention — a conflicted PR is NEVER approved", () => {
+	// THE RECURRENCE VECTOR. On 2026-10-15 both stuck PRs printed
+	//   👍 Approving... / ✅ Approved! / 🔀 Merging... / ⚠️ Branch protection
+	// The approval is a PUBLIC, ATTRIBUTED review that survives the failed
+	// merge, so every occurrence leaves a permanent artifact endorsing a PR
+	// that cannot be merged — and no amount of fixing the 405 message undoes
+	// it. Mergeability is therefore re-read immediately before approving, and
+	// a conflicted PR is refused BEFORE any review is published.
+	//
+	// This matters more than it looks: `mergeable` is read ONCE at scan time,
+	// and GitHub returns `null` while it computes. Treating "not computed yet"
+	// as "no conflicts" is the same mistake as treating a transient 403 as
+	// permanent — inferring a positive from a value that means UNKNOWN.
+	test("a fresh mergeable:false stops the tick before any approval is published", async () => {
+		const h = harness({
+			prs: [makePr()], // scan-time read says mergeable:true
+			comments: [reviewComment(SAFE_REVIEW)],
+			// …but the live read just before merging says otherwise.
+			pullReply: {
+				status: 200,
+				data: makePr({ mergeable: false, mergeable_state: "dirty" }),
+			},
+		})
+
+		const out = await processPr(h.deps, ctx)
+
+		expect(approves(h.calls)).toBe(0)
+		expect(merges(h.calls)).toBe(0)
+		expect(h.lines.some((l) => l.includes("Approved!"))).toBe(false)
+		// The gate routes it to the CONFLICT RESOLVER, whose line is distinct
+		// from the 405 arm's post-hoc diagnosis.
+		expect(h.lines.some((l) => l.includes("Merge conflicts"))).toBe(true)
+		expect(h.lines.some((l) => l.includes("resolving before approving"))).toBe(true)
+		expect(out.merged).toBe(false)
+	})
+
+	test("mergeable:null (GitHub still computing) is NOT treated as no-conflict", async () => {
+		// `null` means "unknown", and the old code merged straight through it.
+		// The PR must be left for a later tick rather than approved on a guess.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			pullReply: { status: 200, data: makePr({ mergeable: null }) },
+		})
+
+		await processPr(h.deps, ctx)
+
+		expect(approves(h.calls)).toBe(0)
+		expect(merges(h.calls)).toBe(0)
+		expect(h.lines.some((l) => l.includes("still computing"))).toBe(true)
+	})
+
+	test("a genuinely mergeable PR is still approved and merged (no regression)", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			pullReply: {
+				status: 200,
+				data: makePr({ mergeable: true, mergeable_state: "clean" }),
+			},
+		})
+
+		const out = await processPr(h.deps, ctx)
+
+		expect(approves(h.calls)).toBe(1)
+		expect(merges(h.calls)).toBe(1)
+		expect(out.merged).toBe(true)
+		expect(h.lines).toContain("   ✅ MERGED! SHA: c0ffee")
+	})
+})
+
+describe("prevention — the ops report must never assert an unchecked cause", () => {
+	// The other half. A wrong message is not cosmetic: "Branch protection
+	// blocks merge" sent a human to configure rules on repos that had none.
+	// Every cause the report prints is now one that was READ, never inferred
+	// from a status code that admits more than one explanation.
+	test("no report line names a cause the worker did not verify", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			merge: { status: 405, data: {} },
+			pullReply: { status: 200, data: makePr({ mergeable_state: "dirty" }) },
+		})
+		await processPr(h.deps, ctx)
+
+		const lines = h.lines.join("\n")
+		expect(lines).toContain("mergeable_state: dirty")
+		expect(lines).not.toContain("Branch protection")
+	})
+})

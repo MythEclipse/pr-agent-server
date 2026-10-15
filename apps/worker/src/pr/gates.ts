@@ -14,7 +14,7 @@
  * The stale-dependabot age arithmetic (Python 2051) is `ageDays` in `./context`.
  */
 
-import { bumpAttempt, markFixed, markSkip } from "../state.ts"
+import { alreadyFixed, bumpAttempt, markFixed, markSkip } from "../state.ts"
 import { checkPrStillValid, killOrphanedAgent, runAiFix } from "./autofix.ts"
 import { checkCiPassed, closeStaleCiPr, STALE_CI_CLOSE_DAYS } from "./ci.ts"
 import {
@@ -192,9 +192,76 @@ const transientMergeCause = (status: number): string | null => {
 	return status >= 500 ? `GitHub HTTP ${status}` : null
 }
 
+/**
+ * Re-read mergeability IMMEDIATELY before publishing an approval.
+ *
+ * WHY THIS GATE EXISTS. `stepMerge` used to approve first and merge second, and
+ * `mergeable` had been read ONCE — during the queue scan, seconds earlier. GitHub
+ * computes mergeability asynchronously and returns `null` while it does, so the
+ * scan-time value is frequently stale or unknown. Two PRs were approved and then
+ * refused on 2026-10-15 (hub#46, pr-agent-server#5) and the report blamed branch
+ * protection, which neither repo had.
+ *
+ * An approval is the expensive half of this step: it is a PUBLIC, ATTRIBUTED
+ * review on the PR that survives the failed merge. Merging is idempotent and
+ * cheap to retry; endorsing a PR that cannot merge is not, and no later fix to a
+ * message undoes it. So the check runs before the irreversible action, not after.
+ *
+ * `null` is the case that matters most. It means "GitHub is still computing",
+ * NOT "no conflicts" — the pipeline's own `c.mergeable === false` test already
+ * treats null as non-conflicting for Python parity, but that is safe for
+ * deciding whether to ATTEMPT a merge and unsafe for deciding whether to
+ * PUBLISH an endorsement. Unknown is reported as unknown and left for a later
+ * tick.
+ *
+ * @returns a line to report and stop on, or `null` to proceed to approve+merge.
+ */
+async function mergeableGate(deps: WorkerDeps, c: Ctx): Promise<boolean> {
+	const fresh = await refetchHead(deps, c)
+	const pr = fresh as { mergeable?: unknown; mergeable_state?: unknown } | null
+	const state = strOf(pr?.mergeable_state)
+
+	// `false` is a definitive conflict answer, so it goes straight to the
+	// conflict resolver — the same treatment the scan-time check gives it.
+	if (pr?.mergeable === false) {
+		deps.report.push(
+			`   🔴 Merge conflicts${state ? ` (mergeable_state: ${state})` : ""} — resolving before approving`,
+		)
+		await resolveConflict(
+			deps,
+			c,
+			alreadyFixed(c.fixState, c.repo, c.prNum, c.headSha),
+			"   🔄 Head SHA updated (conflict fix pushed)",
+			true,
+		)
+		return true
+	}
+
+	// `null` means GitHub has not finished computing. Approving on an unknown is
+	// the failure this whole gate exists to prevent, so the tick ends here and
+	// the next one — seconds later — gets a real answer.
+	if (pr?.mergeable === null || pr?.mergeable === undefined) {
+		deps.report.push(
+			"   ⏳ Mergeability still computing — not approving on an unknown, retrying next tick",
+		)
+		await noteFailure(deps, c, "mergeability unknown (GitHub still computing)")
+		return true
+	}
+
+	return false
+}
+
 /** True when the PR merged. */
 export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Promise<boolean> {
 	const url = `https://github.com/${c.repo}/pull/${c.prNum}`
+
+	// BEFORE the approval, not after the merge attempt: an approval is a public,
+	// attributed review that outlives a failed merge, so the irreversible action
+	// is the one that must be gated.
+	if (await mergeableGate(deps, c)) {
+		c.out.skipped = true
+		return false
+	}
 
 	deps.report.push("   👍 Approving...")
 	if (deps.dry) {

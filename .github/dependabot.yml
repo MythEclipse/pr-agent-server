@@ -8,6 +8,13 @@ updates:
     schedule:
       interval: daily
     labels: [dependencies]
+    # Stops Dependabot PROPOSING versions that are too young for the bundled
+    # pnpm's default 1440-minute `minimumReleaseAge`. Paired with
+    # `minimumReleaseAge: 0` in pnpm-workspace.yaml: this half keeps young
+    # releases out of the queue, that half stops the install failing if one
+    # slips past. hub needs both for the same reason. See the comment there.
+    cooldown:
+      default-days: 3
     groups:
       production-dependencies:
         dependency-type: production
@@ -20,6 +27,11 @@ updates:
     schedule:
       interval: weekly
     labels: [dependencies]
+    # Same cooldown rationale. Action tags are published and then re-tagged, so
+    # a floating `v7`-style major is often days old at the moment Dependabot
+    # resolves it.
+    cooldown:
+      default-days: 3
     groups:
       actions:
         patterns: ['*']
