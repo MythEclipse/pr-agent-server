@@ -53,6 +53,65 @@ export const stripInfra = (s: string): string => s.split("[INFRA] ").join("")
 /** Python line 2022, `summary.startswith("[INFRA]")`. */
 export const isInfra = (s: string): boolean => s.startsWith("[INFRA]")
 
+/**
+ * Is this `[INFRA]` failure TRANSIENT — one that must be retried — rather than
+ * a permanent one?
+ *
+ * WHY THIS EXISTS. `isInfra` is a bare prefix test, so every `[INFRA]` failure
+ * was written into `skip_reason`, and a recorded skip is enforced "until head
+ * SHA changes" (pipeline.ts). For a failure the code cannot fix by itself that
+ * is a permanent stall, not an escalation. A 403 FreeTierError from the model
+ * gateway is the clear case: the gateway refused one request because of quota,
+ * the CLI exited 1, `claude-agent.ts` faithfully wrapped it as `[INFRA]`, and
+ * hub#46 + pr-agent-server#5 were pinned to a head SHA that would never move —
+ * two PRs blocked by a quota blip, with a perfectly healthy agent sitting behind
+ * them and no way for any code change to release them.
+ *
+ * So the split is made HERE, where the reason is read, and not where it is
+ * written. `[INFRA]` keeps its original meaning — "the agent run did not
+ * complete" — and stays the transport marker; only the decision to RECORD it
+ * changes. Nothing about the marker itself is loosened, so the existing
+ * permanent cases (CLI missing, no credential, not authenticated) still pin.
+ *
+ * The evidence is read out of the failure text the CLI already produced: an HTTP
+ * status, a quota/rate-limit/overload shape, or a network-level errno. Each is a
+ * statement about the REQUEST or the moment, not about the install, so retrying
+ * it later is a reasonable thing to do.
+ *
+ * A boundary worth stating: a 401 "not authenticated" IS a credential problem,
+ * but it is caught by the explicit `not authenticated` arm below and NOT by the
+ * status sweep, because a stale token stays stale. Only a status that is
+ * plausibly about this one request may make a failure retryable.
+ */
+export const isTransientInfra = (s: string): boolean => {
+	if (!isInfra(s)) return false
+
+	// A missing binary or an unusable credential is a property of the INSTALL.
+	// No amount of waiting changes either, so they stay permanent — and they are
+	// checked first, because their text can contain a status-shaped substring.
+	if (
+		/binary not found/i.test(s) ||
+		/no Anthropic credential/i.test(s) ||
+		/not authenticated/i.test(s)
+	) {
+		return false
+	}
+
+	return (
+		// An HTTP status from the API. `40[0-9]` covers rate limits (429) and
+		// payment/quota refusals (402); `5xx` covers every upstream fault.
+		/\b(?:4\d\d|5\d\d)\b/.test(s) ||
+		// Quota / throttle / capacity wording, with or without a status.
+		/rate.?limit|too many requests|insufficient (?:credit|quota)|quota|overloaded|capacity|try again/i.test(
+			s,
+		) ||
+		// Transport-level: the request never reached a server that could judge it.
+		/ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|fetch failed|network error|terminated/i.test(
+			s,
+		)
+	)
+}
+
 /** Python lines 1915-1923, verbatim. A dependabot lockfile-only bump never gets
  *  a "PR Reviewer Guide" (there is no code diff), so the worker synthesises one
  *  that scores a clean 10/10 and lets the normal merge path proceed. */

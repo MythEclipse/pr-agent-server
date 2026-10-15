@@ -54,6 +54,13 @@ export interface PrEntry {
 	 * new work and must not inherit the previous head's tally.
 	 */
 	attempts?: number
+	/**
+	 * The head the `attempts` tally belongs to. SEPARATE from `sha` on purpose:
+	 * `sha` is what `alreadyFixed` reads as "fixed here", so keying the tally off
+	 * it made a recorded failure indistinguishable from a recorded success and
+	 * suppressed every retry. See `bumpAttempt`.
+	 */
+	attempt_sha?: string
 	[key: string]: unknown
 }
 
@@ -67,6 +74,16 @@ export interface PrEntry {
  *
  * NO CEILING. There is deliberately no maximum and no "give up" behaviour here
  * or anywhere that reads this number — see the `attempts` field's doc comment.
+ *
+ * WHY IT NO LONGER TOUCHES `entry.sha`. `bumpAttempt` used to set `sha` so the
+ * tally would reset when the head moved. But `sha` is the SAME field
+ * `alreadyFixed` reads as "the fix succeeded at this head", so recording a
+ * failure silently marked the PR as DONE — `stepAiFix` then hit
+ * `⏭️  Already fixed at this SHA` and the agent was never asked again. That is
+ * the exact failure this worker exists to prevent, and it is unreachable to
+ * notice from a report, because every line of it looks like success. The tally
+ * is now keyed on its own `attempt_sha`, so a failed attempt stays a failed
+ * attempt and only `markFixed` may claim a head.
  */
 export function bumpAttempt(
 	state: FixState,
@@ -75,9 +92,9 @@ export function bumpAttempt(
 	headSha: string,
 ): number {
 	const entry = prEntry(state, repo, pr)
-	const prior = entry.sha === headSha ? Number(entry.attempts ?? 0) : 0
+	const prior = entry.attempt_sha === headSha ? Number(entry.attempts ?? 0) : 0
 	const next = (Number.isFinite(prior) ? prior : 0) + 1
-	entry.sha = headSha
+	entry.attempt_sha = headSha
 	entry.attempts = next
 	return next
 }
@@ -90,7 +107,9 @@ export function attemptCount(
 	headSha: string,
 ): number {
 	const entry = prEntry(state, repo, pr)
-	if (entry.sha !== headSha) return 0
+	// Keyed on `attempt_sha`, not `sha` — see `bumpAttempt`. Reading `sha` here
+	// would count a SUCCESS as a tally of failures.
+	if (entry.attempt_sha !== headSha) return 0
 	const n = Number(entry.attempts ?? 0)
 	return Number.isFinite(n) ? n : 0
 }
@@ -182,6 +201,7 @@ export function markFixed(
 	// from wherever a previous run left it. Without this a PR that fails once,
 	// succeeds, then fails again would skip straight to escalation.
 	delete entry.attempts
+	delete entry.attempt_sha
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }
@@ -213,6 +233,7 @@ export function markSkip(
 	// behind would mean that if the skip were ever cleared by hand, the very next
 	// failure would escalate straight back to a pin with no fresh attempts.
 	delete entry.attempts
+	delete entry.attempt_sha
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }

@@ -13,13 +13,14 @@
  * because it is the load-bearing part of that function, not decoration.
  */
 
-import { markFixed, markSkip } from "../state.ts"
+import { bumpAttempt, markFixed, markSkip } from "../state.ts"
 import { checkPrStillValid, killOrphanedAgent, runAiFix } from "./autofix.ts"
 import { checkCiPassed } from "./ci.ts"
 import {
 	AI_FIX_ENABLED,
 	type Ctx,
 	isInfra,
+	isTransientInfra,
 	movedSha,
 	NO_CODE_REVIEW,
 	persist,
@@ -224,12 +225,28 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 	}
 
 	deps.report.push(`   ⏭️  AI fix skipped: ${summary}`)
-	if (isInfra(summary)) {
-		// Infra-level failure (CLI missing / timeout / unreachable): permanently
-		// skip at this SHA, or retrying every 5 min would just loop (2023-2025).
+	if (isInfra(summary) && !isTransientInfra(summary)) {
+		// Infra-level failure (CLI missing / no credential): permanently skip at
+		// this SHA, or retrying every 5 min would just loop (2023-2025).
 		const why = stripInfra(summary)
 		markSkip(c.fixState, c.repo, c.prNum, c.headSha, why)
 		persist(deps, c.fixState)
 		await reportSkipNotice(deps, c, why)
+		return
+	}
+	if (isTransientInfra(summary)) {
+		// A TRANSIENT infra failure — a 4xx/5xx from the gateway, a quota or
+		// rate-limit refusal, a socket error. Deliberately NOT recorded: a
+		// `skip_reason` is enforced "until head SHA changes", and nothing will
+		// move that SHA, because the fix is quota or a token rather than a code
+		// change. Recording it is how a 403 FreeTierError once pinned hub#46 and
+		// pr-agent-server#5 for good with a healthy agent sitting behind them.
+		//
+		// `bumpAttempt` records the failure as a DIAGNOSTIC (the report can then
+		// say "attempt 7"), and it is still not a ceiling — nothing reads it to
+		// decide to give up, so the next tick simply tries again.
+		const attempts = bumpAttempt(c.fixState, c.repo, c.prNum, c.headSha)
+		persist(deps, c.fixState)
+		deps.report.push(`   🔁 Transient infra failure — will retry next tick (attempt ${attempts})`)
 	}
 }

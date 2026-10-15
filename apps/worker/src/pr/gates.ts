@@ -14,7 +14,7 @@
  * The stale-dependabot age arithmetic (Python 2051) is `ageDays` in `./context`.
  */
 
-import { markFixed, markSkip } from "../state.ts"
+import { bumpAttempt, markFixed, markSkip } from "../state.ts"
 import { checkPrStillValid, killOrphanedAgent, runAiFix } from "./autofix.ts"
 import { checkCiPassed, closeStaleCiPr, STALE_CI_CLOSE_DAYS } from "./ci.ts"
 import {
@@ -22,6 +22,7 @@ import {
 	ageDays,
 	type Ctx,
 	isInfra,
+	isTransientInfra,
 	movedSha,
 	noteFailure,
 	persist,
@@ -90,6 +91,18 @@ export async function resolveConflict(
 				return
 			}
 			deps.report.push(`   ⏭️  Conflict fix failed: ${summary}`)
+			// Same transient/permanent split as `stepAiFix`, and for the same reason:
+			// a gateway 4xx/5xx here would otherwise be recorded in `skip_reason` and
+			// enforced "until head SHA changes", which no conflict-resolution run will
+			// ever move.
+			if (isTransientInfra(summary)) {
+				const attempts = bumpAttempt(c.fixState, c.repo, c.prNum, c.headSha)
+				persist(deps, c.fixState)
+				deps.report.push(
+					`   🔁 Transient infra failure — will retry next tick (attempt ${attempts})`,
+				)
+				return
+			}
 			const why = isInfra(summary) ? stripInfra(summary) : UNRESOLVABLE_CONFLICT
 			markSkip(c.fixState, c.repo, c.prNum, c.headSha, why)
 			persist(deps, c.fixState)

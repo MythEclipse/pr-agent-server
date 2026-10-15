@@ -380,8 +380,20 @@ describe("attempt tally — failures are recorded, never written off", () => {
 		"</td></tr>",
 	].join("\n")
 
+	// `attempt_sha`, NOT `sha`. A failure tally is keyed on its own field:
+	// `sha` is what `alreadyFixed` reads as "the fix landed here", so a state
+	// file that records a failure under `sha` claims the PR is DONE. That
+	// conflation is what `bumpAttempt` used to write, and it silently suppressed
+	// every retry. Seeded with the real key so the fixture cannot drift back.
+	//
+	// `attempts <= 0` means NEVER TRIED, so the key is omitted: `bumpAttempt`
+	// counts from `attempts ?? 0`, and seeding a literal 0 would make the first
+	// real failure report "attempt 1" for a PR the fixture is asserting is being
+	// skipped entirely (the CI-unknown arm records nothing at all).
 	const stateFor = (attempts: number): FixState => ({
-		[REPO]: { [String(PR_NUM)]: { sha: HEAD, attempts } },
+		[REPO]: {
+			[String(PR_NUM)]: attempts > 0 ? { attempt_sha: HEAD, attempts } : {},
+		},
 	})
 
 	test("a blocked safety gate counts the attempt and keeps retrying", async () => {
@@ -393,9 +405,14 @@ describe("attempt tally — failures are recorded, never written off", () => {
 		await processPr(h.deps, ctx)
 
 		expect(h.lines).toContain("   🔴 SAFETY BLOCKED (score: 0/10)")
-		expect(h.lines.some((l) => l.includes("🔁") && l.includes("attempt 2"))).toBe(true)
-		// The tally must SURVIVE the tick, or it can never be seen.
-		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(2)
+		// A blocked gate is recorded, and the report says so.
+		expect(h.lines.some((l) => l.includes("🔁"))).toBe(true)
+		// The gate's own tally starts from the seeded 1, because the agent run
+		// above it SUCCEEDED — `markFixed` cleared the tally and the gate is the
+		// failure being counted. It was 2 before only because recording the
+		// attempt used to claim the head as fixed, which short-circuited the
+		// agent; with that conflation gone the number is earned, not inherited.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(1)
 	})
 
 	test("a high attempt count is NEVER converted into a give-up", async () => {
@@ -410,9 +427,12 @@ describe("attempt tally — failures are recorded, never written off", () => {
 		})
 		await processPr(h.deps, ctx)
 
-		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(51)
 		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
-		expect(h.lines.some((l) => l.includes("attempt 51"))).toBe(true)
+		// Still counted, still not escalated, and the count survives as a
+		// diagnostic. The exact value is 1 because the seeded 50 belongs to the
+		// agent phase, which `markFixed` reset — the point of this test is the
+		// ABSENCE of a pin, not the tally.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(1)
 		// No "Unresolvable" pin, and no skip notification claiming one.
 		expect(h.lines.some((l) => l.includes("Unresolvable"))).toBe(false)
 		expect(skipNotices(h).length).toBe(0)
@@ -462,7 +482,9 @@ describe("attempt tally — failures are recorded, never written off", () => {
 		await processPr(h.deps, ctx)
 
 		expect(h.lines.some((l) => l.includes("CI unknown"))).toBe(true)
-		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(0)
+		// Recorded as NOTHING at all — not zero, absent. A 0 here would mean the
+		// gate was consulted and found clean; `undefined` means never tried.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBeUndefined()
 	})
 })
 
@@ -610,6 +632,59 @@ describe("case 4 — an [INFRA] agent failure skips permanently and never re-run
 		await runTick(h.deps)
 
 		expect(h.agentPosts).toHaveLength(2)
+	})
+})
+
+describe("case 4b — a TRANSIENT [INFRA] failure is retried, never pinned", () => {
+	// The live incident: a 403 FreeTierError from the gateway exited the CLI 1,
+	// `claude-agent.ts` wrapped it as [INFRA] verbatim, and `isInfra`'s bare
+	// prefix check wrote it into `skip_reason` — which pipeline.ts enforces
+	// "until head SHA changes". Nothing would ever move that SHA, because the
+	// cause was quota, not code. hub#46 and pr-agent-server#5 sat pinned like
+	// that with a healthy agent behind them.
+	const FREE_TIER_403 =
+		'[INFRA] Claude Code exited 1: Failed to authenticate. API Error: 403 [403]: {"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode."}}'
+
+	test("the agent runs again on the next tick and no skip is recorded", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			agent: [{ ok: false, snippet: FREE_TIER_403 }],
+		})
+
+		const first = await runTick(h.deps)
+		expect(h.agentPosts).toHaveLength(1)
+		expect(first).toContain(`   ⏭️  AI fix skipped: ${FREE_TIER_403}`)
+		// The recorded state is the diagnostic attempt count — NOT a skip_reason.
+		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
+		expect((h.fixState[REPO][String(PR_NUM)] as any).attempts).toBe(1)
+
+		// The whole point: the very next tick asks the agent again instead of
+		// honouring a skip that no code change could ever release.
+		const second = await runTick(h.deps)
+		expect(h.agentPosts).toHaveLength(2)
+		expect(second).toContain("   🔁 Transient infra failure — will retry next tick (attempt 2)")
+		expect(second).not.toContain("Permanently skipped")
+		// Nothing is notified as a permanent skip, so the human is not told the PR
+		// is finished with.
+		expect(skipNotices(h)).toHaveLength(0)
+		// Still no skip_reason after the second failure — retrying is not the same
+		// as giving up, and the tally keeps rising for a human to see.
+		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
+		expect((h.fixState[REPO][String(PR_NUM)] as any).attempts).toBe(2)
+	})
+
+	test("a PERMANENT [INFRA] failure on the same tick still pins, unchanged", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			agent: [{ ok: false, snippet: "[INFRA] Claude Code binary not found" }],
+		})
+
+		await runTick(h.deps)
+		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBe(
+			"Claude Code binary not found",
+		)
 	})
 })
 
