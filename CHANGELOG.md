@@ -1,3 +1,10 @@
+## [1.0.4](https://github.com/asepharyana/pr-agent-server/compare/v1.0.3...v1.0.4) (2026-10-15)
+
+
+### Bug Fixes
+
+* **worker:** a transient gateway failure must not pin a PR forever ([f29427d](https://github.com/asepharyana/pr-agent-server/commit/f29427d4cb062e53af61d5b743c06fb81fece870)), closes [hub#46](https://github.com/hub/issues/46) [pr-agent-server#5](https://github.com/pr-agent-server/issues/5)
+
 ## [1.0.3](https://github.com/asepharyana/pr-agent-server/compare/v1.0.2...v1.0.3) (2026-10-14)
 
 
