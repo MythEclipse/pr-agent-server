@@ -801,7 +801,15 @@ describe("case 6 — red CI closes a stale dependabot PR and skips everyone else
 	const daysAgo = (d: number) => iso((NOW_SEC - d * 86_400) * 1000)
 	const STALE = { ...LOCKFILE_BUMP, created_at: daysAgo(3) }
 
-	test("dependabot older than STALE_CI_CLOSE_DAYS is closed", async () => {
+	test("dependabot older than STALE_CI_CLOSE_DAYS is NOT closed", async () => {
+		// This test used to assert the OPPOSITE — that a stale dependabot bump is
+		// closed — and that assertion was correct for the old policy. MythEclipse
+		// inverted it on 2026-10-16: closing a dependency bump is a SILENT LOSS.
+		// The update disappears with no trace and nothing notices until a later
+		// `pnpm audit` or the next Dependabot run trips over the gap. So a stale
+		// bump stays open and keeps getting the agent.
+		//
+		// The case name above the block is now wrong too and is fixed with it.
 		const h = harness({
 			prs: [makePr(STALE)],
 			comments: [reviewComment(SAFE_REVIEW)],
@@ -813,10 +821,34 @@ describe("case 6 — red CI closes a stale dependabot PR and skips everyone else
 		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr: makePr(STALE) })
 
 		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
-		expect(closes(h.calls)).toHaveLength(1)
+		expect(closes(h.calls)).toHaveLength(0)
 		expect(h.lines).toContain("   ⏭️  Already fixed at this SHA — skip AI fix")
 		expect(h.lines).toContain("   🧪 CI: CI FAILED: typecheck")
-		expect(h.lines).toContain("   ⛔ CI failing for 3.0d — closing stale dependabot PR")
+		expect(h.lines).toContain(
+			"   ⏳ CI failing 3.0d on a dependency bump — NOT closing it, the agent will keep fixing it",
+		)
+		expect(merges(h.calls)).toBe(0)
+		expect(h.agentPosts).toEqual([])
+	})
+
+	test("a HUMAN PR older than STALE_CI_CLOSE_DAYS is closed", async () => {
+		// The other half of the inversion, and the case that had no terminal path
+		// at all: a human PR's red CI was only ever counted, so it printed
+		// "Waiting for green CI" on every tick forever with nothing to grep for.
+		const human = makePr({ ...STALE, user: { login: "somehuman" } })
+		const h = harness({
+			prs: [human],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: RED_CHECKS,
+			fixState: SEEDED,
+			nowSec: NOW_SEC,
+		})
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr: human })
+
+		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
+		expect(closes(h.calls)).toHaveLength(1)
+		expect(h.lines).toContain("   ⛔ CI failing for 3.0d — closing stale PR")
 		expect(h.lines).toContain(`   ✅ Closed #${PR_NUM} (stale failing CI)`)
 		expect(merges(h.calls)).toBe(0)
 		expect(h.agentPosts).toEqual([])
@@ -1472,5 +1504,106 @@ describe("prevention — a HUMAN PR on red CI is visible, not silent", () => {
 		// Still never a pin — the author may be mid-push, and a pin here would be
 		// the permanent stall fixed on 2026-10-15.
 		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+	})
+})
+
+describe("disposition — humans get closed, dependabot gets fixed", () => {
+	// MythEclipse's policy, 2026-10-16: a HUMAN PR that is broken, low-quality or
+	// harmful is disposable — close it. A DEPENDABOT bump must NOT be closed,
+	// because closing one is a silent loss: the update disappears and nobody
+	// notices for two weeks, until a later `pnpm audit` or the next Dependabot run
+	// trips over it. Those get AUTOFIXED instead, even at the cost of a long agent
+	// run — a breaking change is still worth attempting, and a human is available
+	// to reject the result.
+	//
+	// This INVERTS two things the worker had backwards:
+	//   1. `closeStaleCiPr` fired only for dependabot (the one author that must
+	//      never be auto-closed), and never for humans (the one that should).
+	//   2. safety-blocked and merge-refused arms were counted forever for humans
+	//      with no exit.
+	//
+	// So: humans get a TERMINAL disposition, dependabot gets an UNBOUNDED retry
+	// with the agent. Both are bounded — by a different mechanism each. The
+	// threshold itself (`STALE_CI_CLOSE_DAYS`, 2) is the guard that keeps a PR
+	// mid-review from vanishing; see the two tests below it.
+	test("a HUMAN PR on long-red CI is CLOSED, not waited on", async () => {
+		const NOW_SEC = 1_700_000_000
+		const human = makePr({ created_at: iso((NOW_SEC - 3 * 86_400) * 1000) })
+		const h = harness({
+			prs: [human],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: [{ name: "typecheck", status: "completed", conclusion: "failure" }],
+			nowSec: NOW_SEC,
+		})
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr: human })
+
+		expect(closes(h.calls)).toHaveLength(1)
+		expect(closes(h.calls)[0].json).toEqual({ state: "closed" })
+		expect(h.lines).toContain(`   ✅ Closed #${PR_NUM} (stale failing CI)`)
+		expect(out.merged).toBe(false)
+	})
+
+	test("a DEPENDABOT bump on long-red CI is NEVER closed", async () => {
+		// The regression this whole block exists to prevent: dependabot used to be
+		// the ONLY author `closeStaleCiPr` applied to, so an incompatible bump was
+		// closed and silently lost.
+		const NOW_SEC = 1_700_000_000
+		const bot = makePr({
+			user: { login: "dependabot[bot]" },
+			created_at: iso((NOW_SEC - 30 * 86_400) * 1000),
+		})
+		const h = harness({
+			prs: [bot],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: [{ name: "typecheck", status: "completed", conclusion: "failure" }],
+			nowSec: NOW_SEC,
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: bot })
+
+		expect(closes(h.calls)).toHaveLength(0)
+		expect(h.lines.some((l) => l.includes("stale failing CI"))).toBe(false)
+		expect(h.lines.some((l) => l.includes("Waiting for green CI"))).toBe(true)
+		// Counted, so the stall is visible rather than silent.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(1)
+		// And never a pin — a pin would block the bump forever, which is worse
+		// than the loop this replaced.
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+	})
+
+	test("a HUMAN PR too young to close is still waited on", async () => {
+		// The age guard is the whole safety of auto-closing someone's work: a PR
+		// mid-review must not disappear because CI is briefly red.
+		const NOW_SEC = 1_700_000_000
+		const fresh = makePr({ created_at: iso((NOW_SEC - 3600) * 1000) })
+		const h = harness({
+			prs: [fresh],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: [{ name: "typecheck", status: "completed", conclusion: "failure" }],
+			nowSec: NOW_SEC,
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: fresh })
+
+		expect(closes(h.calls)).toHaveLength(0)
+		expect(h.lines.some((l) => l.includes("Waiting for green CI"))).toBe(true)
+	})
+
+	test("dry run reports the close without making it", async () => {
+		const NOW_SEC = 1_700_000_000
+		const human = makePr({ created_at: iso((NOW_SEC - 5 * 86_400) * 1000) })
+		const h = harness({
+			prs: [human],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: [{ name: "typecheck", status: "completed", conclusion: "failure" }],
+			nowSec: NOW_SEC,
+			dry: true,
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: human })
+
+		expect(closes(h.calls)).toHaveLength(0)
+		expect(h.lines.some((l) => l.includes("dry run: would close"))).toBe(true)
 	})
 })

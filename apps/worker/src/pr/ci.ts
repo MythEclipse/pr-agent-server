@@ -132,12 +132,16 @@ export async function closeStaleCiPr(
 	// parameter is not an error here.
 	const body =
 		`⛔ Auto-closed by PR Queue Worker — **stale failing CI**.\n\n` +
-		`CI has been failing for ${STALE_CI_CLOSE_DAYS}+ days on this ` +
-		`dependency bump: \`${ciMsg}\`. The update is incompatible with the ` +
-		`current stack and will not be merged; the worker would otherwise ` +
+		`CI has been failing for ${STALE_CI_CLOSE_DAYS}+ days on this PR: ` +
+		`\`${ciMsg}\`. It will not be merged, and the worker would otherwise ` +
 		`wait on it forever.\n\n` +
-		`If this dependency genuinely needs updating, open a proper PR with ` +
-		`the required code changes so CI can pass.`
+		// The wording matters. This comment used to call the PR "this dependency
+		// bump" and tell the author to open a proper PR — accurate while only
+		// dependabot PRs were ever closed, and WRONG now that the policy is
+		// inverted and this only ever fires on a human PR. Leaving the old text
+		// would tell someone their hand-written work was a dependency bump.
+		`If this change is still wanted, re-open it and fix CI, or open a new ` +
+		`PR that passes.`
 
 	const comment = await api.request("POST", `/repos/${repo}/issues/${pr}/comments`, {
 		token,

@@ -146,13 +146,38 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 	}
 	if (ci.ok) return false
 
-	// A dependabot bump stuck on red CI for days will never pass (it is
-	// incompatible with the stack), so it is CLOSED — otherwise the worker prints
-	// "Waiting for green CI" on the same PR forever (2046-2064).
-	if (c.author === "dependabot[bot]") {
-		const age = ageDays(c.createdAt, deps.now())
-		if (age > STALE_CI_CLOSE_DAYS) {
-			deps.report.push(`   ⛔ CI failing for ${age.toFixed(1)}d — closing stale dependabot PR`)
+	// STALE-RED-CI DISPOSITION. MythEclipse's policy, 2026-10-16, and it INVERTS
+	// what this arm used to do.
+	//
+	// A HUMAN PR that is broken, low-quality or harmful is DISPOSABLE: close it. A
+	// DEPENDABOT bump must never be closed automatically — closing one is a silent
+	// loss. The update vanishes with no trace, and nothing notices for two weeks,
+	// until a later `pnpm audit` or the next Dependabot run trips over the gap. Those
+	// get the AI fix instead, even at the cost of a long agent run: a breaking change
+	// is still worth attempting, and a human is there to reject a bad result.
+	//
+	// So the previous wiring — `closeStaleCiPr` fired ONLY for dependabot, and a
+	// human PR was only ever counted — had both cases exactly backwards.
+	//
+	// Both paths stay bounded, by different mechanisms:
+	//   - human: a terminal close once the PR is older than the threshold, so a red
+	//     CI stops being an infinite wait;
+	//   - dependabot: unbounded counting with the agent offered again, because
+	//     closing it is the one outcome that is worse than a slow queue.
+	//
+	// THE AGE GUARD IS THE SAFETY OF AUTO-CLOSING. A PR mid-review must not vanish
+	// because CI is briefly red, so nothing is closed before the threshold.
+	const staleAge = ageDays(c.createdAt, deps.now())
+	const isDependabot = c.author === "dependabot[bot]"
+	if (staleAge > STALE_CI_CLOSE_DAYS) {
+		if (isDependabot) {
+			// Reported, not closed. The worker is choosing the slow, recoverable
+			// outcome over the silent one.
+			deps.report.push(
+				`   ⏳ CI failing ${staleAge.toFixed(1)}d on a dependency bump — NOT closing it, the agent will keep fixing it`,
+			)
+		} else {
+			deps.report.push(`   ⛔ CI failing for ${staleAge.toFixed(1)}d — closing stale PR`)
 			if (deps.dry) {
 				deps.report.push(`   🧪 dry run: would close #${c.prNum} (stale failing CI)`)
 				c.out.skipped = true
@@ -162,7 +187,7 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 			if (status === 200) {
 				deps.report.push(`   ✅ Closed #${c.prNum} (stale failing CI)`)
 				c.out.skipped = true
-				return true // Python 2060: `continue` on a 200, else fall through.
+				return true
 			}
 			deps.report.push(`   ⚠️  Close failed HTTP ${status}`)
 		}
