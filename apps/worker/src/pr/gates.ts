@@ -168,15 +168,24 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 		}
 	}
 	deps.report.push("   ⏳ Waiting for green CI")
-	// Counted, but only for dependabot. Red CI on a human PR is legitimately
-	// fixed by the author pushing a fix, and the head SHA moving is the signal
-	// to retry — counting it would pin a PR whose author is mid-push. A
-	// dependabot bump cannot be rescued that way: nobody is editing it, so
-	// identical red CI recurs on every tick until the stale-close above takes
-	// it. That is the arm that used to loop silently.
-	if (c.author === "dependabot[bot]") {
-		await noteFailure(deps, c, `CI still red: ${ci.msg}`)
-	}
+	// COUNTED FOR EVERY AUTHOR. This used to be dependabot-only, on the reasoning
+	// that a human PR's red CI is fixed by the author pushing — true, and the head
+	// SHA moving is the signal to retry. But leaving the counter unwritten made the
+	// arm INVISIBLE: a human PR whose CI never recovers printed
+	// `⏳ Waiting for green CI` on every tick forever with no state, no tally, and
+	// nothing to grep for. That is the same "no rules" gap the `attempts` field's
+	// doc comment records for GMW#109, left untouched for the author the worker is
+	// least likely to be watching.
+	//
+	// Counting costs nothing here. It is a diagnostic with no ceiling and nothing
+	// reads it to decide whether to give up — so a mid-push author is unaffected,
+	// and a genuinely stuck PR becomes answerable ("attempt 40") instead of merely
+	// slow.
+	//
+	// Still NOT a skip. See `isTransientInfra`: a `skip_reason` is enforced "until
+	// head SHA changes", and for red CI the fix IS a head move, so a pin would be
+	// the permanent stall fixed on 2026-10-15.
+	await noteFailure(deps, c, `CI still red: ${ci.msg}`)
 	c.out.skipped = true
 	return true
 }

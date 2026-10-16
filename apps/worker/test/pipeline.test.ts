@@ -1446,3 +1446,31 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
 	})
 })
+
+describe("prevention — a HUMAN PR on red CI is visible, not silent", () => {
+	// The last unbounded loop. `noteFailure` on the red-CI arm is gated on
+	// `author === "dependabot[bot]"`, and the stale-close escape hatch is gated the
+	// same way. So a HUMAN PR whose CI never goes green prints
+	// `⏳ Waiting for green CI` on every tick, forever, leaving no state at all —
+	// the exact "no rules" gap the `attempts` field's doc comment describes for
+	// GMW#109. Dependabot is safe (tally + 2-day close); nobody is looking at the
+	// human case.
+	test("a human PR on red CI records the attempt", async () => {
+		const h = harness({
+			prs: [makePr()], // alice, NOT dependabot
+			comments: [reviewComment(SAFE_REVIEW)],
+			// Defined inline: this describe is outside case 6's scope, where the
+			// shared RED_CHECKS constant lives.
+			checkRuns: [{ name: "typecheck", status: "completed", conclusion: "failure" }],
+		})
+
+		await processPr(h.deps, ctx)
+
+		expect(h.lines.some((l) => l.includes("Waiting for green CI"))).toBe(true)
+		// The tally is the ONLY thing that makes a human-visible stall visible.
+		expect(h.fixState[REPO][String(PR_NUM)].attempts).toBe(1)
+		// Still never a pin — the author may be mid-push, and a pin here would be
+		// the permanent stall fixed on 2026-10-15.
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+	})
+})
