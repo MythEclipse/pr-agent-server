@@ -1,3 +1,10 @@
+## [1.0.10](https://github.com/asepharyana/pr-agent-server/compare/v1.0.9...v1.0.10) (2026-10-16)
+
+
+### Bug Fixes
+
+* **worker:** prune fix-state entries for PRs that are no longer open ([0ee066a](https://github.com/asepharyana/pr-agent-server/commit/0ee066ad56756b9cb9dd1e32ffb8f93a6664664a)), closes [23-#28](https://github.com/23-/issues/28)
+
 ## [1.0.9](https://github.com/asepharyana/pr-agent-server/compare/v1.0.8...v1.0.9) (2026-10-16)
 
 
