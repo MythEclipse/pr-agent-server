@@ -32,6 +32,7 @@ import { describe, expect, test } from "vitest"
 import type { PostResult } from "../src/claude-agent.ts"
 import type { GitResult, GitRunner } from "../src/git.ts"
 import { WorkerLock } from "../src/lock.ts"
+import { AI_FIX_RETRY_CEILING } from "../src/pr/context.ts"
 import type { ProcRunner, Workdirs } from "../src/pr/lockfix.ts"
 import { processPr, runTick, UNRESOLVABLE_CONFLICT, type WorkerDeps } from "../src/pr/pipeline.ts"
 import type { FetchLike } from "../src/pr/review.ts"
@@ -788,7 +789,11 @@ describe("case 6 — red CI closes a stale dependabot PR and skips everyone else
 	//     agent stub's verdict is a successful push, which increments
 	//     `fixed_count` (line 2009) independently of the CI gate. Seeding
 	//     `already` keeps this case about the CI decision alone.
-	const SEEDED = { [REPO]: { [String(PR_NUM)]: { sha: HEAD } } }
+	// `fix_commits: 2` = the agent's fix LANDED, so `shouldRetryAiFix` leaves it
+	// alone and the stale-close path is exercised on its own. Without it this
+	// fixture would (correctly) now re-offer the agent first, and the test would
+	// be measuring two gates at once.
+	const SEEDED = { [REPO]: { [String(PR_NUM)]: { sha: HEAD, fix_commits: 2 } } }
 	// The age is computed against `deps.now()`, which the harness pins, so the
 	// fixture's `created_at` has to be derived from the SAME clock — a real
 	// `Date.now()` here would make the age negative and the close unreachable.
@@ -1335,5 +1340,109 @@ describe("prevention — the ops report must never assert an unchecked cause", (
 		const lines = h.lines.join("\n")
 		expect(lines).toContain("mergeable_state: dirty")
 		expect(lines).not.toContain("Branch protection")
+	})
+})
+
+describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
+	// mcpedia#28, verbatim from the ops report:
+	//
+	//   ⏭️  Already fixed at this SHA — skip AI fix
+	//   ✅ Security: clean
+	//   🧪 CI: CI FAILED: moon check
+	//   🔁 CI still red: CI FAILED: moon check (attempt 97 at this SHA)
+	//
+	// A vitest 5.0.3→5.0.4 dev-dep bump. `runAiFix` reported a clean tree, which
+	// is HONEST — there is nothing in a lockfile bump for an agent to improve —
+	// but `markFixed` then claimed the head, and `alreadyFixed` read that as "do
+	// not ask again". The one thing that could have fixed CI was therefore never
+	// offered, for 97 ticks.
+	//
+	// The recorded "fixed" was about the DIFF; the blocker was the CI's own
+	// configuration. `shouldRetryAiFix` re-offers on exactly that gap.
+	const DEPENDABOT = makePr({ user: { login: "dependabot[bot]" } })
+	const noCommitFixState = (fixCommits?: number): FixState => ({
+		[REPO]: { [String(PR_NUM)]: { sha: HEAD, fix_commits: fixCommits } },
+	})
+
+	test("a dependabot bump fixed with NO commit is offered the agent again", async () => {
+		const h = harness({
+			prs: [DEPENDABOT],
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: noCommitFixState(0),
+			checkRunsReply: { status: 500, data: {} }, // red CI
+		})
+
+		await processPr(h.deps, {
+			token: "install-token",
+			repo: REPO,
+			pr: DEPENDABOT,
+		})
+
+		expect(h.lines.some((l) => l.includes("produced no commit"))).toBe(true)
+		// The whole point: the agent is actually asked, not merely announced.
+		expect(h.lines.some((l) => l.includes("Running Claude Code AI fix"))).toBe(true)
+	})
+
+	test("a fix that DID commit is not re-offered — that needs a human", async () => {
+		const h = harness({
+			prs: [DEPENDABOT],
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: noCommitFixState(2),
+			checkRunsReply: { status: 500, data: {} },
+		})
+
+		await processPr(h.deps, {
+			token: "install-token",
+			repo: REPO,
+			pr: DEPENDABOT,
+		})
+
+		expect(h.lines.some((l) => l.includes("produced no commit"))).toBe(false)
+		expect(h.lines).toContain("   ⏭️  Already fixed at this SHA — skip AI fix")
+	})
+
+	test("a HUMAN PR with a no-commit fix is not re-offered (author may be pushing)", async () => {
+		const h = harness({
+			prs: [makePr()], // alice
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: noCommitFixState(0),
+			checkRunsReply: { status: 500, data: {} },
+		})
+
+		await processPr(h.deps, ctx)
+
+		expect(h.lines.some((l) => l.includes("produced no commit"))).toBe(false)
+	})
+
+	test("the re-offer is bounded — it cannot become a 30-minute loop", async () => {
+		// One agent run is up to 1800s. Three re-offers is the ceiling, and past
+		// it the PR falls back to the ordinary red-CI wait (NOT a skip: a pin here
+		// would be a permanent stall, the exact bug fixed on 2026-10-15).
+		const h = harness({
+			prs: [DEPENDABOT],
+			comments: [reviewComment(SAFE_REVIEW)],
+			fixState: {
+				[REPO]: {
+					[String(PR_NUM)]: {
+						sha: HEAD,
+						fix_commits: 0,
+						attempt_sha: HEAD,
+						attempts: AI_FIX_RETRY_CEILING,
+					},
+				},
+			},
+			checkRunsReply: { status: 500, data: {} },
+		})
+
+		await processPr(h.deps, {
+			token: "install-token",
+			repo: REPO,
+			pr: DEPENDABOT,
+		})
+
+		expect(h.lines.some((l) => l.includes("already re-offered"))).toBe(true)
+		expect(h.lines.some((l) => l.includes("Running Claude Code AI fix"))).toBe(false)
+		// Bounded, not abandoned.
+		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
 	})
 })

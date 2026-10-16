@@ -199,7 +199,7 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 	}
 
 	killOrphanedAgent(deps.procs, c.repo, c.prNum)
-	const { ok, summary } = await runAiFix(
+	const { ok, summary, commits } = await runAiFix(
 		subDeps(deps),
 		c.repo,
 		c.prNum,
@@ -211,7 +211,10 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 	)
 	if (ok) {
 		deps.report.push(`   ✨ ${summary}`)
-		markFixed(c.fixState, c.repo, c.prNum, c.headSha)
+		// `commits` is recorded, not just reported: it is what tells a later tick
+		// whether "already fixed" meant the agent's work landed or the agent found
+		// nothing to improve. See `shouldRetryAiFix`.
+		markFixed(c.fixState, c.repo, c.prNum, c.headSha, commits)
 		persist(deps, c.fixState)
 		c.out.fixed = true
 		const fresh = await refetchHead(deps, c)

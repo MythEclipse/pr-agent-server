@@ -61,6 +61,12 @@ export interface PrEntry {
 	 * suppressed every retry. See `bumpAttempt`.
 	 */
 	attempt_sha?: string
+	/**
+	 * How many commits the recorded fix actually produced. 0 means "the agent
+	 * ran and found nothing to improve", which is what `shouldRetryAiFix` keys on
+	 * to tell that apart from "the agent's fix landed and still did not help".
+	 */
+	fix_commits?: number
 	[key: string]: unknown
 }
 
@@ -175,7 +181,7 @@ export function prEntry(state: FixState, repo: string, pr: number | string): PrE
 	return repoState[key] as PrEntry
 }
 
-/** True if this PR was already fixed (or permanently skipped) at this SHA. */
+/** True when the PR was already fixed (or permanently skipped) at this SHA. */
 export function alreadyFixed(
 	state: FixState,
 	repo: string,
@@ -185,16 +191,66 @@ export function alreadyFixed(
 	return prEntry(state, repo, pr).sha === headSha
 }
 
-/** Mark the PR as fixed at `headSha`. Pass `file` to persist (Python parity). */
+/**
+ * Should the AI fix be OFFERED AGAIN even though this head was already recorded
+ * as fixed?
+ *
+ * WHY. `alreadyFixed` is the right answer for a code PR: the agent's work landed,
+ * and asking again just burns a 30-minute run to reach the same conclusion. It is
+ * the WRONG answer when the recorded success did not unblock the PR — observed
+ * live on mcpedia#28, where a vitest 5.0.3→5.0.4 dev-dep bump recorded a clean
+ * tree (nothing to improve, honestly), was therefore marked fixed at that head,
+ * and then sat on `⏭️  Already fixed at this SHA — skip AI fix` forever while CI
+ * stayed red:
+ *
+ *   ⏭️  Already fixed at this SHA — skip AI fix
+ *   🧪 CI: CI FAILED: moon check
+ *   🔁 CI still red: CI FAILED: moon check (attempt 97 at this SHA)
+ *
+ * The recorded "fixed" was about the DIFF, and the blocker was somewhere the
+ * agent never looks — CI configuration. So the agent is offered once more, but
+ * only under conditions that keep it from becoming a 30-minute loop:
+ *
+ *   - the PR is a DEPENDABOT bump, because a human PR's author may be mid-push
+ *     and re-running the agent over their shoulder is noise; and
+ *   - the recorded work made no commit (`commits === 0`), because that is what
+ *     distinguishes "the agent found nothing to improve" from "the agent's fix
+ *     landed and still did not help". The second needs a human, not another
+ *     identical run.
+ *
+ * @param commits how many commits the recorded fix actually produced.
+ */
+export function shouldRetryAiFix(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+	author: string,
+): boolean {
+	if (!alreadyFixed(state, repo, pr, headSha)) return false
+	if (author !== "dependabot[bot]") return false
+	return Number(prEntry(state, repo, pr).fix_commits ?? 0) === 0
+}
+
+/**
+ * Mark the PR as fixed at `headSha`. Pass `file` to persist (Python parity).
+ *
+ * `commits` is how many commits the agent actually produced, and it is what
+ * `shouldRetryAiFix` reads to tell "nothing to improve" (0) apart from "the fix
+ * landed and still did not unblock this PR" (>0). Defaults to 0 so every existing
+ * caller keeps its current behaviour.
+ */
 export function markFixed(
 	state: FixState,
 	repo: string,
 	pr: number | string,
 	headSha: string,
+	commits = 0,
 	file?: string,
 ): PrEntry {
 	const entry = prEntry(state, repo, pr)
 	entry.sha = headSha
+	entry.fix_commits = commits
 	delete entry.skip_reason
 	entry.notified = false
 	// Success resets the tally: the next failure at this SHA starts from 1, not

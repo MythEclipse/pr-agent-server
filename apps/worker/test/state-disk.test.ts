@@ -44,6 +44,10 @@ describe("fix state on-disk shape", () => {
 		saveFixState(f, s)
 		expect(JSON.parse(readFileSync(f, "utf8"))["o/r"]["7"]).toEqual({
 			sha: "newsha",
+			// Defaults to 0 — "the agent found nothing to improve" — which is what
+			// `shouldRetryAiFix` reads. Pinned so a silent default change cannot
+			// turn every recorded fix into a re-offer.
+			fix_commits: 0,
 			notified: false,
 		})
 	})
@@ -61,8 +65,21 @@ describe("fix state on-disk shape", () => {
 	test("markFixed with a file persists without a separate saveFixState call", () => {
 		const f = tmpFile("fix.json")
 		const s: any = {}
-		markFixed(s, "o/r", 5, "sha5", f)
-		expect(loadFixState(f)["o/r"]["5"]).toEqual({ sha: "sha5", notified: false })
+		// `commits` before `file` — see markFixed's signature. Recorded as an exact
+		// object so the new `fix_commits` field cannot slip in unnoticed: the
+		// default is 0 and it is what `shouldRetryAiFix` reads.
+		markFixed(s, "o/r", 5, "sha5", 0, f)
+		expect(loadFixState(f)["o/r"]["5"]).toEqual({
+			sha: "sha5",
+			fix_commits: 0,
+			notified: false,
+		})
+	})
+
+	test("markFixed records how many commits the fix produced", () => {
+		const s: any = {}
+		markFixed(s, "o/r", 6, "sha6", 3)
+		expect(s["o/r"]["6"].fix_commits).toBe(3)
 	})
 
 	test("markSkip and markSkipNotified persist when given a file", () => {

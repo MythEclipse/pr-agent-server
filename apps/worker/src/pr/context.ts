@@ -32,6 +32,23 @@ import type { GhAppClient } from "./scan.ts"
 /** Python `AI_FIX_ENABLED = True` (70) — a module constant there too, and it
  *  gates four sites (1856, 1952, 2071, 2134); every one is a gate, not a report. */
 export const AI_FIX_ENABLED = true
+
+/**
+ * How many times the AI fix may be RE-OFFERED at one head SHA after a recorded
+ * run that produced no commit. See `shouldRetryAiFix` in `./state.ts`.
+ *
+ * Exists because the re-offer is not free: one agent run is up to
+ * `AI_FIX_TIMEOUT` (1800s). Without a bound, a dependabot bump whose blocker the
+ * agent cannot see — a red CI caused by the CI's own configuration, which is
+ * exactly mcpedia#28 — would buy a 30-minute run every five minutes, forever.
+ *
+ * NOT a skip, deliberately. Past the ceiling the PR reverts to being an ordinary
+ * red-CI wait, so the report stays truthful ("we tried, it did not help") and the
+ * stale-close arm can still retire a dependabot bump that never turns green.
+ * What must not happen is a pin: see the `[INFRA]` transient/permanent split for
+ * why writing a `skip_reason` for something retryable is a permanent stall.
+ */
+export const AI_FIX_RETRY_CEILING = 3
 /** Python line 1866, `pr.get("title", "untitled")[:60]`. */
 const TITLE_CAP = 60
 /** Python line 2051, the `86400` in the dependabot age arithmetic. */

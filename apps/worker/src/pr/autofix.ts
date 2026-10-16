@@ -278,7 +278,7 @@ export async function runAiFix(
 	headRef: string,
 	baseRef: string,
 	token: string,
-): Promise<{ ok: boolean; summary: string }> {
+): Promise<{ ok: boolean; summary: string; commits: number }> {
 	const { run, workdirs, agent, api } = deps
 	// NOTE: no `_lockfix_`/`_bunfix_` infix here (Python line 831), so the three
 	// flows' workdirs cannot collide in /tmp. `TMP_BASE` is the shared constant,
@@ -306,7 +306,11 @@ export async function runAiFix(
 		const cloned = clonePr(run, repo, headRef, token, workdir, 20) // Python line 840
 		if (cloned.code !== 0) {
 			workdirs.remove(workdir)
-			return { ok: false, summary: `clone failed: ${head(reportable(cloned.stderr), 200)}` } // line 845
+			return {
+				ok: false,
+				commits: 0,
+				summary: `clone failed: ${head(reportable(cloned.stderr), 200)}`,
+			} // line 845
 		}
 	} else {
 		// Fast-forward onto the current head; fall back to a fresh clone if the
@@ -319,7 +323,11 @@ export async function runAiFix(
 			const cloned = clonePr(run, repo, headRef, token, workdir, 20)
 			if (cloned.code !== 0) {
 				workdirs.remove(workdir)
-				return { ok: false, summary: `clone failed: ${head(reportable(cloned.stderr), 200)}` }
+				return {
+					ok: false,
+					commits: 0,
+					summary: `clone failed: ${head(reportable(cloned.stderr), 200)}`,
+				}
 			}
 		}
 	}
@@ -373,7 +381,7 @@ export async function runAiFix(
 
 	if (!changedFiles.length) {
 		workdirs.remove(workdir)
-		return { ok: false, summary: "no changed files to fix" } // Python line 880
+		return { ok: false, commits: 0, summary: "no changed files to fix" } // Python line 880
 	}
 
 	const prompt = buildAiFixPrompt(pr, repo, title, baseRef, changedFiles)
@@ -398,7 +406,7 @@ export async function runAiFix(
 		// `reportable` is narrow (http(s) userinfo only), so an ordinary `[INFRA]`
 		// line is byte-identical and the skip-once pipeline still matches. See
 		// :398 for the same wrap on the other snippet site.
-		return { ok: false, summary: reportable(snippet) }
+		return { ok: false, commits: 0, summary: reportable(snippet) }
 	}
 
 	// Python lines 927-939. Twelve characters of the ORIGINAL head sha: a full
@@ -422,7 +430,11 @@ export async function runAiFix(
 			// Python line 951: `stderr or stdout or ""` — stderr first, stdout as the
 			// fallback, empty last, then 200 characters.
 			const detail = reportable(pushed.stderr || pushed.stdout || "")
-			return { ok: false, summary: `AI committed but push failed: ${head(detail, PUSH_DETAIL)}` }
+			return {
+				ok: false,
+				commits: 0,
+				summary: `AI committed but push failed: ${head(detail, PUSH_DETAIL)}`,
+			}
 		}
 	}
 
@@ -449,7 +461,11 @@ export async function runAiFix(
 	else if (committed) workdirs.remove(workdir)
 
 	if (committed)
-		return { ok: true, summary: `Claude Code pushed ${newCommits} improvement commit(s)` } // line 959
+		return {
+			ok: true,
+			commits: newCommits,
+			summary: `Claude Code pushed ${newCommits} improvement commit(s)`,
+		} // line 959
 	// `reportable` BEFORE `head()`: same untrusted-agent-text reasoning as the
 	// `[INFRA]` site above, and truncating first would not help — the credential
 	// sits near the start of a quoted `.git/config` line, well inside 300 points.
@@ -473,6 +489,14 @@ export async function runAiFix(
 	// of collapsing them into one ambiguous line.
 	return {
 		ok: true,
+		// 0 is the load-bearing value here, and it is what `shouldRetryAiFix`
+		// reads. A clean tree means the agent found nothing to improve, so the
+		// recorded "fixed" says nothing about whether the PR can actually merge —
+		// which is exactly the mcpedia#28 shape: honest clean tree, red CI, and
+		// then "Already fixed at this SHA" forever. The dirty arm below also has
+		// no commit, but the workdir is discarded for that case, so 0 is right
+		// for both.
+		commits: 0,
 		summary: cleanTree
 			? `Claude Code found nothing to improve — no changes needed (${head(said, SNIPPET)})`
 			: `Claude Code ran but left uncommitted changes (${head(said, SNIPPET)})`,
