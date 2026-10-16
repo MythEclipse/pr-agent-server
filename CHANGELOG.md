@@ -1,3 +1,10 @@
+## [1.0.11](https://github.com/asepharyana/pr-agent-server/compare/v1.0.10...v1.0.11) (2026-10-16)
+
+
+### Bug Fixes
+
+* **worker:** size PRUNE_THRESHOLD to the scan, not to a round number ([70aab59](https://github.com/asepharyana/pr-agent-server/commit/70aab595eb9b35422795af7ee8901f13db884008))
+
 ## [1.0.10](https://github.com/asepharyana/pr-agent-server/compare/v1.0.9...v1.0.10) (2026-10-16)
 
 
