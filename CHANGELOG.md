@@ -1,3 +1,10 @@
+## [1.0.9](https://github.com/asepharyana/pr-agent-server/compare/v1.0.8...v1.0.9) (2026-10-16)
+
+
+### Bug Fixes
+
+* **worker:** a no-commit "fix" must not lock the agent out forever ([200b3e9](https://github.com/asepharyana/pr-agent-server/commit/200b3e9556bc8293296549b6b9d3639ca4524f26)), closes [mcpedia#28](https://github.com/mcpedia/issues/28)
+
 ## [1.0.8](https://github.com/asepharyana/pr-agent-server/compare/v1.0.7...v1.0.8) (2026-10-15)
 
 
