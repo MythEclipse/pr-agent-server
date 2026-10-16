@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/asepharyana/pr-agent-server/compare/v1.0.12...v1.1.0) (2026-10-16)
+
+
+### Features
+
+* **worker:** invert close policy — close human PRs, never close dependabot ([52c5110](https://github.com/asepharyana/pr-agent-server/commit/52c5110b3becee26b5c48c9ee40b2a3e8cd69847))
+
 ## [1.0.12](https://github.com/asepharyana/pr-agent-server/compare/v1.0.11...v1.0.12) (2026-10-16)
 
 
