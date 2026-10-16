@@ -142,6 +142,55 @@ export function loadFixState(file: string = FIX_STATE_FILE): FixState {
 	return readJsonTolerant<FixState>(file, {})
 }
 
+/** Above this many open PRs, dead entries are worth clearing out. */
+export const PRUNE_THRESHOLD = 25
+
+/**
+ * Drop fix-state entries for PRs that are no longer open.
+ *
+ * WHY. The file only ever grew. On 2026-10-16 it still held mcpedia #23–#28, every
+ * one merged, including #28's `attempts: 99` — a number that reads as "currently
+ * stuck" long after the PR closed. Nothing read those entries: `alreadyFixed` and
+ * `getSkipReason` are keyed on repo + PR + SHA, and a closed PR never returns at
+ * the same head, so they are dead weight that costs a human credibility every
+ * time they open the file.
+ *
+ * DELIBERATELY CONSERVATIVE, in both directions:
+ *
+ *   - it only removes entries for PRs it can see are NOT open, so a wrong open-PR
+ *     set can leave the file untouched but can never drop live state; and
+ *   - it does nothing while `openPrs.size <= threshold`, so a transiently empty
+ *     scan (a rate-limited API call returning `[]`) cannot wipe the file. An empty
+ *     set is also ignored outright for the same reason.
+ *
+ * The worst case for this function is that it never runs. The worst case for
+ * removing its guard would be a wiped state file, which is unrecoverable.
+ *
+ * @param openPrs `"repo/number"` keys the caller currently sees as open.
+ */
+export function pruneClosedFixState(
+	state: FixState,
+	openPrs: Set<string>,
+	opts: { threshold?: number } = {},
+): number {
+	const threshold = opts.threshold ?? PRUNE_THRESHOLD
+	// An empty set means "we do not know", not "nothing is open". Treating it as
+	// the latter is precisely how a state file gets deleted by a bad API read.
+	if (openPrs.size === 0 || openPrs.size <= threshold) return 0
+
+	let removed = 0
+	for (const [repo, prs] of Object.entries(state)) {
+		for (const key of Object.keys(prs)) {
+			if (!openPrs.has(`${repo}/${key}`)) {
+				delete prs[key]
+				removed += 1
+			}
+		}
+		if (Object.keys(prs).length === 0) delete state[repo]
+	}
+	return removed
+}
+
 /** Compact, no indent — byte-compatible with Python's `json.dumps(state)`. */
 export function saveFixState(file: string, state: FixState): void {
 	writeFileSync(file, JSON.stringify(state))

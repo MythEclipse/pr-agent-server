@@ -11,6 +11,7 @@ import {
 	markSkip,
 	markSkipNotified,
 	prEntry,
+	pruneClosedFixState,
 	saveFixState,
 	saveSyncState,
 	wasSkipNotified,
@@ -119,5 +120,58 @@ describe("sync state on-disk shape", () => {
 
 	test("an unwritable sync state path does not throw", () => {
 		expect(() => saveSyncState("/proc/definitely/not/writable.json", { "a/b": {} })).not.toThrow()
+	})
+})
+
+describe("pruning dead entries", () => {
+	// The state file grew forever: on 2026-10-16 it still held entries for mcpedia
+	// #23–#28, all merged, including #28's `attempts: 99`. Nothing read them —
+	// `alreadyFixed`/`getSkipReason` are keyed on repo+PR+SHA and a closed PR never
+	// comes back at the same SHA — so the only cost is a file that misleads whoever
+	// reads it and grows without bound. That 99 is exactly the sort of number that
+	// reads as "currently stuck" when it is six months dead.
+	//
+	// Entries for CLOSED or MERGED PRs are therefore dropped once a threshold of
+	// open PRs is exceeded. Only ever removing provably-dead entries, and never
+	// when it would shrink the file below the threshold, keeps this safe: the
+	// worst case is that it does not run.
+	test("closed and merged PRs are dropped", () => {
+		const s: any = {
+			"o/keep": { "1": { sha: "aaa" } },
+			"o/drop": { "2": { sha: "bbb" }, "3": { sha: "ccc" } },
+		}
+		// `threshold: 0` so the guard's `<=` comparison is actually crossed — with
+		// one open PR and `threshold: 1` the prune correctly declines to run, which
+		// the next test pins.
+		const open = new Set(["o/keep/1"])
+
+		pruneClosedFixState(s, open, { threshold: 0 })
+
+		// The repo object itself goes when its last PR is dead — leaving an empty
+		// `{}` behind would make the file look like it still tracks that repo.
+		expect(s["o/drop"]).toBeUndefined()
+		expect(s["o/keep"]["1"]).toEqual({ sha: "aaa" })
+	})
+
+	test("no pruning while the file is under the threshold", () => {
+		// The guard that makes this safe to ship: a bug in the open-PR set must not
+		// be able to wipe live state.
+		const s: any = { "o/r": { "1": { sha: "a" }, "2": { sha: "b" } } }
+		pruneClosedFixState(s, new Set(["o/r", "o/other"]), { threshold: 10 })
+		expect(Object.keys(s["o/r"])).toEqual(["1", "2"])
+	})
+
+	test("a PR seen as open is kept even in an otherwise dead repo", () => {
+		// The key is `repo/number` — a bare repo name matches nothing, which is
+		// exactly the mistake a caller could make.
+		const s: any = { "o/r": { "7": { sha: "a" }, "8": { sha: "b" } } }
+		pruneClosedFixState(s, new Set(["o/r/7"]), { threshold: 0 })
+		expect(Object.keys(s["o/r"])).toEqual(["7"])
+	})
+
+	test("an empty state is left alone", () => {
+		const s: any = {}
+		pruneClosedFixState(s, new Set(), { threshold: 0 })
+		expect(s).toEqual({})
 	})
 })

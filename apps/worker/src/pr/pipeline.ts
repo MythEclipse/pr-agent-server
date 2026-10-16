@@ -38,7 +38,13 @@
  */
 
 import { LOCK_FILE } from "../lock.ts"
-import { alreadyFixed, attemptCount, getSkipReason, shouldRetryAiFix } from "../state.ts"
+import {
+	alreadyFixed,
+	attemptCount,
+	getSkipReason,
+	pruneClosedFixState,
+	shouldRetryAiFix,
+} from "../state.ts"
 import { runUpstreamSync } from "../sync/run.ts"
 import type { ReportPort } from "./autofix.ts"
 import {
@@ -236,6 +242,23 @@ export async function runTick(deps: WorkerDeps): Promise<string[]> {
 		for (const open of allPrs) {
 			const r = await processPr(tick, open)
 			for (const k of COUNTERS) if (r[k]) counts[k] += 1
+		}
+
+		// Prune AFTER the PRs are processed, so this tick's own entries survive
+		// even if a PR is merged in the loop above. `allPrs` is the freshly
+		// gathered open set, which is exactly the authority the prune needs — and
+		// the reason it is safe: it ran against a real, non-empty scan rather than
+		// an assumed one.
+		if (!deps.dry) {
+			const fixState = deps.loadFixState()
+			const openKeys = new Set(
+				allPrs.map((o) => `${o.repo}/${o.pr?.number}`).filter((k) => !k.endsWith("undefined")),
+			)
+			const removed = pruneClosedFixState(fixState, openKeys)
+			if (removed > 0) {
+				deps.saveFixState(fixState)
+				report.push(`   🧹 Pruned ${removed} fix-state entr(ies) for closed/merged PRs`)
+			}
 		}
 
 		report.push(`\n${"=".repeat(50)}`)
