@@ -1,3 +1,10 @@
+## [1.0.12](https://github.com/asepharyana/pr-agent-server/compare/v1.0.11...v1.0.12) (2026-10-16)
+
+
+### Bug Fixes
+
+* **worker:** count red-CI waits on human PRs too, not only dependabot ([fca1778](https://github.com/asepharyana/pr-agent-server/commit/fca1778f7629cfdcd553ec2c1abcd84bd5237d78)), closes [GMW#109](https://github.com/GMW/issues/109)
+
 ## [1.0.11](https://github.com/asepharyana/pr-agent-server/compare/v1.0.10...v1.0.11) (2026-10-16)
 
 
