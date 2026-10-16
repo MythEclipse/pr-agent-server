@@ -142,8 +142,26 @@ export function loadFixState(file: string = FIX_STATE_FILE): FixState {
 	return readJsonTolerant<FixState>(file, {})
 }
 
-/** Above this many open PRs, dead entries are worth clearing out. */
-export const PRUNE_THRESHOLD = 25
+/**
+ * Above this many open PRs, dead entries are worth clearing out.
+ *
+ * Sized to the FLEET, not to a round number. This worker watches 8 repos and a
+ * typical tick sees 0–3 open PRs; the file held 36 entries on 2026-10-16, all of
+ * them for closed or merged PRs. At the original 25 the prune would essentially
+ * never have run, which makes it decoration rather than a guard.
+ *
+ * The threshold is a FLOOR ON SCAN QUALITY, not a statement about how busy the
+ * queue is. `gatherOpenPrs` returns `[]` when `/app/installations` fails and
+ * deliberately ignores the HTTP status (scan.ts), so a token problem, a rate
+ * limit, or a GitHub outage all look exactly like "no open PRs". Pruning on a
+ * short list is therefore how a state file gets destroyed. The only safe rule is
+ * one that treats a suspiciously small scan as no information at all.
+ *
+ * Which means: on a quiet day — the common day — the prune simply does not run.
+ * That is the intended trade. An overgrown file is a cosmetic problem; a wiped
+ * one is an unrecoverable one.
+ */
+export const PRUNE_THRESHOLD = 5
 
 /**
  * Drop fix-state entries for PRs that are no longer open.

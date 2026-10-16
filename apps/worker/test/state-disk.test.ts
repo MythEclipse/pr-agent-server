@@ -169,6 +169,24 @@ describe("pruning dead entries", () => {
 		expect(Object.keys(s["o/r"])).toEqual(["7"])
 	})
 
+	test("a SHORT scan prunes nothing — gatherOpenPrs returns [] on API failure", () => {
+		// The safety argument, pinned. `gatherOpenPrs` returns `[]` when
+		// `/app/installations` fails and deliberately ignores the HTTP status, so a
+		// bad token or a rate limit is indistinguishable from "no open PRs".
+		// Pruning on that list would delete every entry in the file.
+		const s: any = { "o/r": { "1": { sha: "a" } }, "o/dead": { "2": { sha: "b" } } }
+		// Two open PRs seen — below the threshold, so: no information, no action.
+		const shortScan = new Set(["o/r/1"])
+		expect(pruneClosedFixState(s, shortScan)).toBe(0)
+		expect(s["o/dead"]["2"]).toEqual({ sha: "b" })
+
+		// And with the default threshold rather than an injected one, so a change
+		// to PRUNE_THRESHOLD cannot quietly weaken this.
+		const s2: any = { "o/r": { "1": { sha: "a" } }, "o/dead": { "2": { sha: "b" } } }
+		expect(pruneClosedFixState(s2, new Set(["o/r/1"]))).toBe(0)
+		expect(s2["o/dead"]["2"]).toEqual({ sha: "b" })
+	})
+
 	test("an empty state is left alone", () => {
 		const s: any = {}
 		pruneClosedFixState(s, new Set(), { threshold: 0 })
