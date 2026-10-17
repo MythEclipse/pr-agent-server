@@ -1,3 +1,10 @@
+## [1.1.6](https://github.com/asepharyana/pr-agent-server/compare/v1.1.5...v1.1.6) (2026-10-17)
+
+
+### Bug Fixes
+
+* **worker:** reclaim the prompt audits too — the leak beside the clone ([0be3963](https://github.com/asepharyana/pr-agent-server/commit/0be3963d057836158cb07de8e642df5ab55e27bf))
+
 ## [1.1.5](https://github.com/asepharyana/pr-agent-server/compare/v1.1.4...v1.1.5) (2026-10-17)
 
 
