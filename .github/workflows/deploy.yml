@@ -30,7 +30,14 @@ jobs:
     runs-on: ubuntu-latest
     # workflow_run also fires when CI *fails*. Without this the box would be
     # updated from a commit that never passed.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    #
+    # `github.ref` is the second half and is NOT redundant with the line above: a
+    # manual `workflow_dispatch` RUNS THIS FILE FROM THE DISPATCHED REF and DOES
+    # receive the repository secrets, so `event_name == 'workflow_dispatch'` alone
+    # would let a dispatch aimed at a branch deploy that branch — `github.sha`
+    # resolves to the dispatched ref, not to main. Verified on mcpedia on
+    # 2026-10-17, where exactly that flipped production to a dependabot branch.
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') && github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v7
         with:
