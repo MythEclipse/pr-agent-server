@@ -1,3 +1,10 @@
+## [1.1.5](https://github.com/asepharyana/pr-agent-server/compare/v1.1.4...v1.1.5) (2026-10-17)
+
+
+### Bug Fixes
+
+* **worker:** the sweep's empty-scan guard switched it off exactly when it was needed ([4bb0edc](https://github.com/asepharyana/pr-agent-server/commit/4bb0edcfdcca856b229cc36e3ef0cdaf969e8f10))
+
 ## [1.1.4](https://github.com/asepharyana/pr-agent-server/compare/v1.1.3...v1.1.4) (2026-10-17)
 
 
