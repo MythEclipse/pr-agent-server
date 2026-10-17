@@ -259,6 +259,27 @@ export async function runTick(deps: WorkerDeps): Promise<string[]> {
 				deps.saveFixState(fixState)
 				report.push(`   🧹 Pruned ${removed} fix-state entr(ies) for closed/merged PRs`)
 			}
+			// Sweep the clone workdirs for those same closed PRs. The state prune
+			// above has always had a sibling missing: `/tmp/pr-queue-work` was
+			// cleaned ONLY on an error path, because the clone is deliberately
+			// REUSED across ticks (see the reuse comment in `autofix.ts`), so it
+			// accumulated one directory per PR ever touched and nothing removed
+			// the ones whose PR had long since closed. On 2026-10-17 that reached
+			// 56 dirs / 1.8G on a 7.8G tmpfs and filled it, failing an unrelated
+			// service's deploy with `No space left on device` — the tar staged
+			// its payload in /tmp.
+			//
+			// Safe by the same two rules as the state prune: it runs against a
+			// real non-empty scan, and it only removes workdirs whose PR is NOT
+			// open. A wrong open-PR set can therefore leave a workdir behind, but
+			// can never delete one that is in use. The skip threshold is reused
+			// rather than re-invented so a transiently empty scan cannot wipe
+			// every clone at once — re-cloning is cheap but not free, and the
+			// agent would lose a reused worktree mid-convergence.
+			const swept = deps.workdirs.sweepStale?.(openKeys) ?? 0
+			if (swept > 0) {
+				report.push(`   🧹 Swept ${swept} stale clone workdir(s) for closed PRs`)
+			}
 		}
 
 		report.push(`\n${"=".repeat(50)}`)

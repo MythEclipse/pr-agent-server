@@ -33,7 +33,7 @@
  *    happened to hold the real credential (the Task 8 lesson). Task 14 wires
  *    the real implementations.
  */
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { type GitResult, type GitRunner, redactCredentials, setBotIdentity } from "../git.ts"
 import type { GhClient } from "./scan.ts"
 
@@ -58,6 +58,18 @@ export type Workdirs = {
 	remove(path: string): void
 	writeFile(path: string, contents: string): void
 	readFile(path: string): string
+	/**
+	 * Remove clone workdirs whose PR is not in `openKeys`, and return how many
+	 * were removed. Optional so the many tests that inject a slim fake do not
+	 * each have to grow a method they never exercise.
+	 *
+	 * This is the missing half of `pruneClosedFixState`. The clone is REUSED
+	 * across ticks on purpose (see `autofix.ts`), and it was removed only on an
+	 * error path, so one directory per PR ever touched accumulated under
+	 * `/tmp/pr-queue-work` with nothing cleaning up after a PR closed. On
+	 * 2026-10-17 that filled a 7.8G tmpfs and broke an unrelated deploy.
+	 */
+	sweepStale?(openKeys: ReadonlySet<string>): number
 }
 
 /**
@@ -161,7 +173,71 @@ export function nodeWorkdirs(): Workdirs {
 			writeFileSync(p, c)
 		},
 		readFile: (p) => readFileSync(p, "utf8"),
+		sweepStale: (openKeys) => sweepStaleWorkdirs(TMP_BASE, openKeys),
 	}
+}
+
+/**
+ * The name→PR-key mapping for a workdir under `TMP_BASE`, or `null` when the name
+ * is not one of ours.
+ *
+ * THE INFIX IS LOAD-BEARING. Three flows create workdirs and only one has no
+ * infix:
+ *
+ *   autofix.ts   `${repo}_${pr}`                 -> asepharyana_hub_47
+ *   relock.ts    `${repo}_lockfix_${pr}`         -> asepharyana_hub_lockfix_47
+ *   relock.ts    `${repo}_bunfix_${pr}`          -> asepharyana_hub_bunfix_47
+ *
+ * `repo` is the full `owner/name` with slashes replaced by underscores, so the
+ * FIRST underscore separates owner from name and everything after the name is
+ * either the PR or an infix + the PR. Stripping the infix is not cosmetic: the
+ * naive `owner/name_<infix>/pr` key never matches the open set, so a LIVE PR's
+ * lockfix workdir would be swept mid-use — an agent run losing its clone, or a
+ * relock deleting the tree it is about to `bun install` into. Caught by writing
+ * the test against the real function instead of a copy of its logic.
+ */
+export function workdirPrKey(name: string): string | null {
+	const m = /^(.+)_(\d+)$/.exec(name)
+	if (!m) return null
+	const repoPart = m[1].replace(/_(?:lockfix|bunfix)$/, "")
+	const us = repoPart.indexOf("_")
+	if (us < 0) return null
+	return `${repoPart.slice(0, us)}/${repoPart.slice(us + 1)}/${m[2]}`
+}
+
+/**
+ * Remove every workdir under `dir` whose PR is not in `openKeys`; return the count.
+ *
+ * Split out of `nodeWorkdirs()` so it can be tested against a temp directory.
+ * An earlier version of this test re-implemented the mapping inline, which made
+ * it pass while the shipped code was wrong — a test that copies the logic it is
+ * meant to check verifies nothing.
+ *
+ * SAFETY. An unrecognised name is skipped rather than guessed at: one stale
+ * directory is cheap, a wrong `rm -rf` costs a running clone mid-agent-run. An
+ * empty `openKeys` returns early, because a transiently empty scan must not wipe
+ * every clone at once.
+ */
+export function sweepStaleWorkdirs(dir: string, openKeys: ReadonlySet<string>): number {
+	if (openKeys.size === 0) return 0
+	let names: string[]
+	try {
+		names = readdirSync(dir)
+	} catch {
+		return 0 // no such directory yet: nothing to sweep, not an error.
+	}
+	let removed = 0
+	for (const name of names) {
+		const key = workdirPrKey(name)
+		if (key === null || openKeys.has(key)) continue
+		try {
+			rmSync(`${dir}/${name}`, { recursive: true, force: true })
+			removed += 1
+		} catch {
+			// Leave it; one failure must not abort the tick's report.
+		}
+	}
+	return removed
 }
 
 // ── is_trivial_pr ───────────────────────────────────────────────────────────

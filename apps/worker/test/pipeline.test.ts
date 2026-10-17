@@ -25,7 +25,7 @@
  * lock being released when the tick throws.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
@@ -34,6 +34,7 @@ import type { GitResult, GitRunner } from "../src/git.ts"
 import { WorkerLock } from "../src/lock.ts"
 import { AI_FIX_RETRY_CEILING } from "../src/pr/context.ts"
 import type { ProcRunner, Workdirs } from "../src/pr/lockfix.ts"
+import { sweepStaleWorkdirs } from "../src/pr/lockfix.ts"
 import { processPr, runTick, UNRESOLVABLE_CONFLICT, type WorkerDeps } from "../src/pr/pipeline.ts"
 import type { FetchLike } from "../src/pr/review.ts"
 import type { GhAppClient } from "../src/pr/scan.ts"
@@ -1605,5 +1606,92 @@ describe("disposition — humans get closed, dependabot gets fixed", () => {
 
 		expect(closes(h.calls)).toHaveLength(0)
 		expect(h.lines.some((l) => l.includes("dry run: would close"))).toBe(true)
+	})
+})
+
+describe("clone workdirs are swept for closed PRs", () => {
+	// The missing sibling of `pruneClosedFixState`. `/tmp/pr-queue-work` was
+	// cleaned only on an error path — the clone is REUSED across ticks on purpose
+	// — so one directory per PR ever touched accumulated. On 2026-10-17 they
+	// reached 56 dirs / 1.8G on a 7.8G tmpfs and filled it, which failed an
+	// UNRELATED service's deploy with `No space left on device`, because the tar
+	// staged its payload in /tmp. A leak in one service must not be able to do
+	// that again.
+	const tmp = () => mkdtempSync(join(tmpdir(), "sweep-"))
+	const mk = (dir: string, names: string[]) => {
+		mkdirSync(dir, { recursive: true })
+		for (const n of names) mkdirSync(join(dir, n), { recursive: true })
+	}
+
+	test("removes workdirs for closed PRs and keeps open ones", () => {
+		// Exercises the REAL function, not a copy of its logic. An earlier version
+		// of this test re-implemented the mapping inline and passed while the
+		// shipped code was wrong.
+		const dir = tmp()
+		try {
+			mk(dir, ["asepharyana_hub_52", "asepharyana_GMW_109", "asepharyana_mcpedia_28"])
+			const removed = sweepStaleWorkdirs(dir, new Set(["asepharyana/hub/52"]))
+			expect(removed).toBe(2)
+			expect(readdirSync(dir)).toEqual(["asepharyana_hub_52"])
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	test("a live PR's lockfix/bunfix workdir is NOT swept", () => {
+		// The bug this test exists for. `relock.ts` builds
+		// `${repo}_lockfix_${pr}`, so the naive key is `owner/name_lockfix/pr` —
+		// which never matches the open set (`owner/name/pr`) and would have swept
+		// a live PR's relock tree out from under `bun install`.
+		const dir = tmp()
+		try {
+			mk(dir, [
+				// The REAL forms, from `relock.ts` (`${repo}_lockfix_${pr}`) — the PR
+				// number is the TRAILING token. A fixture like
+				// `asepharyana_hub_47_lockfix` is a name the code never produces,
+				// and writing it here is what made the first version of this test
+				// assert the wrong thing.
+				"asepharyana_hub_lockfix_47",
+				"asepharyana_hub_bunfix_47",
+				"asepharyana_hub_47",
+				"asepharyana_hub_lockfix_48", // closed — must go
+			])
+			const removed = sweepStaleWorkdirs(dir, new Set(["asepharyana/hub/47"]))
+			expect(removed).toBe(1)
+			expect(readdirSync(dir).sort()).toEqual([
+				"asepharyana_hub_47",
+				"asepharyana_hub_bunfix_47",
+				"asepharyana_hub_lockfix_47",
+			])
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	test("a non-numeric name is never swept", () => {
+		// Refusing to guess is the safety property: an unrecognised name costs one
+		// stale directory, a wrong `rm -rf` costs a running clone mid-agent-run.
+		const dir = tmp()
+		try {
+			mk(dir, ["claude_pr_6.prompt.txt", "some-random-dir", "notes"])
+			const removed = sweepStaleWorkdirs(dir, new Set(["asepharyana/hub/52"]))
+			expect(removed).toBe(0)
+			expect(readdirSync(dir)).toHaveLength(3)
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	test("an empty open set sweeps nothing", () => {
+		// A transiently empty scan (rate-limited API returning []) must not wipe
+		// every clone on the box — the same guard `pruneClosedFixState` carries.
+		const dir = tmp()
+		try {
+			mk(dir, ["asepharyana_hub_52", "asepharyana_GMW_109"])
+			expect(sweepStaleWorkdirs(dir, new Set())).toBe(0)
+			expect(readdirSync(dir)).toHaveLength(2)
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
 	})
 })
