@@ -1,3 +1,10 @@
+## [1.1.2](https://github.com/asepharyana/pr-agent-server/compare/v1.1.1...v1.1.2) (2026-10-17)
+
+
+### Bug Fixes
+
+* **ci:** gate deploy on github.ref, not event_name — a dispatch can target a branch ([81b3e58](https://github.com/asepharyana/pr-agent-server/commit/81b3e58dccd421aeb85240912d241c07f5b78a86))
+
 ## [1.1.1](https://github.com/asepharyana/pr-agent-server/compare/v1.1.0...v1.1.1) (2026-10-16)
 
 
