@@ -197,6 +197,10 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 export async function runTick(deps: WorkerDeps): Promise<string[]> {
 	const lines: string[] = []
 	const start = deps.now()
+	// Set by the workdir sweep below and reported on both the normal and the
+	// empty-queue return path. Declared here because the sweep runs before the
+	// report header is built.
+	let sweepNotice = ""
 
 	const lock = deps.lock.acquire(LOCK_FILE)
 	if (!lock) return lines // Python lines 1837-1838
@@ -228,10 +232,41 @@ export async function runTick(deps: WorkerDeps): Promise<string[]> {
 			{ dry: deps.dry },
 		)
 		const allPrs = await gatherOpenPrs(deps.api)
-		if (!allPrs.length && !syncLines.length) return lines // Python lines 1847-1848
+		// Sweep BEFORE the empty-queue early return. The sweep used to sit after
+		// it, which meant it never ran in the one state that matters most: with
+		// zero open PRs the whole queue is stale, and that is exactly when the
+		// early return fired. Measured on 2026-10-17 — 0 open PRs across every
+		// repo, 56 stale workdirs, and no sweep line in the report.
+		//
+		// Safe to run unconditionally because `sweepStaleWorkdirs` requires BOTH
+		// that the PR be absent from the open set AND that the directory be older
+		// than `SWEEP_MIN_AGE_HOURS`. A failed or partial scan can therefore only
+		// remove directories that are already old; a live clone is never old,
+		// because a tick reuses and re-fetches it. The two conditions agreeing is
+		// what makes this correct under a bad scan, and it is why the age floor is
+		// not just a nicety.
+		//
+		// NOT a `skip_reason` and NOT left to chance: this is the same leak that
+		// filled a 7.8G tmpfs and broke an unrelated service's deploy.
+		if (!deps.dry) {
+			const openKeys = new Set(
+				allPrs.map((o) => `${o.repo}/${o.pr?.number}`).filter((k) => !k.endsWith("undefined")),
+			)
+			const swept = deps.workdirs.sweepStale?.(openKeys) ?? 0
+			if (swept > 0) {
+				// Reported before the header so the count lands even on the
+				// empty-queue return path below.
+				sweepNotice = `   🧹 Swept ${swept} stale clone workdir(s) for closed PRs`
+			}
+		}
+		if (!allPrs.length && !syncLines.length) {
+			if (sweepNotice) lines.push(sweepNotice)
+			return lines // Python lines 1847-1848
+		}
 
 		report.push(`🔍 PR Queue Worker — ${ctime(start)}`)
 		report.push("=".repeat(50))
+		if (sweepNotice) report.push(sweepNotice)
 		for (const line of syncLines) report.push(line) // Python lines 1852-1853
 		if (allPrs.length) {
 			report.push(`📋 Found ${allPrs.length} open PR(s) to process`)

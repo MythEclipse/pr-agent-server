@@ -206,7 +206,29 @@ export function workdirPrKey(name: string): string | null {
 }
 
 /**
- * Remove every workdir under `dir` whose PR is not in `openKeys`; return the count.
+ * How old a workdir must be before the sweep will touch it.
+ *
+ * THIS IS THE SAFETY OF THE SWEEP, not a tidiness knob. The open-PR set comes
+ * from `gatherOpenPrs`, which can return a PARTIAL list (a rate-limited or
+ * failed `/repos/:r/pulls` call yields fewer PRs, not an error). A PR that is
+ * open but missing from that list would have its workdir swept — and if a tick is
+ * mid-agent-run in that very directory, the clone disappears under it.
+ *
+ * The floor closes that hole because the two conditions have to AGREE: a live
+ * workdir is one a tick is using right now, so its mtime is minutes old at most;
+ * a stale one has not been touched since its PR closed. Requiring both makes a
+ * bad scan able to remove only directories that are already old, which is exactly
+ * the set nobody is using.
+ *
+ * 6h, not the 12h of the host-level reaper: this one additionally requires the PR
+ * to be absent from a live scan, so it can afford a lower floor — and the worker
+ * runs every 5 minutes, whereas the reaper runs hourly.
+ */
+export const SWEEP_MIN_AGE_HOURS = 6
+
+/**
+ * Remove every workdir under `dir` whose PR is not in `openKeys` AND whose mtime
+ * is older than the age floor; return the count.
  *
  * Split out of `nodeWorkdirs()` so it can be tested against a temp directory.
  * An earlier version of this test re-implemented the mapping inline, which made
@@ -217,9 +239,19 @@ export function workdirPrKey(name: string): string | null {
  * directory is cheap, a wrong `rm -rf` costs a running clone mid-agent-run. An
  * empty `openKeys` returns early, because a transiently empty scan must not wipe
  * every clone at once.
+ *
+ * @param opts.minAgeMs age floor; 0 disables it (tests only — see the two
+ *   dedicated cases, which exercise the real floor via `utimesSync`).
+ * @param opts.now injected clock, so a test never depends on wall time.
  */
-export function sweepStaleWorkdirs(dir: string, openKeys: ReadonlySet<string>): number {
+export function sweepStaleWorkdirs(
+	dir: string,
+	openKeys: ReadonlySet<string>,
+	opts: { minAgeMs?: number; now?: number } = {},
+): number {
 	if (openKeys.size === 0) return 0
+	const minAgeMs = opts.minAgeMs ?? SWEEP_MIN_AGE_HOURS * 3_600_000
+	const now = opts.now ?? Date.now()
 	let names: string[]
 	try {
 		names = readdirSync(dir)
@@ -230,8 +262,18 @@ export function sweepStaleWorkdirs(dir: string, openKeys: ReadonlySet<string>): 
 	for (const name of names) {
 		const key = workdirPrKey(name)
 		if (key === null || openKeys.has(key)) continue
+		const path = `${dir}/${name}`
+		// `statSync`, not the dirent's type: the mtime is what decides here, and a
+		// broken symlink (a real leftover shape) must still be swept.
+		let mtimeMs: number
 		try {
-			rmSync(`${dir}/${name}`, { recursive: true, force: true })
+			mtimeMs = statSync(path).mtimeMs
+		} catch {
+			continue // vanished between readdir and stat; nothing to do.
+		}
+		if (now - mtimeMs < minAgeMs) continue
+		try {
+			rmSync(path, { recursive: true, force: true })
 			removed += 1
 		} catch {
 			// Leave it; one failure must not abort the tick's report.

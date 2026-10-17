@@ -25,7 +25,7 @@
  * lock being released when the tick throws.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
@@ -34,7 +34,7 @@ import type { GitResult, GitRunner } from "../src/git.ts"
 import { WorkerLock } from "../src/lock.ts"
 import { AI_FIX_RETRY_CEILING } from "../src/pr/context.ts"
 import type { ProcRunner, Workdirs } from "../src/pr/lockfix.ts"
-import { sweepStaleWorkdirs } from "../src/pr/lockfix.ts"
+import { SWEEP_MIN_AGE_HOURS, sweepStaleWorkdirs } from "../src/pr/lockfix.ts"
 import { processPr, runTick, UNRESOLVABLE_CONFLICT, type WorkerDeps } from "../src/pr/pipeline.ts"
 import type { FetchLike } from "../src/pr/review.ts"
 import type { GhAppClient } from "../src/pr/scan.ts"
@@ -1618,9 +1618,17 @@ describe("clone workdirs are swept for closed PRs", () => {
 	// staged its payload in /tmp. A leak in one service must not be able to do
 	// that again.
 	const tmp = () => mkdtempSync(join(tmpdir(), "sweep-"))
-	const mk = (dir: string, names: string[]) => {
+	// Backdated past the real `SWEEP_MIN_AGE_HOURS` floor by default, so every
+	// case below exercises the shipped threshold rather than a bypass. A case
+	// that wants a FRESH directory says so explicitly (see the "FRESH workdir"
+	// test, which is the one that must stay fresh).
+	const mk = (dir: string, names: string[], ageHours = SWEEP_MIN_AGE_HOURS + 1) => {
 		mkdirSync(dir, { recursive: true })
-		for (const n of names) mkdirSync(join(dir, n), { recursive: true })
+		const old = new Date(Date.now() - ageHours * 3_600_000)
+		for (const n of names) {
+			mkdirSync(join(dir, n), { recursive: true })
+			utimesSync(join(dir, n), old, old)
+		}
 	}
 
 	test("removes workdirs for closed PRs and keeps open ones", () => {
@@ -1690,6 +1698,40 @@ describe("clone workdirs are swept for closed PRs", () => {
 			mk(dir, ["asepharyana_hub_52", "asepharyana_GMW_109"])
 			expect(sweepStaleWorkdirs(dir, new Set())).toBe(0)
 			expect(readdirSync(dir)).toHaveLength(2)
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	test("a FRESH workdir is not swept even when its PR is absent from the scan", () => {
+		// THE LOAD-BEARING GUARD. `gatherOpenPrs` can return a PARTIAL list — a
+		// rate-limited or failed per-repo call yields fewer PRs, not an error. So
+		// "PR not in the open set" alone would delete a workdir a tick is using
+		// RIGHT NOW. The age floor is what closes that, because the two conditions
+		// must AGREE: a directory in active use was touched minutes ago.
+		const dir = tmp()
+		try {
+			// ageHours = 0: mtime is NOW, which is the whole point of this case.
+			mk(dir, ["asepharyana_hub_47"], 0)
+			// PR absent from the scan: exactly the dangerous case.
+			const removed = sweepStaleWorkdirs(dir, new Set(["asepharyana/other/1"]))
+			expect(removed).toBe(0)
+			expect(readdirSync(dir)).toEqual(["asepharyana_hub_47"])
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	test("an OLD workdir whose PR is absent from the scan IS swept", () => {
+		// The other half: the floor must not make the sweep inert. `mk` backdates
+		// past the real floor, and this asserts removal — so the guard is proven
+		// to be a threshold rather than an off switch.
+		const dir = tmp()
+		try {
+			mk(dir, ["asepharyana_hub_47"])
+			const removed = sweepStaleWorkdirs(dir, new Set(["asepharyana/other/1"]))
+			expect(removed).toBe(1)
+			expect(readdirSync(dir)).toHaveLength(0)
 		} finally {
 			rmSync(dir, { recursive: true, force: true })
 		}
