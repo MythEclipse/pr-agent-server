@@ -25,7 +25,7 @@
  * lock being released when the tick throws.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
@@ -34,7 +34,7 @@ import type { GitResult, GitRunner } from "../src/git.ts"
 import { WorkerLock } from "../src/lock.ts"
 import { AI_FIX_RETRY_CEILING } from "../src/pr/context.ts"
 import type { ProcRunner, Workdirs } from "../src/pr/lockfix.ts"
-import { SWEEP_MIN_AGE_HOURS, sweepStaleWorkdirs } from "../src/pr/lockfix.ts"
+import { SWEEP_MIN_AGE_HOURS, sweepPromptAudits, sweepStaleWorkdirs } from "../src/pr/lockfix.ts"
 import { processPr, runTick, UNRESOLVABLE_CONFLICT, type WorkerDeps } from "../src/pr/pipeline.ts"
 import type { FetchLike } from "../src/pr/review.ts"
 import type { GhAppClient } from "../src/pr/scan.ts"
@@ -1739,6 +1739,40 @@ describe("clone workdirs are swept for closed PRs", () => {
 			const removed = sweepStaleWorkdirs(dir, new Set(["asepharyana/other/1"]))
 			expect(removed).toBe(1)
 			expect(readdirSync(dir)).toHaveLength(0)
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	test("prompt audits in the PARENT dir are reclaimed by age", () => {
+		// The second leak, and it is invisible to a sweep that only walks the
+		// clone directory: `claude-agent.ts` writes `<label>.prompt.txt` beside the
+		// workdir, so it lands in TMP_BASE itself. 35 had accumulated when this was
+		// found — one per agent run, none ever removed, because sweeping the
+		// directory removes the clone and leaves the file standing next to it.
+		const dir = mkdtempSync(join(tmpdir(), "audit-"))
+		try {
+			const now = Date.now()
+			const write = (name: string, ageDays: number) => {
+				writeFileSync(join(dir, name), "prompt")
+				const t = new Date(now - ageDays * 86_400_000)
+				utimesSync(join(dir, name), t, t)
+			}
+			write("claude_pr_109.prompt.txt", 30) // old — reclaimed
+			write("claude_pr_114.prompt.txt", 8) // past 7d — reclaimed
+			write("claude_pr_29.prompt.txt", 0) // fresh — kept
+			// Not ours: the state files, the lock, unrelated leftovers. A sweep that
+			// matched loosely here would delete the worker's own queue memory.
+			write("pr-queue-fix-state.json", 30)
+			write("ks-backup.yaml", 30)
+
+			const removed = sweepPromptAudits(dir)
+			expect(removed).toBe(2)
+			expect(readdirSync(dir).sort()).toEqual([
+				"claude_pr_29.prompt.txt",
+				"ks-backup.yaml",
+				"pr-queue-fix-state.json",
+			])
 		} finally {
 			rmSync(dir, { recursive: true, force: true })
 		}

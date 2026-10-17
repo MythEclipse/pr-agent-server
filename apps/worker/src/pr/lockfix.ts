@@ -173,7 +173,12 @@ export function nodeWorkdirs(): Workdirs {
 			writeFileSync(p, c)
 		},
 		readFile: (p) => readFileSync(p, "utf8"),
-		sweepStale: (openKeys) => sweepStaleWorkdirs(TMP_BASE, openKeys),
+		sweepStale: (openKeys) =>
+			// Both leaks, one call: the clone workdirs keyed by open-PR set (plus
+			// the age floor), and the prompt audits beside them keyed by age alone.
+			// The second is easy to miss because it lives in the PARENT, not in the
+			// directory the clone sweep walks.
+			sweepStaleWorkdirs(TMP_BASE, openKeys) + sweepPromptAudits(TMP_BASE),
 	}
 }
 
@@ -289,6 +294,67 @@ export function sweepStaleWorkdirs(
 			removed += 1
 		} catch {
 			// Leave it; one failure must not abort the tick's report.
+		}
+	}
+	return removed
+}
+
+/**
+ * Reclaim prompt-audit files in a workdir parent that are older than the floor.
+ *
+ * THE SECOND LEAK. `claude-agent.ts` writes `<label>.prompt.txt` beside the
+ * workdir rather than inside it (`writeBestEffort(dirname(opts.workdir), …)`), so
+ * it lands in `TMP_BASE` itself and is NOT covered by the workdir sweep — sweeping
+ * directories removes the clone but leaves the file standing next to it forever.
+ * 35 of them had accumulated when this was found, every one from a PR whose clone
+ * had already been reclaimed.
+ *
+ * KEYED ON AGE ONLY, deliberately. The label is `claude_pr_<n>` — a PR number with
+ * NO repo — so it cannot be matched against the open-PR set at all. Age is the
+ * only signal available, and it is sufficient for an audit artifact: these exist
+ * so a human can read what the agent was asked after the fact, which a day-old
+ * file still serves. The floor therefore guards reachability of that purpose, not
+ * correctness of the queue.
+ *
+ * 7 days rather than the workdir floor's 6h, because this is the opposite trade:
+ * the file is tiny (about 1.2K), it is never read by the worker, and its whole
+ * value is being there when something needs explaining. Long enough to survive a
+ * weekend debugging session; short enough to not accumulate for a year.
+ */
+export const PROMPT_AUDIT_KEEP_DAYS = 7
+
+export function sweepPromptAudits(
+	dir: string,
+	opts: { minAgeMs?: number; now?: number } = {},
+): number {
+	const minAgeMs = opts.minAgeMs ?? PROMPT_AUDIT_KEEP_DAYS * 86_400_000
+	const now = opts.now ?? Date.now()
+	let names: string[]
+	try {
+		names = readdirSync(dir)
+	} catch {
+		return 0
+	}
+	let removed = 0
+	for (const name of names) {
+		// `<label>.prompt.txt` is the only shape this owns. Anything else in the
+		// parent — the state files, the lock, `cc-socks`, the pnpm store — is
+		// either protected by the host reaper or belongs to another run, and is
+		// NOT matched here.
+		if (!name.endsWith(".prompt.txt")) continue
+		const path = `${dir}/${name}`
+		let mtimeMs: number
+		try {
+			mtimeMs = statSync(path).mtimeMs
+		} catch {
+			continue
+		}
+		if (now - mtimeMs < minAgeMs) continue
+		try {
+			rmSync(path, { force: true })
+			removed += 1
+		} catch {
+			// Leave it.
 		}
 	}
 	return removed

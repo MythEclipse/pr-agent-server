@@ -256,7 +256,7 @@ export async function runTick(deps: WorkerDeps): Promise<string[]> {
 			if (swept > 0) {
 				// Reported before the header so the count lands even on the
 				// empty-queue return path below.
-				sweepNotice = `   🧹 Swept ${swept} stale clone workdir(s) for closed PRs`
+				sweepNotice = `   🧹 Swept ${swept} stale clone workdir(s) / prompt audit(s) for closed PRs`
 			}
 		}
 		if (!allPrs.length && !syncLines.length) {
