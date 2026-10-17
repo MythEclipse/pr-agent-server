@@ -208,17 +208,32 @@ export function workdirPrKey(name: string): string | null {
 /**
  * How old a workdir must be before the sweep will touch it.
  *
- * THIS IS THE SAFETY OF THE SWEEP, not a tidiness knob. The open-PR set comes
- * from `gatherOpenPrs`, which can return a PARTIAL list (a rate-limited or
- * failed `/repos/:r/pulls` call yields fewer PRs, not an error). A PR that is
- * open but missing from that list would have its workdir swept — and if a tick is
- * mid-agent-run in that very directory, the clone disappears under it.
+ * THIS IS THE SAFETY OF THE SWEEP — the ONLY guard, and not a tidiness knob.
  *
- * The floor closes that hole because the two conditions have to AGREE: a live
- * workdir is one a tick is using right now, so its mtime is minutes old at most;
- * a stale one has not been touched since its PR closed. Requiring both makes a
- * bad scan able to remove only directories that are already old, which is exactly
- * the set nobody is using.
+ * The open-PR set comes from `gatherOpenPrs`, which can return a PARTIAL list or
+ * an empty one on failure (a rate-limited or failed `/repos/:r/pulls` call yields
+ * FEWER PRs, not an error), so "absent from the open set" alone is not grounds to
+ * `rm -rf` anything: an open PR missing from a broken scan would have its workdir
+ * deleted, and if a tick were mid-agent-run in that directory the clone would
+ * vanish under it.
+ *
+ * The age floor closes that, because the two conditions must AGREE. A directory a
+ * tick is using was touched minutes ago — the reuse path re-fetches and checks it
+ * out every pass — while a stale one has not been touched since its PR closed. So
+ * a bad scan can only ever remove directories nobody is using.
+ *
+ * AN EMPTY SCAN IS NOT SPECIAL, and an earlier revision got this wrong. It
+ * returned early on `openKeys.size === 0`, which switched the sweep OFF in the one
+ * state that accumulates the most garbage: with no open PRs anywhere, every
+ * workdir is stale by definition. Measured on 2026-10-17 — 0 open PRs across all
+ * repos, 56 stale workdirs, sweep skipped, /tmp still filling. The empty case is
+ * now handled by the same age floor as every other case, which is the whole point
+ * of having one: it does not need to know WHY a PR is missing from the scan.
+ *
+ * The cost of being wrong here is bounded and self-healing: deleting an old
+ * workdir whose PR was merely invisible in a bad scan costs one re-clone on the
+ * next good tick. NOT deleting is unbounded — it filled a 7.8G tmpfs and broke an
+ * unrelated service's deploy. That asymmetry is why the floor is the only guard.
  *
  * 6h, not the 12h of the host-level reaper: this one additionally requires the PR
  * to be absent from a live scan, so it can afford a lower floor — and the worker
@@ -236,12 +251,10 @@ export const SWEEP_MIN_AGE_HOURS = 6
  * meant to check verifies nothing.
  *
  * SAFETY. An unrecognised name is skipped rather than guessed at: one stale
- * directory is cheap, a wrong `rm -rf` costs a running clone mid-agent-run. An
- * empty `openKeys` returns early, because a transiently empty scan must not wipe
- * every clone at once.
+ * directory is cheap, a wrong `rm -rf` costs a running clone mid-agent-run.
  *
- * @param opts.minAgeMs age floor; 0 disables it (tests only — see the two
- *   dedicated cases, which exercise the real floor via `utimesSync`).
+ * @param opts.minAgeMs age floor; 0 disables it (tests only — the suite's `mk`
+ *   helper backdates past the real floor so the shipped threshold is exercised).
  * @param opts.now injected clock, so a test never depends on wall time.
  */
 export function sweepStaleWorkdirs(
@@ -249,7 +262,6 @@ export function sweepStaleWorkdirs(
 	openKeys: ReadonlySet<string>,
 	opts: { minAgeMs?: number; now?: number } = {},
 ): number {
-	if (openKeys.size === 0) return 0
 	const minAgeMs = opts.minAgeMs ?? SWEEP_MIN_AGE_HOURS * 3_600_000
 	const now = opts.now ?? Date.now()
 	let names: string[]

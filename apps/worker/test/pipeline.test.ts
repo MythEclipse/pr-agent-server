@@ -1690,14 +1690,21 @@ describe("clone workdirs are swept for closed PRs", () => {
 		}
 	})
 
-	test("an empty open set sweeps nothing", () => {
-		// A transiently empty scan (rate-limited API returning []) must not wipe
-		// every clone on the box — the same guard `pruneClosedFixState` carries.
+	test("an empty scan sweeps OLD workdirs (the case that filled /tmp)", () => {
+		// This test previously asserted the OPPOSITE — that an empty open set
+		// sweeps nothing — and it was wrong. Zero open PRs is exactly when the
+		// garbage accumulates: with no PRs anywhere, every workdir is stale by
+		// definition. Measured on 2026-10-17: 0 open PRs, 56 stale workdirs, sweep
+		// skipped, /tmp kept filling until it broke another service's deploy.
+		//
+		// The age floor is what makes this safe without a special case. A failed
+		// or partial scan cannot delete a directory a tick is using, because such
+		// a directory was touched minutes ago; only OLD ones go.
 		const dir = tmp()
 		try {
-			mk(dir, ["asepharyana_hub_52", "asepharyana_GMW_109"])
-			expect(sweepStaleWorkdirs(dir, new Set())).toBe(0)
-			expect(readdirSync(dir)).toHaveLength(2)
+			mk(dir, ["asepharyana_hub_52", "asepharyana_GMW_109"]) // backdated = old
+			expect(sweepStaleWorkdirs(dir, new Set())).toBe(2)
+			expect(readdirSync(dir)).toHaveLength(0)
 		} finally {
 			rmSync(dir, { recursive: true, force: true })
 		}
