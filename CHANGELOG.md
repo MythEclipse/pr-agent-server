@@ -1,3 +1,10 @@
+## [1.1.4](https://github.com/asepharyana/pr-agent-server/compare/v1.1.3...v1.1.4) (2026-10-17)
+
+
+### Bug Fixes
+
+* **worker:** run the workdir sweep before the empty-queue return, with an age floor ([581fd3f](https://github.com/asepharyana/pr-agent-server/commit/581fd3f86543727684f15a4e34db235629d5f95a))
+
 ## [1.1.3](https://github.com/asepharyana/pr-agent-server/compare/v1.1.2...v1.1.3) (2026-10-17)
 
 
