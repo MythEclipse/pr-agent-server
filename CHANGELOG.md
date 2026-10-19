@@ -1,3 +1,5 @@
+## [1.1.8](https://github.com/asepharyana/pr-agent-server/compare/v1.1.7...v1.1.8) (2026-10-19)
+
 ## [1.1.7](https://github.com/asepharyana/pr-agent-server/compare/v1.1.6...v1.1.7) (2026-10-19)
 
 
