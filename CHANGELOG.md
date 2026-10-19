@@ -1,3 +1,10 @@
+## [1.1.11](https://github.com/asepharyana/pr-agent-server/compare/v1.1.10...v1.1.11) (2026-10-19)
+
+
+### Bug Fixes
+
+* **worker:** stop the test suite posting to the live Discord channel ([132399c](https://github.com/asepharyana/pr-agent-server/commit/132399c18ce20e2fde99c4c8983fccea2a4a9461))
+
 ## [1.1.10](https://github.com/asepharyana/pr-agent-server/compare/v1.1.9...v1.1.10) (2026-10-19)
 
 
