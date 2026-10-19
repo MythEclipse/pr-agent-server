@@ -141,6 +141,60 @@ function readSecurityRow(body: string): { verdict: SecurityVerdict; detail: stri
 		.trim()
 	return { verdict: SEC_NEGATION.test(detail) || detail === "" ? "clear" : "concern", detail }
 }
+
+/**
+ * The heading a ⚡ row uses when it carries the model's findings list. TWO
+ * labels, both live: the renderer maps `key_issues_to_review` to "Key issues to
+ * review" and `recommended_focus_areas_for_review` to "Recommended focus areas
+ * for review" (markdown.ts's EMOJIS table). Both are the same field with the
+ * same meaning.
+ */
+const ISSUES_ROW_HEADING = /key issues to review|recommended focus areas for review/i
+
+/**
+ * Read the ⚡ row's CONTENT rather than matching a phrase in it.
+ *
+ * WHY THIS EXISTS, and it is the same failure the `🔒` row had. When the
+ * model's issue list is EMPTY, the renderer emits filler text under a heading
+ * that names the field rather than the verdict:
+ *
+ *   <tr><td>⚡&nbsp;<strong>Key issues to review</strong><br><br>
+ *
+ *   No key issues identified
+ *   </td></tr>
+ *
+ * That is a review reporting NOTHING to fix. `ISSUES_CLEAR` only recognises the
+ * other rendering (`⚡ No major issues detected`, the Python's line 370), so
+ * this shape fell to the `else` and scored `⚠️ Issues unclear` — a point off,
+ * and an operator told the review was inconclusive when it said the opposite.
+ * That is the exact line in the hub#53 ops report, and 49 hub/GMW PRs carry
+ * this body. Same inversion as GMW#109: the verdict is in the row's CONTENT, so
+ * read the content.
+ *
+ * @returns "clear" for an empty or negated row, "reported" when it holds items,
+ *   "absent" when no ⚡ row with a findings heading is present at all.
+ */
+function readIssuesRow(body: string): "clear" | "reported" | "absent" {
+	const start = body.indexOf("⚡")
+	if (start < 0) return "absent"
+	const rest = body.slice(start + "⚡".length)
+	const end = SEC_SECTION_END.exec(rest)?.index
+	const row = end === undefined ? rest : rest.slice(0, end)
+	// No findings heading → this is some other ⚡ row (or the phrase shape),
+	// which `ISSUES_CLEAR`/`ISSUES_DANGER` have already had their say on.
+	if (!ISSUES_ROW_HEADING.test(row)) return "absent"
+	// Unwrap the HTML and strip the heading, leaving only the model's own value
+	// — the same treatment the security row gets, and for the same reason: the
+	// heading names the FIELD, so leaving it in would read as content.
+	const detail = row
+		.replace(/<[^>]*>/g, " ")
+		.replace(/```[a-z]*|~~~|&nbsp;/gi, " ")
+		.replace(/key issues to review|recommended focus areas for review/gi, " ")
+		.replace(/^[>\s*+-]+/gm, " ")
+		.trim()
+	return SEC_NEGATION.test(detail) || detail === "" ? "clear" : "reported"
+}
+
 /** Python line 370. */
 const ISSUES_CLEAR = /⚡.*No major (issues|problems) detected/
 /** Python line 371. */
@@ -187,7 +241,19 @@ export function analyzeReviewSafety(body: string): SafetyResult {
 		reasons.push("⚠️ No security row in the review")
 	}
 
-	if (ISSUES_CLEAR.test(body)) {
+	// The ⚡ row, in both of its live shapes. The findings-list heading
+	// (`Key issues to review`) says nothing by itself — what it CONTAINS does —
+	// so an empty or negated row reads as clear.
+	//
+	// CLEAR IS TESTED FIRST, and that order is load-bearing, not stylistic:
+	// `ISSUES_DANGER` is case-insensitive and `major issue` is a SUBSTRING of
+	// `No major issues detected`, so testing danger first blocks every clean
+	// review. The row reading is ORed into the clear arm rather than given its
+	// own branch, so a body with a real finding under any heading still falls to
+	// `unclear` exactly as it did before — this change only rescues the empty
+	// row, it does not widen what blocks.
+	const issues = readIssuesRow(body)
+	if (issues === "clear" || ISSUES_CLEAR.test(body)) {
 		reasons.push("✅ No major issues")
 		score += 2
 	} else if (ISSUES_DANGER.test(body)) {

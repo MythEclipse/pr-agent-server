@@ -50,6 +50,8 @@ const FETCH_TIMEOUT_SEC = 30 // lines 851-854
 const CHECKOUT_TIMEOUT_SEC = 30
 const DIFF_TIMEOUT_SEC = 15 // lines 857-860
 const REV_LIST_TIMEOUT_SEC = 10 // lines 929-932
+/** The post-push `git rev-parse HEAD` that reads back the tip the fix landed. */
+const REV_PARSE_TIMEOUT_SEC = 10
 const PUSH_TIMEOUT_SEC = 60 // lines 943-946
 /** Python `time.sleep(2)` between SIGTERM and SIGKILL (line 804). */
 const SIGKILL_GRACE_MS = 2000
@@ -253,6 +255,14 @@ export function buildAiFixPrompt(
 }
 
 /**
+ * The `run_ai_fix` verdict. `tipSha` is the commit the branch is at AFTER the
+ * worker's push — the head a `markFixed` record must name (see `stepAiFix`).
+ * Empty whenever nothing was pushed, which makes "no push" indistinguishable
+ * from "push did not move anything", exactly as it should be.
+ */
+export type AiFixResult = { ok: boolean; summary: string; commits: number; tipSha: string }
+
+/**
  * Python `run_ai_fix(repo_full, pr_num, title, head_sha, head_ref, base_ref,
  * token)` (lines 825-961).
  *
@@ -278,7 +288,7 @@ export async function runAiFix(
 	headRef: string,
 	baseRef: string,
 	token: string,
-): Promise<{ ok: boolean; summary: string; commits: number }> {
+): Promise<AiFixResult> {
 	const { run, workdirs, agent, api } = deps
 	// NOTE: no `_lockfix_`/`_bunfix_` infix here (Python line 831), so the three
 	// flows' workdirs cannot collide in /tmp. `TMP_BASE` is the shared constant,
@@ -309,6 +319,7 @@ export async function runAiFix(
 			return {
 				ok: false,
 				commits: 0,
+				tipSha: "",
 				summary: `clone failed: ${head(reportable(cloned.stderr), 200)}`,
 			} // line 845
 		}
@@ -326,6 +337,7 @@ export async function runAiFix(
 				return {
 					ok: false,
 					commits: 0,
+					tipSha: "",
 					summary: `clone failed: ${head(reportable(cloned.stderr), 200)}`,
 				}
 			}
@@ -381,7 +393,7 @@ export async function runAiFix(
 
 	if (!changedFiles.length) {
 		workdirs.remove(workdir)
-		return { ok: false, commits: 0, summary: "no changed files to fix" } // Python line 880
+		return { ok: false, commits: 0, tipSha: "", summary: "no changed files to fix" } // Python line 880
 	}
 
 	const prompt = buildAiFixPrompt(pr, repo, title, baseRef, changedFiles)
@@ -406,7 +418,7 @@ export async function runAiFix(
 		// `reportable` is narrow (http(s) userinfo only), so an ordinary `[INFRA]`
 		// line is byte-identical and the skip-once pipeline still matches. See
 		// :398 for the same wrap on the other snippet site.
-		return { ok: false, commits: 0, summary: reportable(snippet) }
+		return { ok: false, commits: 0, tipSha: "", summary: reportable(snippet) }
 	}
 
 	// Python lines 927-939. Twelve characters of the ORIGINAL head sha: a full
@@ -433,10 +445,26 @@ export async function runAiFix(
 			return {
 				ok: false,
 				commits: 0,
+				tipSha: "",
 				summary: `AI committed but push failed: ${head(detail, PUSH_DETAIL)}`,
 			}
 		}
 	}
+
+	// THE TIP THE PUSH CREATED, read while the workdir still exists. This is the
+	// head a `markFixed` record must name: the caller cannot get it from GitHub,
+	// because `GET /pulls/:n` lags the push by seconds-to-minutes and that lag is
+	// precisely how hub#53 looped. Read here rather than at the call site because
+	// the workdir is removed a few lines down, and because `HEAD` in it IS the
+	// pushed commit — the same object that is now on the branch.
+	//
+	// Best-effort by design: an unreadable tip stays empty and the caller falls
+	// back to the head it already had, which is the pre-fix behaviour. A missing
+	// optimisation must never turn a successful fix into a failure.
+	const tip = committed
+		? run(["rev-parse", "HEAD"], workdir, REV_PARSE_TIMEOUT_SEC).stdout.trim()
+		: ""
+	const tipSha = /^[0-9a-f]{40}$/i.test(tip) ? tip : ""
 
 	// BEFORE the teardown below: `workdir` is gone a few lines down, and this is
 	// the only reading of what the agent left behind.
@@ -464,6 +492,7 @@ export async function runAiFix(
 		return {
 			ok: true,
 			commits: newCommits,
+			tipSha,
 			summary: `Claude Code pushed ${newCommits} improvement commit(s)`,
 		} // line 959
 	// `reportable` BEFORE `head()`: same untrusted-agent-text reasoning as the
@@ -497,6 +526,8 @@ export async function runAiFix(
 		// no commit, but the workdir is discarded for that case, so 0 is right
 		// for both.
 		commits: 0,
+		// Nothing was pushed, so there is no new head to name.
+		tipSha: "",
 		summary: cleanTree
 			? `Claude Code found nothing to improve — no changes needed (${head(said, SNIPPET)})`
 			: `Claude Code ran but left uncommitted changes (${head(said, SNIPPET)})`,

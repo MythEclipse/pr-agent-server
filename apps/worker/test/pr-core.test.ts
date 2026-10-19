@@ -171,6 +171,55 @@ describe("safety — detail beyond the brief table", () => {
 		expect(r.safe).toBe(true)
 	})
 
+	test("an EMPTY 'Key issues to review' row is clean, not unclear", () => {
+		// The live hub#53/#54/#52 body, transcribed from the PR comment. The
+		// renderer's `key issues` arm emits `No key issues identified` as filler
+		// when the model's list is empty (`markdown.ts`: `parts.join("\n\n") ||
+		// "No key issues identified"`), and the ⚡ row is `Key issues to review`,
+		// NOT `No major issues detected`.
+		//
+		// `ISSUES_CLEAR` matches only the latter phrase, so every dependabot bump
+		// whose reviewer found nothing scored `⚠️ Issues unclear` — the exact line
+		// in the hub#53 ops report — which docks a point and, more importantly,
+		// tells an operator the review was unclear when it said the opposite.
+		// Forty-nine hub and GMW PRs carry this body.
+		const live =
+			"<tr><td>⚡&nbsp;<strong>Key issues to review</strong><br><br>\n\n" +
+			"No key issues identified\n</td></tr>\n" +
+			"<tr><td>🔒&nbsp;<strong>No security concerns identified</strong></td></tr>"
+		const r = analyzeReviewSafety(live)
+		expect(r.reasons).not.toContain("⚠️ Issues unclear")
+		expect(r.reasons).toContain("✅ No major issues")
+	})
+
+	test("a 'Key issues to review' row carrying REAL items does not buy the clear score", () => {
+		// The other direction, and the reason this cannot be a blank-row test
+		// alone: the SAME heading carries the model's findings when it has any.
+		// Live from GMW#114. A row with items must NOT be read as empty — if
+		// `readIssuesRow` stripped them to a blank it would score +2, so the
+		// assertion is the SCORE, not just the absence of a phrase.
+		//
+		// The security row is present and clean so the arithmetic isolates the ⚡
+		// row: with items the review is `unclear` (5 +2 −1 +1 = 7), and if the
+		// items were misread as an empty row it would be 9.
+		const items =
+			"<tr><td>⚡&nbsp;<strong>Key issues to review</strong><br><br>\n\n" +
+			"**package.json\n** — \n</td></tr>\n" +
+			"<tr><td>🔒&nbsp;<strong>No security concerns identified</strong></td></tr>"
+		const r = analyzeReviewSafety(items)
+		expect(r.reasons).toContain("⚠️ Issues unclear")
+		expect(r.reasons).not.toContain("✅ No major issues")
+		expect(r.score).toBe(7)
+	})
+
+	test("an empty 'Recommended focus areas' row is clean too", () => {
+		// The renderer's other ⚡ heading (hub#34). Same meaning, different label,
+		// and the second live shape the old phrase-gate could not read.
+		const empty =
+			"<tr><td>⚡&nbsp;<strong>Recommended focus areas for review</strong><br><br>\n\n</td></tr>"
+		expect(analyzeReviewSafety(empty).reasons).toContain("✅ No major issues")
+	})
+
 	test("the other two renderings of a clean verdict also pass", async () => {
 		// Same verdict, three renderer output shapes. All must clear — this is
 		// the axis the old phrase-gate could not cover.

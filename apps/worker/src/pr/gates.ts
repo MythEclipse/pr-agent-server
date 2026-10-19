@@ -68,7 +68,7 @@ export async function resolveConflict(
 		if (valid) {
 			deps.report.push("   🤖 Resolving merge conflict with Claude Code...")
 			killOrphanedAgent(deps.procs, c.repo, c.prNum)
-			const { ok, summary } = await runAiFix(
+			const { ok, summary, tipSha } = await runAiFix(
 				subDeps(deps),
 				c.repo,
 				c.prNum,
@@ -80,7 +80,11 @@ export async function resolveConflict(
 			)
 			if (ok) {
 				deps.report.push(`   ✨ Conflict resolved: ${summary}`)
-				markFixed(c.fixState, c.repo, c.prNum, c.headSha)
+				// The pushed tip, not the pre-push head — the same rule as
+				// `stepAiFix`, and for the same reason: a record naming the head the
+				// agent started from is invalidated by the resolve's own push, and
+				// the next tick then offers the agent the branch all over again.
+				markFixed(c.fixState, c.repo, c.prNum, tipSha || c.headSha)
 				persist(deps, c.fixState)
 				c.out.fixed = true
 				if (recheck) {

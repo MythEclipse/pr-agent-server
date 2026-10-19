@@ -199,7 +199,7 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 	}
 
 	killOrphanedAgent(deps.procs, c.repo, c.prNum)
-	const { ok, summary, commits } = await runAiFix(
+	const { ok, summary, commits, tipSha } = await runAiFix(
 		subDeps(deps),
 		c.repo,
 		c.prNum,
@@ -211,10 +211,23 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 	)
 	if (ok) {
 		deps.report.push(`   ✨ ${summary}`)
-		// `commits` is recorded, not just reported: it is what tells a later tick
-		// whether "already fixed" meant the agent's work landed or the agent found
-		// nothing to improve. See `shouldRetryAiFix`.
-		markFixed(c.fixState, c.repo, c.prNum, c.headSha, commits)
+		// RECORD THE HEAD THE FIX LANDED, not the one it started from.
+		//
+		// The record used to name `c.headSha`, which the fix's own push had just
+		// invalidated — so the very next tick scanned a head the state file had
+		// never heard of, `alreadyFixed` said no, and the agent was invited again
+		// for another run of up to `AI_FIX_TIMEOUT` (1800s). hub#53 took three
+		// identical `fix: auto-fix code quality` commits that way (09:37, 09:45,
+		// 09:54 WIB) and the state file ended up one head BEHIND the branch.
+		//
+		// `tipSha` is read from the workdir before it is discarded, so it needs
+		// no extra API round-trip and cannot be stale. When nothing was pushed it
+		// is empty and the old head is the correct record — there is nothing else
+		// the branch could be at.
+		//
+		// `fetch`/`refetchHead` below still runs: `c.headSha` must advance for the
+		// merge gates in THIS tick, and GitHub's view is authoritative there.
+		markFixed(c.fixState, c.repo, c.prNum, tipSha || c.headSha, commits)
 		persist(deps, c.fixState)
 		c.out.fixed = true
 		const fresh = await refetchHead(deps, c)

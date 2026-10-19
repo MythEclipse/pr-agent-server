@@ -25,7 +25,15 @@
  * lock being released when the tick throws.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
@@ -153,6 +161,20 @@ type Options = {
 	checkRunsReply?: Route
 	/** `GET /pulls/:n` (the re-validation + head re-fetch) reply. */
 	pullReply?: Route
+	/**
+	 * Sequential `GET /pulls/:n` replies, consumed in call order with the last
+	 * one repeating. `checkPrStillValid` reads the PR BEFORE the agent runs and
+	 * `refetchHead` reads it AFTER, so a single static reply cannot express
+	 * "unchanged going in, moved coming out" — which is exactly the shape a
+	 * successful fix produces.
+	 */
+	pullReplySeq?: Route[]
+	/**
+	 * What `git rev-parse HEAD` reports after the fix's push — i.e. the commit
+	 * the fix actually landed. Empty by default, so every pre-existing case keeps
+	 * its old behaviour (the record falls back to the pre-push head).
+	 */
+	pushedSha?: string
 	/** `--dry`: start the deps in dry mode, so the effects are suppressed. */
 	dry?: boolean
 }
@@ -191,6 +213,8 @@ function harness(opts: Options = {}): Harness {
 	const merge = opts.merge ?? { status: 200, data: { sha: "c0ffee" } }
 	const checkRunsReply = opts.checkRunsReply
 	const pullReply = opts.pullReply
+	const pullReplySeq = [...(opts.pullReplySeq ?? [])]
+	let pullCall = 0
 	const agentReplies = [...(opts.agent ?? [{ ok: true, snippet: "done" }])]
 	const fixState: FixState = opts.fixState ?? {}
 	let agentCall = 0
@@ -217,6 +241,11 @@ function harness(opts: Options = {}): Harness {
 			}
 			if (/\/pulls\/\d+\/merge$/.test(path)) return merge
 			if (/\/pulls\/\d+$/.test(path)) {
+				// `pullReplySeq` when the test needs the head to move between the
+				// pre-agent check and the post-push re-fetch; else the static reply.
+				if (pullReplySeq.length) {
+					return pullReplySeq[Math.min(pullCall++, pullReplySeq.length - 1)]
+				}
 				return (
 					pullReply ?? {
 						status: 200,
@@ -252,6 +281,9 @@ function harness(opts: Options = {}): Harness {
 				return { code: 0, stdout: "src/parser.ts\n", stderr: "" }
 			case "rev-list":
 				return { code: 0, stdout: "1\n", stderr: "" }
+			case "rev-parse":
+				// The pushed tip `runAiFix` reads back after a successful push.
+				return { code: 0, stdout: opts.pushedSha ? `${opts.pushedSha}\n` : "", stderr: "" }
 			case "push":
 				return { code: 0, stdout: "", stderr: "" }
 			default:
@@ -949,6 +981,41 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 		)
 	})
 
+	test("a resolved conflict records the PUSHED tip, not the conflicted head", async () => {
+		// The same rule as `stepAiFix`, at the resolver's two call sites. A
+		// conflict resolution ALSO pushes, so recording the head the agent
+		// started from leaves the state file one head behind the branch and the
+		// next tick finds "Merge conflicts" again — resolving the same conflict
+		// with a fresh 1800s agent run, indefinitely.
+		//
+		// `NO_CODE_MARKER` + the trivial title is what makes this measure the
+		// RESOLVER and nothing else: `stepReview` sets `noCodeReview`, which
+		// returns `stepAiFix` at its first line, so `c.headSha` is still the
+		// conflicted head when the resolver runs and the two candidate values
+		// differ. With the ordinary review fixture the AI fix runs first,
+		// advances `c.headSha` to the pushed tip itself, and BOTH readings
+		// agree — the assertion then passes whatever the resolver records.
+		const PUSHED = "c".repeat(40)
+		const conflicted = makePr({ ...LOCKFILE_BUMP, mergeable: false })
+		const h = harness({
+			prs: [conflicted],
+			comments: [NO_CODE_MARKER],
+			agent: [{ ok: true, snippet: "resolved" }],
+			pushedSha: PUSHED,
+			// [0] the resolver's pre-flight validity read, [1] its post-push re-fetch.
+			pullReplySeq: [
+				{ status: 200, data: conflicted },
+				{ status: 200, data: makePr({ mergeable: true, head: { sha: PUSHED, ref: "f" } }) },
+			],
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: conflicted })
+
+		expect(h.agentPosts).toHaveLength(1) // the resolver's run, not the AI fix's
+		expect(HEAD).not.toBe(PUSHED)
+		expect(h.fixState[REPO][String(PR_NUM)].sha).toBe(PUSHED)
+	})
+
 	test("a successful resolve counts a fix and does NOT merge this tick", async () => {
 		const h = harness({
 			prs: [makePr({ mergeable: false })],
@@ -1477,6 +1544,90 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 		expect(h.lines.some((l) => l.includes("Running Claude Code AI fix"))).toBe(false)
 		// Bounded, not abandoned.
 		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
+	})
+})
+
+describe("prevention — a landed fix must not re-invite the agent forever", () => {
+	// hub#53, verbatim from the ops report:
+	//
+	//   ✨ Claude Code pushed 2 improvement commit(s)
+	//   🔄 Head SHA updated for merge
+	//   ⏳ Mergeability still computing — not approving on an unknown, retrying next tick
+	//   🔁 mergeability unknown (GitHub still computing) (attempt 1 at this SHA — retrying next tick)
+	//
+	// THREE consecutive `fix: auto-fix code quality` commits landed on that one
+	// branch (09:37, 09:45, 09:54 WIB), and the state file ended up recording
+	// `sha` = the SECOND of them while `attempt_sha` named the third.
+	//
+	// THE RECORD WAS WRITTEN FROM THE PRE-PUSH HEAD. `stepAiFix` calls
+	// `markFixed(..., c.headSha)` and only THEN `refetchHead`, so the fix's own
+	// push invalidated the record in the same breath it was written: the sha
+	// recorded was the head the agent STARTED from, not the head it LEFT.
+	//
+	// The next tick scans the real head, `alreadyFixed` compares it against that
+	// stale sha, returns false because they differ, and buys another run of up to
+	// `AI_FIX_TIMEOUT` (1800s) — whose push moves the head again, and so on. The
+	// loop is self-sustaining and costs 30 minutes per turn, which is why the
+	// tick that produced this report took 453.7s and `🔄 Head SHA updated for
+	// merge` is its fingerprint: that line only prints when the head moved out
+	// from under a record that was already stale.
+	const PUSHED = "b".repeat(40)
+	const movedReply = { status: 200, data: makePr({ head: { sha: PUSHED, ref: "feature/harden" } }) }
+
+	test("the recorded head is the PUSHED tip, not the head the agent started from", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			agent: [{ ok: true, snippet: "Claude Code pushed 1 improvement commit(s)" }],
+			pushedSha: PUSHED,
+			// The pre-agent validity read sees the old head; the post-push
+			// re-fetch sees the branch as the fix left it.
+			pullReplySeq: [{ status: 200, data: makePr() }, movedReply],
+		})
+
+		await processPr(h.deps, ctx)
+
+		// HEAD is the head BEFORE the fix; PUSHED is what the fix's push created.
+		expect(HEAD).not.toBe(PUSHED)
+		expect(h.fixState[REPO][String(PR_NUM)].sha).toBe(PUSHED)
+	})
+
+	test("the next tick does NOT re-invite the agent at the new head", async () => {
+		// The loop, end to end: two consecutive ticks over the same branch. With
+		// the stale record the second tick sees a head the state file has never
+		// heard of and runs the agent a SECOND time.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			agent: [{ ok: true, snippet: "Claude Code pushed 1 improvement commit(s)" }],
+			pushedSha: PUSHED,
+			pullReplySeq: [{ status: 200, data: makePr() }, movedReply],
+		})
+
+		await processPr(h.deps, ctx)
+		expect(h.agentPosts).toHaveLength(1)
+
+		// Tick 2: the branch as the fix left it.
+		const moved = makePr({ head: { sha: PUSHED, ref: "feature/harden" } })
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: moved })
+
+		expect(h.agentPosts).toHaveLength(1)
+		expect(h.lines).toContain("   ⏭️  Already fixed at this SHA — skip AI fix")
+	})
+
+	test("a fix that pushed nothing still records the head it was given", async () => {
+		// The other half of the rule: with no push there is no new head, so the
+		// record must stay exactly what it was. `pushedSha` is unset here, which
+		// is what a clean-tree run produces.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			agent: [{ ok: true, snippet: "Claude Code found nothing to improve" }],
+		})
+
+		await processPr(h.deps, ctx)
+
+		expect(h.fixState[REPO][String(PR_NUM)].sha).toBe(HEAD)
 	})
 })
 

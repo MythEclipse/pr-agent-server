@@ -280,7 +280,7 @@ describe("runAiFix", () => {
 			"main",
 			"appTok",
 		)
-		expect(r).toEqual({ ok: false, commits: 0, summary: snippet })
+		expect(r).toEqual({ ok: false, commits: 0, tipSha: "", summary: snippet })
 		expect(r.summary.startsWith("[INFRA]")).toBe(true)
 		expect(fs.removed).toContain(AI_WD)
 	})
@@ -847,7 +847,13 @@ describe("runAiFix", () => {
 	})
 
 	test("a committed fix is pushed by the worker and counted", async () => {
-		const proc = fakeProc({ ...DIFF, "rev-list --count": { code: 0, stdout: "2\n" } })
+		// `rev-parse HEAD` is scripted because the fixed tip is read back from the
+		// workdir after the push — that value is what `stepAiFix` records.
+		const proc = fakeProc({
+			...DIFF,
+			"rev-list --count": { code: 0, stdout: "2\n" },
+			"rev-parse HEAD": { code: 0, stdout: `${"a".repeat(40)}\n` },
+		})
 		const fs = fakeWorkdirs()
 		const { agent } = fakeAgent({ ok: true, snippet: "committed 2 fixes" })
 		const r = await runAiFix(
@@ -862,9 +868,17 @@ describe("runAiFix", () => {
 		)
 		// `commits` is the count `shouldRetryAiFix` reads: a fix that pushed commits
 		// must NOT be re-offered, so the value is pinned, not just implied.
+		//
+		// `tipSha` is the tip the push created, read back with `git rev-parse
+		// HEAD` before the workdir is discarded. `stepAiFix` records THIS as the
+		// fixed head: recording the pre-push head let the fix's own push
+		// invalidate its own record, so the next tick re-invited the agent for
+		// another 1800s run — forever. The fake reports a real 40-hex sha here
+		// because that is what `git` prints and what the shape check requires.
 		expect(r).toEqual({
 			ok: true,
 			commits: 2,
+			tipSha: "a".repeat(40),
 			summary: "Claude Code pushed 2 improvement commit(s)",
 		})
 		// The count comes from `rev-list --count <headSha[:12]>..HEAD` (line 930) —
@@ -873,7 +887,13 @@ describe("runAiFix", () => {
 		expect(rev.args).toEqual(["rev-list", "--count", "abcdef123456..HEAD"])
 		expect(rev.cwd).toBe(AI_WD)
 		expect(rev.timeoutSec).toBe(10)
-		expect(proc.argvOf(proc.calls.length - 1)).toEqual(["push", "origin", "HEAD:feat/x"])
+		// The push is issued and then the tip is read back — the ORDER matters,
+		// because the read is only meaningful after the push has happened.
+		const pushIdx = proc.calls.findIndex((c) => c.args[0] === "push")
+		expect(proc.argvOf(pushIdx)).toEqual(["push", "origin", "HEAD:feat/x"])
+		const tipIdx = proc.calls.findIndex((c) => c.args[0] === "rev-parse")
+		expect(tipIdx).toBeGreaterThan(pushIdx)
+		expect(proc.argvOf(tipIdx)).toEqual(["rev-parse", "HEAD"])
 	})
 
 	test("the prompt is the Python's, byte for byte, and the agent call is exact", async () => {
@@ -994,7 +1014,7 @@ describe("runAiFix", () => {
 			"main",
 			"tok",
 		)
-		expect(r).toEqual({ ok: false, commits: 0, summary: "no changed files to fix" })
+		expect(r).toEqual({ ok: false, commits: 0, tipSha: "", summary: "no changed files to fix" })
 		expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
 			"GET /repos/owner/repo/pulls/7/files?per_page=50",
 		])
@@ -1052,7 +1072,7 @@ describe("runAiFix", () => {
 			"main",
 			"tok",
 		)
-		expect(r).toEqual({ ok: false, commits: 0, summary: "no changed files to fix" })
+		expect(r).toEqual({ ok: false, commits: 0, tipSha: "", summary: "no changed files to fix" })
 		expect(calls).toHaveLength(0) // the money: no gateway call was made
 		expect(fs.removed).toContain(AI_WD)
 	})
@@ -1071,7 +1091,12 @@ describe("runAiFix", () => {
 			"main",
 			"appTok",
 		)
-		expect(r).toEqual({ ok: false, commits: 0, summary: `clone failed: ${"z".repeat(200)}` })
+		expect(r).toEqual({
+			ok: false,
+			commits: 0,
+			tipSha: "",
+			summary: `clone failed: ${"z".repeat(200)}`,
+		})
 		// The AI-fix clone is the `--depth 20` site (Python line 840) and it clones
 		// with the CALLER's installation token, not the gh PAT (line 838).
 		expect(proc.argvOf(0)).toEqual([
