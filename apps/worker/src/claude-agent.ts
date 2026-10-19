@@ -75,6 +75,23 @@ export const SNIPPET_TAIL = 400
 const DETAIL_HEAD = 300
 
 /**
+ * Notification credentials that must never reach the agent's child process.
+ *
+ * The agent is a code-editing turn, not an operator: it has no reason to post to
+ * Discord, and the commands it runs inside a PR worktree are exactly the kind
+ * that would. See `buildEnv` for the incident this encodes.
+ *
+ * `PR_AGENT_NOTIFY_URL` is included because it redirects the worker's own
+ * `notifyReview`; leaving it set would let the agent aim that client at a host of
+ * its choosing with the worker's identity.
+ */
+export const NOTIFY_ENV_VARS = [
+	"DISCORD_WEBHOOK_URL",
+	"DISCORD_ALERT_WEBHOOK_URL",
+	"PR_AGENT_NOTIFY_URL",
+] as const
+
+/**
  * Ruling 5: byte-exact. This string tells the agent it is in a PR worktree and
  * that it must not push. It is asserted as a literal in the tests rather than
  * compared against a constant, which would be a tautology.
@@ -150,6 +167,16 @@ function assertNotRoot(isRoot: boolean): void {
  *
  * The `PATH` is explicit and minimal. Cron gives a scrubbed environment where
  * `git` is not on the PATH, and the agent's whole task is git.
+ *
+ * NOTIFICATION CREDENTIALS ARE WITHHELD. The agent runs project scripts inside
+ * the PR worktree — `pnpm test` is the obvious one — and `...process.env` used
+ * to hand it the live `DISCORD_WEBHOOK_URL`. On 2026-10-19 that produced 120
+ * junk embeds in `#notif`: the worker's own suite posts to the ops webhook, its
+ * hermeticity had an env-shaped hole, and the agent ran it with production
+ * credentials. The agent never needs to post to Discord, so those variables are
+ * dropped from the child environment entirely rather than merely overridden —
+ * an override could be undone by the project's own dotenv loading, and a
+ * `delete` cannot.
  */
 function buildEnv(opts: {
 	baseUrl: string
@@ -174,6 +201,9 @@ function buildEnv(opts: {
 	// inherits a developer's interactive session or resumes a stale transcript.
 	delete env.CLAUDE_CODE_SESSION
 	delete env.CLAUDE_CONFIG_DIR
+	// A fix agent that can post to Discord is a notification leak with extra
+	// steps: it runs arbitrary project commands, and any of them can notify.
+	for (const key of NOTIFY_ENV_VARS) delete env[key]
 	return env
 }
 

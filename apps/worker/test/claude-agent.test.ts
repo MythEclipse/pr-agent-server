@@ -13,6 +13,7 @@ import {
 	CLAUDE_BIN_CANDIDATES,
 	DEFAULT_ANTHROPIC_BASE_URL,
 	DEFAULT_CLAUDE_MODEL,
+	NOTIFY_ENV_VARS,
 	type PostResult,
 	type Spawner,
 } from "../src/claude-agent.ts"
@@ -121,6 +122,43 @@ describe("AgentClient — Claude Code CLI", () => {
 		expect(env.PATH).toContain("/usr/local/bin")
 		expect(env.PATH).toContain("/usr/bin")
 		delete process.env.SHELL
+	})
+
+	// THE 2026-10-19 `#notif` SPAM. The agent runs project scripts inside the PR
+	// worktree, and `...process.env` handed it the live Discord webhook — so a
+	// `pnpm test` whose hermeticity had an env-shaped hole posted 120 junk embeds
+	// to the real channel. The agent has no reason to notify, so the credential
+	// is absent from its child environment entirely.
+	//
+	// Asserted for EVERY name in the list, not just the one that leaked: the next
+	// notification variable someone adds is the one that would regress silently.
+	test.each([...NOTIFY_ENV_VARS])("withholds %s from the agent's environment", async (name) => {
+		process.env[name] = "https://discord.com/api/webhooks/live/secret"
+		const spawn = fakeSpawn()
+		try {
+			await client(spawn).post("x", { workdir: "/tmp/wd" })
+			expect(spawn.seen[0]!.env[name]).toBeUndefined()
+		} finally {
+			delete process.env[name]
+		}
+	})
+
+	// The strip must not be a blanket wipe: the agent genuinely needs these to
+	// run a project's checks, and removing them would break the fix path in a way
+	// that looks like the project's own failure.
+	test("keeps the variables a project's checks still need", async () => {
+		process.env.GITHUB_WEBHOOK_SECRET = "sig"
+		process.env.PR_AGENT_MODEL = "m"
+		const spawn = fakeSpawn()
+		try {
+			await client(spawn).post("x", { workdir: "/tmp/wd" })
+			const env = spawn.seen[0]!.env
+			expect(env.GITHUB_WEBHOOK_SECRET).toBe("sig")
+			expect(env.PR_AGENT_MODEL).toBe("m")
+		} finally {
+			delete process.env.GITHUB_WEBHOOK_SECRET
+			delete process.env.PR_AGENT_MODEL
+		}
 	})
 
 	test("no credential at all is an INFRA failure, not a silent success", async () => {
