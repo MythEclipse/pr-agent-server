@@ -1,3 +1,10 @@
+## [1.1.10](https://github.com/asepharyana/pr-agent-server/compare/v1.1.9...v1.1.10) (2026-10-19)
+
+
+### Bug Fixes
+
+* auto-fix code quality [skip ci] ([5be19b8](https://github.com/asepharyana/pr-agent-server/commit/5be19b8bd55ee8e14b3b182c56ef454ab69ecdab))
+
 ## [1.1.9](https://github.com/asepharyana/pr-agent-server/compare/v1.1.8...v1.1.9) (2026-10-19)
 
 
