@@ -1,3 +1,10 @@
+## [1.1.7](https://github.com/asepharyana/pr-agent-server/compare/v1.1.6...v1.1.7) (2026-10-19)
+
+
+### Bug Fixes
+
+* **worker:** record the PUSHED head, so a landed fix stops re-inviting the agent ([92e8e45](https://github.com/asepharyana/pr-agent-server/commit/92e8e457b5ee80b580e6978160c85f7325a83372)), closes [hub#53](https://github.com/hub/issues/53) [GMW#114](https://github.com/GMW/issues/114)
+
 ## [1.1.6](https://github.com/asepharyana/pr-agent-server/compare/v1.1.5...v1.1.6) (2026-10-17)
 
 
