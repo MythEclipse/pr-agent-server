@@ -167,9 +167,10 @@ const ISSUES_ROW_HEADING = /key issues to review|recommended focus areas for rev
  * other rendering (`⚡ No major issues detected`, the Python's line 370), so
  * this shape fell to the `else` and scored `⚠️ Issues unclear` — a point off,
  * and an operator told the review was inconclusive when it said the opposite.
- * That is the exact line in the hub#53 ops report, and 49 hub/GMW PRs carry
- * this body. Same inversion as GMW#109: the verdict is in the row's CONTENT, so
- * read the content.
+ * That is the exact line in the hub#53 ops report. Counted across the fleet on
+ * 2026-10-19: 62 of the 109 PRs carrying a ⚡ findings row have this empty shape
+ * (36 of those in hub and GMW alone). Same inversion as GMW#109: the verdict is
+ * in the row's CONTENT, so read the content.
  *
  * @returns "clear" for an empty or negated row, "reported" when it holds items,
  *   "absent" when no ⚡ row with a findings heading is present at all.

@@ -182,7 +182,8 @@ describe("safety — detail beyond the brief table", () => {
 		// whose reviewer found nothing scored `⚠️ Issues unclear` — the exact line
 		// in the hub#53 ops report — which docks a point and, more importantly,
 		// tells an operator the review was unclear when it said the opposite.
-		// Forty-nine hub and GMW PRs carry this body.
+		// Measured across the fleet on 2026-10-19: 62 of the 109 PRs carrying a
+		// ⚡ findings row have this empty shape.
 		const live =
 			"<tr><td>⚡&nbsp;<strong>Key issues to review</strong><br><br>\n\n" +
 			"No key issues identified\n</td></tr>\n" +
