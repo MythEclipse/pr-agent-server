@@ -67,17 +67,38 @@ export function makeRecordReview(deps: RecordReviewDeps) {
 	const now = deps.now ?? (() => new Date())
 
 	return {
-		/** Insert the `queued` row and return its id. Never throws on a bad clock. */
-		async start(input: RecordReviewStartInput): Promise<number> {
-			const row = await deps.reviews.insertReview({
-				owner: input.owner,
-				repo: input.repo,
-				pr: input.pr,
-				kind: input.kind ?? "review",
-				status: "queued",
-				startedAt: now(),
-			})
-			return row.id
+		/**
+		 * Insert the `queued` row and return its id, or `null` if the insert failed.
+		 *
+		 * `null` rather than a throw, because this runs BEFORE the review:
+		 * `main.ts` calls `start()` outside its try block, so a rejected INSERT
+		 * would abort `runJob` before `runReview` was ever reached — no comment on
+		 * the PR, the job marked `failed`, and the cause a bookkeeping table rather
+		 * than the review. Measured with a failing store: `start()` rejected with
+		 * the driver error and the review never ran.
+		 *
+		 * `null` rather than a fake id, because `finish()` would then UPDATE a row
+		 * that does not exist. The caller tolerates a null id by skipping the
+		 * update — the history is degraded, the review itself is unaffected.
+		 */
+		async start(input: RecordReviewStartInput): Promise<number | null> {
+			try {
+				const row = await deps.reviews.insertReview({
+					owner: input.owner,
+					repo: input.repo,
+					pr: input.pr,
+					kind: input.kind ?? "review",
+					status: "queued",
+					startedAt: now(),
+				})
+				return row.id
+			} catch (err) {
+				console.error(
+					`[history] failed to start review row for ${input.owner}/${input.repo}#${input.pr}:`,
+					err,
+				)
+				return null
+			}
 		},
 
 		/**
@@ -89,7 +110,10 @@ export function makeRecordReview(deps: RecordReviewDeps) {
 		 * that already happened. So this swallows and reports, exactly like the
 		 * analytics writers.
 		 */
-		async finish(id: number, input: RecordReviewFinishInput): Promise<void> {
+		async finish(id: number | null, input: RecordReviewFinishInput): Promise<void> {
+			// No id means `start()` could not insert, so there is no row to update.
+			// Skipping the UPDATE is the whole point of returning null there.
+			if (id === null) return
 			try {
 				await deps.reviews.updateReview(id, {
 					status: input.status,

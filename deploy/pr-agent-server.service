@@ -45,6 +45,18 @@ Environment=HOME=/var/lib/pr-agent-server
 Environment=PR_AGENT_APP_DIR=/var/lib/pr-agent-server
 Environment=PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem
 Environment=PR_AGENT_ANALYTICS_DIR=/var/lib/pr-agent-server/analytics
+# The PUBLIC origin, and it is not cosmetic. `env.ts` defaults both of these to
+# localhost (http://localhost:4023 / http://localhost:5173), and better-auth
+# validates every sign-in against `BETTER_AUTH_URL` + `trustedOrigins`. With these
+# unset, a login POSTed from https://pr-agent.asepharyana.my.id was rejected with
+# 403 INVALID_ORIGIN — i.e. the dashboard served fine and could never be signed
+# into. Measured on the box before this line existed: both were <unset>, and the
+# sign-in attempt above failed on origin, not on the password.
+#
+# BETTER_AUTH_URL is also what better-auth uses to build callback/cookie URLs, so
+# pointing it at the real host keeps the session cookie first-party.
+Environment=BETTER_AUTH_URL=https://pr-agent.asepharyana.my.id
+Environment=WEB_ORIGIN=https://pr-agent.asepharyana.my.id
 # Analytics are append-only JSONL under /var/lib/pr-agent-server, and the
 # worker's /tmp/pr-queue-* state must survive a restart — so this unit needs a
 # real filesystem, not a private /tmp namespace.

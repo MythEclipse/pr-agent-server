@@ -30,7 +30,11 @@ describe("review history", () => {
 		const reviews = createReviewRepository(store.db)
 		const history = makeRecordReview({ reviews })
 
+		// A healthy store must return an id; null here would mean the insert failed
+		// silently and every assertion below would be testing nothing.
 		const id = await history.start({ owner: "o", repo: "r", pr: 5 })
+		expect(id, "insert returned no id").not.toBeNull()
+		if (id === null) return
 		// Visible while it is still running, not only after it finishes: a review
 		// that takes the process down must not be absent from the history.
 		expect((await reviews.getReview(id))?.status).toBe("queued")
@@ -64,6 +68,8 @@ describe("review history", () => {
 		const history = makeRecordReview({ reviews })
 
 		const id = await history.start({ owner: "o", repo: "r", pr: 6 })
+		expect(id, "insert returned no id").not.toBeNull()
+		if (id === null) return
 		await history.finish(id, {
 			owner: "o",
 			repo: "r",
@@ -84,6 +90,8 @@ describe("review history", () => {
 
 		for (const sha of ["first", "second"]) {
 			const id = await history.start({ owner: "o", repo: "r", pr: 7 })
+			expect(id, "insert returned no id").not.toBeNull()
+			if (id === null) continue
 			await history.finish(id, { owner: "o", repo: "r", pr: 7, status: "success", headSha: sha })
 		}
 
