@@ -107,7 +107,16 @@ function ReviewsPage() {
 							{rows.length === 0 ? (
 								<tr>
 									<td className="px-5 py-8 text-center text-slate-500" colSpan={5}>
-										No reviews yet.
+										<p>No reviews recorded yet.</p>
+										{/* History is written when a review RUNS, so every job
+										    completed before that was added left no row. Saying only
+										    "No reviews yet" over an empty table reads as data loss to
+										    an operator who knows reviews have happened — name the
+										    reason here instead of leaving them to guess. */}
+										<p className="mt-1 text-xs">
+											Reviews are recorded as they run. Anything reviewed before this page existed
+											has no history to show — open a PR to start it.
+										</p>
 									</td>
 								</tr>
 							) : (
