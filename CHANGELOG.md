@@ -1,3 +1,10 @@
+## [1.4.1](https://github.com/asepharyana/pr-agent-server/compare/v1.4.0...v1.4.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **web:** show why a Google sign-in failed instead of a blank form ([1ad092a](https://github.com/asepharyana/pr-agent-server/commit/1ad092a0da8637ffc40683d896dab293d990aeb1))
+
 # [1.4.0](https://github.com/asepharyana/pr-agent-server/compare/v1.3.2...v1.4.0) (2026-10-21)
 
 
