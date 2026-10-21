@@ -196,6 +196,15 @@ export type WorkerDeps = {
 	 * leaves, matching the marker `sync/run.ts` already established.
 	 */
 	dry: boolean
+	/**
+	 * Async delay, used by the fix-until-green loop to poll CI without blocking the
+	 * process.
+	 *
+	 * ASYNC on purpose: `spawnSync`-based sleeps would freeze the whole worker for
+	 * the duration, and CI polling waits minutes. Optional so every existing test
+	 * double stays valid; `stepAiFix` falls back to a real timer.
+	 */
+	sleep?: (ms: number) => Promise<void>
 }
 
 /** The brief's per-PR result: one flag per counter, `true` when it fired. */

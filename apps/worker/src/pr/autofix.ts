@@ -27,6 +27,7 @@
 import { statSync } from "node:fs"
 import type { PostResult } from "../claude-agent.ts"
 import type { GitRunner } from "../git.ts"
+import { ciFailureSection, collectCiFailures } from "./ci-evidence.ts"
 import { clonePr, head, reportable, TMP_BASE, type Workdirs } from "./lockfix.ts"
 import type { GhClient } from "./scan.ts"
 
@@ -212,6 +213,15 @@ export async function checkPrStillValid(
  * instruction must come FIRST (step 1 before step 2) or the agent improves code
  * against a base it is about to merge. The commit message is exact — the
  * pipeline matches on `[skip ci]`.
+ *
+ * WHY THE OPTIONAL EVIDENCE PARAMETER EXISTS. The transcribed prompt is generic:
+ * "improve code quality of ALL changed files". Handed a red CI, that instruction
+ * says nothing about what is broken, so the agent edits naming and docstrings
+ * while the actual failure stands — measured on mcpedia#28, which sat on
+ * `Already fixed at this SHA` for 97 ticks with a red CI it was never told about.
+ * When evidence IS available it is inserted as its own section; when it is not,
+ * this function returns exactly the transcribed string, so an ordinary run is
+ * byte-identical to the Python's.
  */
 export function buildAiFixPrompt(
 	pr: number,
@@ -219,6 +229,7 @@ export function buildAiFixPrompt(
 	title: string,
 	baseRef: string,
 	changedFiles: string[],
+	ciFailureSection = "",
 ): string {
 	let fileList = changedFiles
 		.slice(0, FILE_CAP)
@@ -232,6 +243,11 @@ export function buildAiFixPrompt(
 		"Files changed in this PR:\n" +
 		fileList +
 		"\n\n" +
+		// Placed BEFORE the task list on purpose: it is the reason the run is
+		// happening, and a model that reads the generic "improve quality" steps
+		// first tends to plan against them and treat a later failure list as an
+		// aside.
+		ciFailureSection +
 		"Your working directory is the git worktree for this PR branch.\n" +
 		"Your task:\n" +
 		"1. FIRST, try to merge the base branch to resolve any stale conflicts:\n" +
@@ -246,7 +262,16 @@ export function buildAiFixPrompt(
 		'     git add -A && git commit --message="fix: auto-fix code quality [skip ci]"\n' +
 		"4. Do NOT push — a separate step pushes your commit.\n\n" +
 		"CRITICAL RULES:\n" +
-		"- ONLY modify the files listed above (plus commit/merge resolution)\n" +
+		// The scope rule is RELAXED when failure evidence is present, because the
+		// fix for a red CI is very often in a file the PR did not touch — a test
+		// that asserts the old behaviour, a type that the change invalidated, a
+		// shared module. Keeping "ONLY the files above" would force the agent to
+		// either ignore the evidence or violate the rule.
+		(ciFailureSection
+			? "- Prefer the files listed above, but you MAY edit other files when the CI\n" +
+				"  failure requires it (a test asserting old behaviour, a type, a shared\n" +
+				"  module). Keep any such edit minimal and say what you changed.\n"
+			: "- ONLY modify the files listed above (plus commit/merge resolution)\n") +
 		"- Do NOT change program logic or add features\n" +
 		"- Resolve merge conflicts carefully - keep BOTH sides where needed\n" +
 		"- You are mytheclipsebotreview - git identity already set\n" +
@@ -396,7 +421,16 @@ export async function runAiFix(
 		return { ok: false, commits: 0, tipSha: "", summary: "no changed files to fix" } // Python line 880
 	}
 
-	const prompt = buildAiFixPrompt(pr, repo, title, baseRef, changedFiles)
+	const prompt = buildAiFixPrompt(
+		pr,
+		repo,
+		title,
+		baseRef,
+		changedFiles,
+		// Best-effort: `collectCiFailures` returns `[]` on every failure mode, and an
+		// empty section leaves the prompt byte-identical to the Python's.
+		ciFailureSection(await collectCiFailures(api, token, repo, headSha)),
+	)
 	// Python line 913.
 	// The turn cap is the CLI's `--max-turns` budget. Reported for the operator's
 	// benefit; the CLI enforces its own default when the flag is omitted.
