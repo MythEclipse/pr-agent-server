@@ -69,13 +69,30 @@ export function buildAuth(opts: BuildAuthOptions) {
 					// Async because the hook signature requires a Promise; the check itself is
 					// synchronous and needs no I/O.
 					before: async (user) => {
-						if (isEmailAllowed(user.email, allowlist)) return
-						// Logged, because from the outside this is indistinguishable from a
-						// wrong password and the operator needs to know it happened.
-						console.warn(
-							`[auth] rejected sign-in for ${user.email}: not on AUTH_ALLOWED_EMAILS (${allowlist.length} entries)`,
-						)
-						throw new APIError("FORBIDDEN", { message: NOT_ALLOWED_MESSAGE })
+						if (!isEmailAllowed(user.email, allowlist)) {
+							// Logged, because from the outside this is indistinguishable from a
+							// wrong password and the operator needs to know it happened.
+							console.warn(
+								`[auth] rejected sign-in for ${user.email}: not on AUTH_ALLOWED_EMAILS (${allowlist.length} entries)`,
+							)
+							throw new APIError("FORBIDDEN", { message: NOT_ALLOWED_MESSAGE })
+						}
+						// EVERY account that can be created here is admin, because the
+						// allowlist IS the operator list — and the dashboard is admin-only
+						// (`review.list`, `review.get`, `queue.stats` all use adminProcedure).
+						//
+						// Without this the flow is broken in the same shape as the allowlist
+						// lockout: Google sign-in succeeds, a row is created with the schema
+						// default `role=user`, and then every page answers 403. The user is
+						// signed in and sees an empty dashboard, and nothing says why.
+						//
+						// The promotion is only on CREATE, so a later demotion (UPDATE the
+						// role) sticks — adding a read-only viewer later does not mean
+						// fighting this hook on every sign-in.
+						//
+						// `input: false` on the field still holds: this is server-side, and a
+						// registration body cannot ask for a role.
+						return { data: { ...user, role: "admin" } }
 					},
 				},
 			},

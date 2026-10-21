@@ -42,6 +42,13 @@ const userEmails = async (store: ITestDb): Promise<string[]> => {
 	return res.rows.map((r) => r.email)
 }
 
+const userRoles = async (store: ITestDb): Promise<{ email: string; role: string }[]> => {
+	const res = await store.db.execute<{ email: string; role: string }>(
+		'select email, role from "user" order by email',
+	)
+	return res.rows.map((r) => ({ email: r.email, role: r.role }))
+}
+
 describe("allowlist enforcement in better-auth", () => {
 	test("rejects sign-up for an address that is not on the list", async () => {
 		const store = await createTestDb()
@@ -137,6 +144,49 @@ describe("allowlist enforcement in better-auth", () => {
 				body: { email: "superaseph@gmail.com", password: "a-long-enough-password", name: "S" },
 			})
 			expect(await userEmails(store)).toEqual(["superaseph@gmail.com"])
+		} finally {
+			await store.close()
+		}
+	})
+
+	// The dashboard is admin-only: `review.list`, `review.get` and `queue.stats` are
+	// all `adminProcedure`. A sign-in that creates a row with the schema default
+	// `role=user` therefore "succeeds" into a dashboard that answers 403 to
+	// everything — signed in, empty, and silent about why. That is the same shape as
+	// the allowlist lockout, so it gets the same treatment: pinned by a test.
+	test("an allowlisted account is created as admin, so the dashboard is usable", async () => {
+		const store = await createTestDb()
+		try {
+			const auth = makeAuth(store.db, parseAllowlist("superaseph@gmail.com"))
+			await auth.api.signUpEmail({
+				body: {
+					email: "superaseph@gmail.com",
+					password: "a-long-enough-password",
+					name: "S",
+				},
+			})
+			expect(await userRoles(store)).toEqual([{ email: "superaseph@gmail.com", role: "admin" }])
+		} finally {
+			await store.close()
+		}
+	})
+
+	test("a registration body cannot choose its own role", async () => {
+		// `input: false` on the additional field is what makes the hook safe to
+		// promote unconditionally: whatever the caller sends, it is ignored.
+		const store = await createTestDb()
+		try {
+			const auth = makeAuth(store.db, parseAllowlist("superaseph@gmail.com"))
+			await auth.api.signUpEmail({
+				body: {
+					email: "superaseph@gmail.com",
+					password: "a-long-enough-password",
+					name: "S",
+					// @ts-expect-error -- not part of the public body type, which is the point
+					role: "user",
+				},
+			})
+			expect((await userRoles(store))[0]?.role).toBe("admin")
 		} finally {
 			await store.close()
 		}
