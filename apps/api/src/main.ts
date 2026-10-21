@@ -23,6 +23,7 @@ import { requestId } from "hono/request-id"
 import { ReviewQueue } from "./application/queue/review-queue.ts"
 import { extractReviewScore, makeRecordReview } from "./application/review/record-review.ts"
 import { buildUseCases } from "./application/use-cases.ts"
+import { isEmailAllowed, parseAllowlist } from "./infrastructure/auth/allowlist.ts"
 import { buildAuth } from "./infrastructure/auth/better-auth.ts"
 import { loadEnv, type TEnv } from "./infrastructure/config/env.ts"
 import { loadConfig } from "./infrastructure/config/legacy-config.ts"
@@ -55,7 +56,29 @@ export async function startApp(options: StartOptions = {}) {
 		secret: env.BETTER_AUTH_SECRET,
 		baseURL: env.BETTER_AUTH_URL,
 		trustedOrigins: [env.WEB_ORIGIN],
+		// Parsed here, not in buildAuth: the allowlist is configuration, and
+		// `buildAuth` should not have to know the env var's comma format.
+		allowedEmails: parseAllowlist(env.AUTH_ALLOWED_EMAILS),
+		// Both halves or nothing. A provider with an empty secret would only fail
+		// later, at the token exchange, with a confusing 401 from Google.
+		...(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
+			? {
+					google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET },
+				}
+			: {}),
 	})
+
+	// An empty allowlist denies everybody, which is the safe default but would be
+	// baffling without this line: every sign-in fails with "not authorised" and
+	// nothing says why.
+	if (parseAllowlist(env.AUTH_ALLOWED_EMAILS).length === 0) {
+		console.warn(
+			"[boot] AUTH_ALLOWED_EMAILS is empty — NOBODY can sign in. Set it to a comma-separated list of allowed addresses.",
+		)
+	}
+	if (!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET)) {
+		console.warn("[boot] GOOGLE_CLIENT_ID/SECRET unset — Google sign-in is disabled")
+	}
 
 	// 2. use-cases. The legacy pipeline keeps its original signatures; only the
 	// bound dependencies come from here.
@@ -161,9 +184,25 @@ export async function startApp(options: StartOptions = {}) {
 	// 4c. oRPC, registered last so it never shadows a legacy path. The context
 	// is built per request at the call site, which is where the session cookie
 	// is actually readable.
+	const allowedEmails = parseAllowlist(env.AUTH_ALLOWED_EMAILS)
+
 	const resolveSession = async (headers: Headers): Promise<TSession | null> => {
 		const result = await auth.api.getSession({ headers })
 		if (!result?.user) return null
+		// SECOND allowlist check, on every request.
+		//
+		// The create-hook above stops a NEW account, but a row can already exist —
+		// the seeded admin is exactly that — and the list can be tightened later.
+		// Without this, "remove them from AUTH_ALLOWED_EMAILS" would not remove them:
+		// their existing session would keep working until it expired, and their row
+		// would still be there for the next sign-in. Checking here means the list is
+		// the authority at all times, which is what an operator assumes it means.
+		if (!isEmailAllowed(result.user.email, allowedEmails)) {
+			console.warn(
+				`[auth] refusing existing session for ${result.user.email}: no longer on AUTH_ALLOWED_EMAILS`,
+			)
+			return null
+		}
 		return {
 			userId: result.user.id,
 			email: result.user.email,

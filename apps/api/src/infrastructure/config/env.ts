@@ -19,6 +19,26 @@ const envSchema = z.object({
 	BETTER_AUTH_URL: z.string().url().default("http://localhost:4023"),
 	WEB_ORIGIN: z.string().url().default("http://localhost:5173"),
 
+	/**
+	 * Google OAuth. Both halves must be present or the provider is absent — a
+	 * half-configured provider is a deployment mistake, not a degraded mode.
+	 */
+	GOOGLE_CLIENT_ID: z.string().optional(),
+	GOOGLE_CLIENT_SECRET: z.string().optional(),
+
+	/**
+	 * Comma-separated list of the ONLY email addresses allowed to hold an account.
+	 *
+	 * This is the authorization boundary for social sign-in. Google will happily
+	 * authenticate any account on the planet, so without an allowlist "Sign in with
+	 * Google" would hand the review history — every repo, PR and model response —
+	 * to whoever clicked the button.
+	 *
+	 * Lowercase, whitespace-trimmed. Empty means NOBODY may sign in, which is the
+	 * safe reading: an unset allowlist must not mean "allow everyone".
+	 */
+	AUTH_ALLOWED_EMAILS: z.string().default(""),
+
 	/** Where the API serves the built SPA. Unset in dev — Vite serves it. */
 	WEB_DIST_PATH: z.string().optional(),
 
@@ -51,6 +71,7 @@ export function loadEnvWithDefaults(overrides: Partial<TEnv> = {}): TEnv {
 		BETTER_AUTH_SECRET: "test-secret-not-used-in-production-0123456789",
 		BETTER_AUTH_URL: "http://localhost:4023",
 		WEB_ORIGIN: "http://localhost:5173",
+		AUTH_ALLOWED_EMAILS: "",
 		PORT: 4023,
 		...overrides,
 	}
