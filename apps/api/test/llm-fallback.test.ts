@@ -183,4 +183,89 @@ describe("callWithFallback", () => {
 			}),
 		).rejects.toThrow(/rejected: m1.*failed to parse.*m2.*failed to parse/s)
 	})
+
+	// The 58-of-58 production failure, as a regression lock.
+	//
+	// Every review failed with `Empty content in model response (finish_reason:
+	// tool_calls)` across 7 days and 10 PRs. The model fabricated a `shell` tool
+	// call that the request never offered, so `content` was empty. Two separate
+	// defects had to be fixed, and these tests pin both:
+	//
+	//   1. the REQUEST must forbid tool calls (`tool_choice: "none"`);
+	//   2. an empty body must get the same model RETRIED, because it is
+	//      non-deterministic — measured 3/3 empty on one batch, 0/3 after the fix.
+	test("retries an empty response on the SAME model instead of skipping it", async () => {
+		// Without this, `break` fell through to the next model and one unlucky
+		// sample ended it — so the sum of a few unlucky samples was a dead review.
+		let n = 0
+		const fake = async () => {
+			n++
+			if (n < 3) throw new Error("Empty content in model response (finish_reason: tool_calls)")
+			return { content: "review: ok", finishReason: "stop", usage: {} }
+		}
+		const r = await callWithFallback({
+			models: ["m1"],
+			system: "s",
+			user: "u",
+			cfg,
+			retries: 2,
+			call: fake,
+		})
+		expect(r.content).toBe("review: ok")
+		expect(r.model).toBe("m1")
+		expect(n).toBe(3) // two empty bodies retried, third answered
+	})
+
+	test("an empty response is retried, not misread as a client error", async () => {
+		// A persistent empty body must still exhaust the model and move on to the
+		// fallback — the retry is bounded, not an infinite loop.
+		const calls: string[] = []
+		const fake = async (o: { model: string }) => {
+			calls.push(o.model)
+			if (o.model === "m1")
+				throw new Error("Empty content in model response (finish_reason: tool_calls)")
+			return { content: "review: ok", finishReason: "stop", usage: {} }
+		}
+		const r = await callWithFallback({
+			models: ["m1", "m2"],
+			system: "s",
+			user: "u",
+			cfg,
+			retries: 1,
+			call: fake,
+		})
+		expect(r.model).toBe("m2")
+		// 2 attempts on m1 (initial + 1 retry), then m2 once.
+		expect(calls).toEqual(["m1", "m1", "m2"])
+	})
+
+	test("tool_choice:none is sent, so the model cannot fabricate a tool call", async () => {
+		// The request-level half of the fix. `tools: []` alone did NOT work
+		// (2 of 3 still empty); the explicit tool_choice is what the endpoint
+		// honours. Asserting on the outgoing body is the only way to lock this —
+		// the bug is invisible in the response shape we normally inspect.
+		let seen: Record<string, unknown> | null = null
+		const originalFetch = globalThis.fetch
+		globalThis.fetch = (async (
+			_url: string | URL | Request,
+			init?: { body?: string },
+		): Promise<Response> => {
+			seen = JSON.parse(init?.body ?? "{}") as Record<string, unknown>
+			return new Response(
+				JSON.stringify({
+					choices: [{ message: { content: "review: ok" }, finish_reason: "stop" }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			)
+		}) as typeof fetch
+		try {
+			await callWithFallback({ models: ["m1"], system: "s", user: "u", cfg, retries: 0 })
+		} finally {
+			globalThis.fetch = originalFetch
+		}
+		expect(seen).not.toBeNull()
+		expect(seen).toMatchObject({ tool_choice: "none", stream: false })
+		// No tools are offered at all — the flag is the guard, not an empty list.
+		expect(seen).not.toHaveProperty("tools")
+	})
 })

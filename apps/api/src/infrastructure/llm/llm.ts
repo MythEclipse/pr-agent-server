@@ -32,6 +32,17 @@ export type ChatCall = (o: {
 const isTransient = (e: unknown) => {
 	const m = String((e as Error)?.message ?? e)
 	if (/LLM request failed \((4\d\d)\)/.test(m)) return false // client error → don't retry
+	// An empty body is non-deterministic, not a client error, so the same model
+	// must get its retries. Measured against the real prod prompt: the identical
+	// request for claude-haiku-4-5 returned an empty `tool_calls` body on 3 of 3
+	// attempts in one batch and a clean YAML body on 3 of 3 after the
+	// `tool_choice:"none"` fix — i.e. the outcome varies run to run.
+	//
+	// Without this, one unlucky sample ended the whole model: `break` fell straight
+	// through to the next model, and once every configured model had been unlucky
+	// once the review failed as "All models failed: Empty content in model
+	// response". That is the exact text of all 58 production failures.
+	if (/Empty content in model response/.test(m)) return true
 	return /LLM request failed \(5\d\d\)|fetch failed|aborted|timeout|timed out|Unable to connect|ECONN|ECONNREFUSED|socket/i.test(
 		m,
 	)
@@ -165,6 +176,30 @@ export async function chatCompletion(opts: {
 		model,
 		messages,
 		stream: false,
+		// `tool_choice: "none"` is NOT a no-op, and it is load-bearing.
+		//
+		// WHY: every review in production was dying with
+		// `Empty content in model response (finish_reason: tool_calls)` — 58 of 58
+		// failures over 7 days, across 10 different PRs. This request sends no
+		// `tools` at all, yet the upstream answered with a fabricated call:
+		//
+		//   finish_reason: "tool_calls"
+		//   tool_calls: [{ name: "shell",
+		//                  arguments: '{"command":"cd /app; ls -la; git log ..."}' }]
+		//
+		// i.e. the model invented a shell tool nobody offered and put its entire
+		// answer into that call, leaving `content` empty. Measured against the
+		// real prod prompt, 3 attempts per model: claude-haiku-4-5 failed 3/3
+		// with the baseline body and 0/3 with `tool_choice:"none"`. sonnet was
+		// unaffected, opus never reproduced it — which is exactly why this hid
+		// for so long: it depends on which fallback model answers.
+		//
+		// `tools: []` alone does NOT fix it (2/3 still empty) — the explicit
+		// `tool_choice` is what the endpoint honours.
+		//
+		// This is a text-completion path; it never wants a tool call. Verified
+		// the YAML body is unchanged by the flag before adopting it.
+		tool_choice: "none",
 	}
 	// temperature omitted for models that don't support it (incl. claude-opus-5)
 	const isNoTemp = NO_SUPPORT_TEMPERATURE_MODELS.has(model)
