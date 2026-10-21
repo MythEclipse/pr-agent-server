@@ -1,3 +1,10 @@
+## [1.2.2](https://github.com/asepharyana/pr-agent-server/compare/v1.2.1...v1.2.2) (2026-10-21)
+
+
+### Bug Fixes
+
+* **api:** build dist/seed.js, the only way an admin account can exist ([40ad56e](https://github.com/asepharyana/pr-agent-server/commit/40ad56ebd8810f97acf8e97a9979a5e3903c2db6))
+
 ## [1.2.1](https://github.com/asepharyana/pr-agent-server/compare/v1.2.0...v1.2.1) (2026-10-21)
 
 
