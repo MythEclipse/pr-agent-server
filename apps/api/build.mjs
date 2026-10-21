@@ -15,7 +15,14 @@ await rm(outdir, { recursive: true, force: true })
 await mkdir(outdir, { recursive: true })
 
 await build({
-	entryPoints: ["src/main.ts", "src/migrate.ts"],
+	// `seed.ts` is here because the dashboard has NO default credentials and no
+	// signup path (`role` is `input: false`), so this script is the only way an
+	// admin can ever exist. It was missing from this list, so `dist/seed.js` was
+	// never built and the documented `pnpm db:seed` provisioning step could not
+	// run on the box at all — the `user` table was simply empty and every login
+	// failed regardless of the password typed. `test/build-entrypoints.test.ts`
+	// fails if it is removed again.
+	entryPoints: ["src/main.ts", "src/migrate.ts", "src/db/seed.ts"],
 	outdir,
 	// Bundle: the source carries explicit `.ts` specifiers (skill §4), which
 	// Node cannot resolve from dist/ where the files are `.js`. Bundling
