@@ -107,28 +107,29 @@ export async function runImprove(
 		const vars = { ...baseVars, diff_no_line_numbers: chunkNoLn }
 		const system = renderTemplate(SUGGESTIONS_SYSTEM_TEMPLATE, vars)
 		const user = renderTemplate(SUGGESTIONS_USER_TEMPLATE, vars)
-		const res = await callWithFallback({ models, system, user, temperature: cfg.temperature, cfg })
+		const parseSuggestions = (content: string): Suggestion[] | null => parseSuggestionsYaml(content)
+		// Parse via `validate` so a bad body costs a RETRY, not the whole chunk.
+		//
+		// Previously the parse happened after the call and the result was simply not
+		// pushed when it failed — so that chunk's suggestions vanished with no error
+		// anywhere, and the PR got a comment claiming there was nothing to improve
+		// in code the model never successfully answered for. Silent loss is worse
+		// than a failure here: the caller cannot tell "no suggestions" from "the
+		// model failed". Model YAML is non-deterministic, so retrying is the fix.
+		const res = await callWithFallback({
+			models,
+			system,
+			user,
+			temperature: cfg.temperature,
+			cfg,
+			validate: (content) =>
+				parseSuggestions(content) === null ? "failed to parse suggestions YAML" : null,
+		})
 		totalPrompt += res.usage.promptTokens
 		totalCompletion += res.usage.completionTokens
 		usedModel = res.model
-		const data = loadYaml(
-			res.content
-				.replace(/^```yaml\s*/i, "")
-				.replace(/```\s*$/i, "")
-				.trim(),
-			[
-				"code_suggestions:",
-				"relevant_file:",
-				"suggestion_content:",
-				"improved_code:",
-				"one_sentence_summary:",
-				"label:",
-				"score:",
-			],
-		) as { code_suggestions?: unknown[] } | null
-		if (data && Array.isArray(data.code_suggestions)) {
-			preds.push(data.code_suggestions as Suggestion[])
-		}
+		const suggestions = parseSuggestions(res.content)
+		if (suggestions) preds.push(suggestions)
 	}
 
 	await Promise.all(chunks.map((c, i) => callChunk(c, chunksNoLineNumbers[i] ?? c)))
@@ -276,4 +277,36 @@ function unifiedDiff(existing: string, improved: string): string {
 	for (const l of newMid) out.push(`+${l}`)
 	out.push("```")
 	return out.join("\n")
+}
+
+/**
+ * Parse an improve response into its suggestion list, or null if unusable.
+ *
+ * Exported so the `validate` contract can be tested directly — `runImprove`
+ * builds its own GitHubProvider internally, so the parse step is the only part
+ * of this path reachable without faking the whole GitHub flow.
+ *
+ * Returning null (rather than an empty array) is deliberate: `[]` means "the
+ * model says there is nothing to improve", which the caller reports to the PR,
+ * while null means "this body was unusable, retry". Collapsing the two is how a
+ * failed chunk used to become a published "no suggestions found".
+ */
+export function parseSuggestionsYaml(content: string): Suggestion[] | null {
+	const data = loadYaml(
+		content
+			.replace(/^```yaml\s*/i, "")
+			.replace(/```\s*$/i, "")
+			.trim(),
+		[
+			"code_suggestions:",
+			"relevant_file:",
+			"suggestion_content:",
+			"improved_code:",
+			"one_sentence_summary:",
+			"label:",
+			"score:",
+		],
+	) as { code_suggestions?: unknown[] } | null
+	if (!data || !Array.isArray(data.code_suggestions)) return null
+	return data.code_suggestions as Suggestion[]
 }

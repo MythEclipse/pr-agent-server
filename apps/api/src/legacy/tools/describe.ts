@@ -89,6 +89,18 @@ export async function runDescribe(
 	const systemPrompt = renderTemplate(DESCRIPTION_SYSTEM_TEMPLATE, vars)
 	const userPrompt = renderTemplate(DESCRIPTION_USER_TEMPLATE, vars)
 
+	// YAML parsing is hoisted above the call so it can serve as `validate`.
+	//
+	// WHY: this used to parse AFTER `callWithFallback` returned and `throw` when it
+	// failed — so an unparseable-but-HTTP-200 body was thrown away for the WHOLE
+	// call: no retry on that model, no fallback, no description. The review path
+	// had already been fixed this way (see its `validate` hook); describe was not,
+	// so it kept the exact failure mode that made reviews fail at random. Model
+	// YAML is non-deterministic — the same model and prompt parse on one run and
+	// not the next — so one bad sample must not end the tool.
+	const parseData = (content: string): Record<string, unknown> | null =>
+		parseDescriptionYaml(content)
+
 	// LLM call with per-model retry + fallback models
 	const llm = await callWithFallback({
 		models: [cfg.modelDescribe, ...cfg.fallbackModels],
@@ -96,25 +108,15 @@ export async function runDescribe(
 		user: userPrompt,
 		temperature: cfg.temperature,
 		cfg,
+		validate: (content) =>
+			parseData(content) === null ? "failed to parse description YAML" : null,
 	})
 
-	// Parse prediction YAML
-	const prediction = llm.content
-		.replace(/^```yaml\s*/i, "")
-		.replace(/```\s*$/i, "")
-		.trim()
-		.replace(/^```/i, "")
-	const keysFix = [
-		"pr_files:",
-		"changes_summary:",
-		"changes_title:",
-		"label:",
-		"changes_diagram:",
-		"description:",
-		"type:",
-	]
-	const data = loadYaml(prediction, keysFix) as Record<string, unknown> | null
+	const data = parseData(llm.content)
 	if (!data) {
+		// Unreachable in practice: `validate` only accepts a parseable body. Kept as
+		// a belt-and-braces guard so a future change to `validate` cannot publish a
+		// description built from nothing.
 		throw new Error("Failed to parse description YAML")
 	}
 
@@ -375,4 +377,34 @@ export function insertBrAfterXChars(text: string, x: number): string {
 		}
 	}
 	return out.trim()
+}
+
+/**
+ * Parse a describe response into the reorder-ready object, or null if unusable.
+ *
+ * Exported so the `validate` contract can be tested directly — `runDescribe`
+ * builds its own GitHubProvider internally, so the parse step is the only part
+ * of this path reachable without faking the whole GitHub flow.
+ *
+ * The non-object check matters: `loadYaml` happily returns a scalar for a body
+ * like "Looks fine!", and the caller indexes into the result, so a scalar would
+ * crash on property access rather than being retried.
+ */
+export function parseDescriptionYaml(content: string): Record<string, unknown> | null {
+	const prediction = content
+		.replace(/^```yaml\s*/i, "")
+		.replace(/```\s*$/i, "")
+		.trim()
+		.replace(/^```/i, "")
+	const data = loadYaml(prediction, [
+		"pr_files:",
+		"changes_summary:",
+		"changes_title:",
+		"label:",
+		"changes_diagram:",
+		"description:",
+		"type:",
+	]) as Record<string, unknown> | null
+	if (!data || typeof data !== "object" || Array.isArray(data)) return null
+	return data
 }
