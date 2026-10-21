@@ -98,6 +98,27 @@ describe("review markdown: current prompt schema", () => {
 		expect(md).toContain("No key issues identified")
 	})
 
+	test("a value with a leading newline does not break the bold span", () => {
+		// Observed on PR #23: the model emitted relevant_file as
+		// "src/findUsers.ts\n", which rendered "**src/findUsers.ts\n:4-6**" —
+		// the line number broken onto its own line inside the bold span.
+		const md = convertToMarkdownV2({
+			review: {
+				key_issues_to_review: [
+					{
+						relevant_file: "src/findUsers.ts\n",
+						issue_header: "SQL Injection\n",
+						issue_content: "Parameterise the query.",
+						start_line: 4,
+						end_line: 6,
+					},
+				],
+			},
+		} as never)
+		expect(md).toContain("src/findUsers.ts:4-6")
+		expect(md).not.toMatch(/\*\*[^*]*\n[^*]*\*\*/)
+	})
+
 	test("the PROMPT still declares the fields the renderer now reads", () => {
 		// Guards the other direction: if someone renames a field in the prompt
 		// without touching the renderer, this trips instead of production.

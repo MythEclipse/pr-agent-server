@@ -132,7 +132,11 @@ export function convertToMarkdownV2(
 				const o = (it ?? {}) as Record<string, unknown>
 				const str = (k: string): string => {
 					const x = o[k]
-					return typeof x === "string" ? x : typeof x === "number" ? String(x) : ""
+					// Collapse newlines: models wrap long values, and a value that
+					// starts with "\n" produced "**file.ts\n:4-6**" with the line
+					// number broken onto its own line inside the bold span.
+					const raw = typeof x === "string" ? x : typeof x === "number" ? String(x) : ""
+					return raw.replace(/\s*\n\s*/g, " ").trim()
 				}
 				const file = str("relevant_file")
 				// line: `relevant_line` (old) or start_line/end_line (current prompt)
