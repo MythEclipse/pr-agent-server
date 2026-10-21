@@ -7,6 +7,7 @@ import { createFileRoute, Link } from "@tanstack/react-router"
 import { Badge, STATUS_TONE } from "#/components/ui/badge.tsx"
 import { Button } from "#/components/ui/button.tsx"
 import { Card, CardContent, CardHeader, CardTitle } from "#/components/ui/card.tsx"
+import { formatWhen } from "#/libs/format-when.ts"
 import { orpc } from "#/libs/orpc/client.ts"
 import { reviewKeys } from "./_apis/review-keys.ts"
 
@@ -63,11 +64,11 @@ function ReviewDetail() {
 						</div>
 						<div>
 							<dt className="text-slate-500">Started</dt>
-							<dd>{started ? started.toISOString().slice(0, 16).replace("T", " ") : "—"}</dd>
+							<dd>{formatWhen(started)}</dd>
 						</div>
 						<div>
 							<dt className="text-slate-500">Finished</dt>
-							<dd>{finished ? finished.toISOString().slice(0, 16).replace("T", " ") : "—"}</dd>
+							<dd>{formatWhen(finished)}</dd>
 						</div>
 						<div>
 							<dt className="text-slate-500">GitHub comment</dt>

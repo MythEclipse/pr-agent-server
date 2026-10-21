@@ -98,12 +98,16 @@ export async function runImprove(
 	// callWithFallback per chunk, so error text is owned by llm.ts (no nested
 	// "All models failed" double-prefix) and retries count per chunk.
 	const models = [cfg.modelImprove, ...cfg.fallbackModels]
-	const preds: Suggestion[][] = []
+	// Indexed by chunk, not appended. `preds.push()` from concurrent tasks records
+	// COMPLETION order, which varies run to run — so the same PR produced its
+	// suggestions in a different order each time, and the rendered comment moved
+	// around for no reason. Results are deterministic in shape now.
+	const preds: (Suggestion[] | null)[] = Array.from({ length: chunks.length }, () => null)
 	let usedModel = cfg.modelImprove
 	let totalPrompt = 0
 	let totalCompletion = 0
 
-	const callChunk = async (_chunk: string, chunkNoLn: string): Promise<void> => {
+	const callChunk = async (chunkNoLn: string, index: number): Promise<void> => {
 		const vars = { ...baseVars, diff_no_line_numbers: chunkNoLn }
 		const system = renderTemplate(SUGGESTIONS_SYSTEM_TEMPLATE, vars)
 		const user = renderTemplate(SUGGESTIONS_USER_TEMPLATE, vars)
@@ -127,17 +131,23 @@ export async function runImprove(
 		})
 		totalPrompt += res.usage.promptTokens
 		totalCompletion += res.usage.completionTokens
-		usedModel = res.model
-		const suggestions = parseSuggestions(res.content)
-		if (suggestions) preds.push(suggestions)
+		// Only the FIRST chunk's model is reported. Previously every concurrent
+		// chunk assigned `usedModel`, so the value depended on which finished last —
+		// a race, and an odd thing to surface anyway: one model may have answered
+		// several chunks.
+		if (index === 0) usedModel = res.model
+		preds[index] = parseSuggestions(res.content)
 	}
 
-	await Promise.all(chunks.map((c, i) => callChunk(c, chunksNoLineNumbers[i] ?? c)))
+	await Promise.all(chunks.map((c, i) => callChunk(chunksNoLineNumbers[i] ?? c, i)))
 
 	// merge + filter by score threshold (default 0 → keep all)
+	// `null` entries are chunks that exhausted every model — they contribute no
+	// suggestions, and the failure is already visible as a thrown error upstream.
 	const threshold = 0
 	const all: Suggestion[] = []
 	for (const list of preds) {
+		if (!list) continue
 		for (const s of list) {
 			const score = s.score !== undefined ? Number(s.score) : 1
 			if (score >= threshold) all.push({ ...s, score })

@@ -10,6 +10,7 @@ import { Badge, STATUS_TONE } from "#/components/ui/badge.tsx"
 import { Button } from "#/components/ui/button.tsx"
 import { Card, CardContent } from "#/components/ui/card.tsx"
 import { Input } from "#/components/ui/input.tsx"
+import { formatWhen } from "#/libs/format-when.ts"
 import { orpc } from "#/libs/orpc/client.ts"
 import { reviewKeys } from "./_apis/review-keys.ts"
 
@@ -36,9 +37,17 @@ function ReviewsPage() {
 		offset: page * PAGE_SIZE,
 	}
 
-	const { data } = useSuspenseQuery(
+	const { data, isFetching, refetch } = useSuspenseQuery(
 		orpc.review.list.queryOptions({ input, queryKey: reviewKeys.list(input) }),
 	)
+
+	// A query refetch, NOT `window.location.reload()`. A full reload re-downloads
+	// the SPA, drops the repo filter the operator was mid-way through typing, resets
+	// the page back to 1 and loses scroll position — for a button whose whole job is
+	// "fetch the same view again".
+	const onRefresh = (): void => {
+		void refetch()
+	}
 
 	const rows = data?.rows ?? []
 	const total = data?.total ?? 0
@@ -52,8 +61,8 @@ function ReviewsPage() {
 						{total} review{total === 1 ? "" : "s"}
 					</p>
 				</div>
-				<Button variant="outline" size="sm" onClick={() => window.location.reload()}>
-					Refresh
+				<Button variant="outline" size="sm" onClick={onRefresh} disabled={isFetching}>
+					{isFetching ? "Refreshing…" : "Refresh"}
 				</Button>
 			</header>
 
@@ -119,11 +128,7 @@ function ReviewsPage() {
 										</td>
 										<td className="px-5 py-3 tabular-nums">{row.score ?? "—"}</td>
 										<td className="px-5 py-3 text-slate-600">{row.model ?? "—"}</td>
-										<td className="px-5 py-3 text-slate-600">
-											{row.createdAt
-												? new Date(row.createdAt).toISOString().slice(0, 16).replace("T", " ")
-												: "—"}
-										</td>
+										<td className="px-5 py-3 text-slate-600">{formatWhen(row.createdAt)}</td>
 									</tr>
 								))
 							)}
