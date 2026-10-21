@@ -1,3 +1,18 @@
+# [1.2.0](https://github.com/asepharyana/pr-agent-server/compare/v1.1.13...v1.2.0) (2026-10-21)
+
+
+### Bug Fixes
+
+* **api:** honour the coalesced rerun the db queue promised ([98e1234](https://github.com/asepharyana/pr-agent-server/commit/98e12347d70cf2f7950b23815f5becd8e9676a25))
+* **api:** stop the webhook dropping a queued job onto the floor ([d3dd8a7](https://github.com/asepharyana/pr-agent-server/commit/d3dd8a75e9ff70d59ecf7134e6da29483defbe8f))
+* **worker:** make the notify tests wait for delivery, not for a resolution ([ecd2843](https://github.com/asepharyana/pr-agent-server/commit/ecd28437948a6887d57b9540320a80f42d39b075))
+* **worker:** treat every non-passing CI conclusion as red ([d8cdd12](https://github.com/asepharyana/pr-agent-server/commit/d8cdd123d298af3e9c991e8ce2cb6998b6e42049))
+
+
+### Features
+
+* **api:** record review history — the dashboard has never had any ([3e43700](https://github.com/asepharyana/pr-agent-server/commit/3e43700e5f6c528f34e260f2f9b2d365dd7bd3eb))
+
 ## [1.1.13](https://github.com/asepharyana/pr-agent-server/compare/v1.1.12...v1.1.13) (2026-10-21)
 
 
