@@ -65,8 +65,10 @@ function LoginPage() {
 	}
 
 	// The server's rejection message is shown verbatim: it is written to be safe
-	// (it does not say whether the address exists, or who IS allowed).
-	const shownError = error ?? callbackError ?? null
+	// (it does not say whether the address exists, or who IS allowed). A callback
+	// error arrives as a CODE from better-auth, so it needs translating — showing
+	// the operator a bare "redirect_uri_mismatch" tells them nothing actionable.
+	const shownError = error ?? describeOAuthError(callbackError)
 
 	return (
 		<Card className="w-full max-w-sm">
@@ -116,4 +118,34 @@ function LoginPage() {
 			</CardContent>
 		</Card>
 	)
+}
+
+/**
+ * Turn a better-auth callback error code into something an operator can act on.
+ *
+ * The redirect carries a short code (`?error=access_denied`), and rendering it raw
+ * leaves the user staring at a slug. These are the codes better-auth actually
+ * emits for this flow — measured, not guessed: `error?error=<code>` 302s to
+ * `/?error=<code>` for every one of them.
+ *
+ * Unknown codes fall through as a generic message rather than the raw slug, so a
+ * future change in better-auth never puts an internal identifier on screen.
+ */
+function describeOAuthError(code: string | undefined): string | null {
+	if (!code) return null
+	switch (code) {
+		case "access_denied":
+			return "Google sign-in was cancelled, or that Google account denied the request."
+		case "state_mismatch":
+			return "The sign-in attempt expired or was tampered with. Please try again."
+		case "redirect_uri_mismatch":
+			return "Google rejected this app's redirect URI. It must be registered in the Google Cloud console."
+		case "account_not_linked":
+			return "That Google account is not linked to a user here."
+		case "email_not_found":
+		case "not_allowed":
+			return "This account is not authorised to use this dashboard."
+		default:
+			return "Google sign-in failed. Please try again."
+	}
 }
