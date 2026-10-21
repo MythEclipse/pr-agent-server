@@ -7,9 +7,16 @@ import { createORPCClient } from "@orpc/client"
 import { RPCLink } from "@orpc/client/fetch"
 import { createTanstackQueryUtils } from "@orpc/tanstack-query"
 import type { TClient } from "@pr-agent/api"
+import { apiOrigin } from "#/libs/auth/client.ts"
 
+// `apiOrigin()` rather than `import.meta.env.VITE_API_URL ?? ""`: the same
+// relative-URL defect as the auth client (`/rpc` instead of `<origin>/rpc`).
+// `RPCLink` resolves a relative URL against the current page rather than
+// throwing, so this one was silent — but it made the API host depend on a build
+// variable that production never sets, which is a second way to point the app at
+// the wrong place.
 const link = new RPCLink({
-	url: `${import.meta.env.VITE_API_URL ?? ""}/rpc`,
+	url: `${apiOrigin()}/rpc`,
 	fetch: (input, init) => fetch(input, { ...init, credentials: "include" }),
 })
 
