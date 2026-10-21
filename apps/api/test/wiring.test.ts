@@ -47,17 +47,20 @@ describe("composition root wiring", () => {
 
 	// Both callers must share one resolver; a second copy is how the original
 	// pair of fixes drifted apart in the first place. `main.ts` sits at src/ so
-	// its specifier is "./…", the two route files one level deeper.
+	// its specifier is "./…", the route file one level deeper.
+	//
+	// This used to list legacy-server.ts too. That file held a SECOND, unreferenced
+	// copy of the whole route table (the Bun-era server, `startServer`) and had
+	// silently drifted: no privateKeyPem port type, no review history, none of the
+	// fixes in main.ts. Nothing imported it — not the CLI, not the Dockerfile
+	// (both use main.ts/dist/main.js) — so it was deleted rather than kept in sync.
 	test("the key resolver has a single definition and is shared", () => {
 		const def = src("src/infrastructure/config/private-key.ts")
 		expect(def.match(/export function resolvePrivateKeyPem/g)).toHaveLength(1)
 		expect(src("src/main.ts")).toContain('from "./infrastructure/config/private-key.ts"')
-		for (const rel of [
-			"src/presentation/http/legacy-routes.ts",
-			"src/presentation/http/legacy-server.ts",
-		]) {
-			expect(src(rel)).toContain('from "../../infrastructure/config/private-key.ts"')
-		}
+		expect(src("src/presentation/http/legacy-routes.ts")).toContain(
+			'from "../../infrastructure/config/private-key.ts"',
+		)
 	})
 
 	// Guard the regression directly: the resolver must actually read the file the

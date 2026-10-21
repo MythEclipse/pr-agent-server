@@ -64,4 +64,31 @@ describe("webhook", () => {
 		expect(r.body).toEqual({ ok: true, triggered: true })
 		expect(jobs).toEqual([{ owner: "o", repo: "r", pr: 7 }])
 	})
+
+	test("a failing store answers 5xx so GitHub redelivers, and does not crash", async () => {
+		// The queue is async (QUEUE_BACKEND=db) and this call used to be
+		// fire-and-forget: a Postgres error became an unhandled rejection — fatal
+		// on Node 24 — AFTER the handler had already answered `triggered: true`.
+		// Probed before the fix: the 200 went out and then the process died.
+		//
+		// 5xx is the correct answer because GitHub redelivers a failed delivery, so
+		// a store outage delays the review instead of erasing it.
+		const body = JSON.stringify({
+			action: "opened",
+			pull_request: {
+				number: 8,
+				state: "open",
+				draft: false,
+				url: "https://api.github.com/repos/o/r/pulls/8",
+			},
+		})
+		const failing = {
+			enqueue: async (): Promise<"queued" | "deduped"> => {
+				throw new Error("ECONNREFUSED 5432")
+			},
+		}
+		const r = await handleWebhook(env, body, sign(body), "pull_request", failing)
+		expect(r.status).toBe(500)
+		expect(r.body).toEqual({ error: "enqueue failed" })
+	})
 })

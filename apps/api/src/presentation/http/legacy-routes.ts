@@ -7,21 +7,19 @@
 // fallthrough behaviour are contracts, preserved verbatim from the Bun server.
 
 import type { Hono } from "hono"
-import type { ReviewJob } from "../../application/queue/review-queue.ts"
-import { handleWebhook, type WebhookEnv } from "../../application/webhook/handle-webhook.ts"
+import {
+	handleWebhook,
+	type IReviewQueuePort,
+	type WebhookEnv,
+} from "../../application/webhook/handle-webhook.ts"
 import { loadConfig } from "../../infrastructure/config/legacy-config.ts"
 import { resolvePrivateKeyPem } from "../../infrastructure/config/private-key.ts"
 import { sendDiscord } from "../../infrastructure/notify/discord.ts"
 import { analyticsRoutes } from "./analytics.ts"
 import { setupCallback } from "./setup.ts"
 
-/** Either queue backend satisfies this. */
-interface IEnqueueOnly {
-	enqueue(job: ReviewJob): "queued" | "deduped" | Promise<"queued" | "deduped">
-}
-
 export interface LegacyRouteDeps {
-	queue: IEnqueueOnly
+	queue: IReviewQueuePort
 }
 
 export function startLegacyRoutes(app: Hono, deps: LegacyRouteDeps): void {
@@ -62,7 +60,7 @@ export function startLegacyRoutes(app: Hono, deps: LegacyRouteDeps): void {
 		const body = await c.req.text()
 		const sig = c.req.header("x-hub-signature-256") ?? null
 		const event = c.req.header("x-github-event") || ""
-		const result = await handleWebhook(fullEnv, body, sig, event, queue as never)
+		const result = await handleWebhook(fullEnv, body, sig, event, queue)
 		return c.json(result.body, result.status as never)
 	}
 	app.post("/api/v1/github_webhooks", webhook)

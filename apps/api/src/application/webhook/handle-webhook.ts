@@ -5,9 +5,25 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto"
 import type { Config } from "../../infrastructure/config/legacy-config.ts"
-import type { ReviewQueue } from "../queue/review-queue.ts"
 
 export type { ReviewJob } from "../queue/review-queue.ts"
+
+/**
+ * The only thing this handler needs from a queue: somewhere to put a job.
+ *
+ * Declared as a PORT rather than narrowed to the in-memory `ReviewQueue` class,
+ * because both backends satisfy it and only one of them is asynchronous — which
+ * is exactly what the caller must know to await it. Typing it as the class made
+ * the Postgres backend's promise invisible here, and that is how it went
+ * unhandled.
+ */
+export interface IReviewQueuePort {
+	enqueue(job: {
+		owner: string
+		repo: string
+		pr: number
+	}): "queued" | "deduped" | Promise<"queued" | "deduped">
+}
 
 export interface WebhookEnv {
 	cfg: Config
@@ -23,7 +39,7 @@ export async function handleWebhook(
 	body: string,
 	signatureHeader: string | null,
 	event: string,
-	queue: ReviewQueue,
+	queue: IReviewQueuePort,
 ): Promise<{ status: number; body: unknown }> {
 	// HMAC verification (sha256)
 	if (!signatureHeader) {
@@ -77,7 +93,21 @@ export async function handleWebhook(
 		return { status: 200, body: { ok: true, ignored: true, error: "no repo" } }
 	}
 
-	// Fire and forget: the queue runs the review in the background.
-	queue.enqueue({ owner, repo, pr: pr.number })
+	// Enqueue, and SURVIVE a store failure. This used to be fire-and-forget:
+	// `queue.enqueue(...)` returned a promise nobody awaited, so a Postgres error
+	// became an unhandled rejection — fatal on Node 24 — while the handler had
+	// already answered `{triggered: true}`. Probed against a rejecting queue: the
+	// 200 went out and then the process died.
+	//
+	// Answering 5xx is the point, not a nicety: GitHub redelivers a failed webhook
+	// delivery, so a store outage delays the review instead of erasing it. A 200
+	// here would tell GitHub the event was handled and nothing would ever retry it.
+	// The insert is a single round-trip, well inside the 10s webhook budget.
+	try {
+		await queue.enqueue({ owner, repo, pr: pr.number })
+	} catch (err) {
+		console.error(`[webhook] enqueue failed for ${owner}/${repo}#${pr.number}:`, err)
+		return { status: 500, body: { error: "enqueue failed" } }
+	}
 	return { status: 200, body: { ok: true, triggered: true } }
 }
