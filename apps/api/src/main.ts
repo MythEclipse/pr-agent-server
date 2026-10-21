@@ -21,6 +21,7 @@ import { cors } from "hono/cors"
 import { logger } from "hono/logger"
 import { requestId } from "hono/request-id"
 import { ReviewQueue } from "./application/queue/review-queue.ts"
+import { extractReviewScore, makeRecordReview } from "./application/review/record-review.ts"
 import { buildUseCases } from "./application/use-cases.ts"
 import { buildAuth } from "./infrastructure/auth/better-auth.ts"
 import { loadEnv, type TEnv } from "./infrastructure/config/env.ts"
@@ -99,9 +100,37 @@ export async function startApp(options: StartOptions = {}) {
 
 	// 4b. legacy routes: /health, /setup/callback, the webhook, notify,
 	// /api/metrics, /api/analytics, and the 404 fallthrough.
+	//
+	// Review HISTORY is written here, around the run. `reviews` is what the
+	// dashboard reads and nothing used to write to it — measured on the live
+	// database: 88 completed queue jobs, 0 review rows, so the UI was empty
+	// forever. The `queued` row goes in first so a run that is in flight (or that
+	// takes the process down) is visible, then it moves to success/failed.
+	const history = makeRecordReview({ reviews })
+
 	const runJob = async (job: { owner: string; repo: string; pr: number }): Promise<void> => {
+		const reviewId = await history.start({ owner: job.owner, repo: job.repo, pr: job.pr })
 		try {
-			await useCases.legacy.runReview(job.owner, job.repo, job.pr)
+			const result = await useCases.legacy.runReview(job.owner, job.repo, job.pr)
+			// `runReview` is typed `unknown` through the use-case port (it keeps the
+			// legacy signature), so the fields this needs are narrowed here rather
+			// than widening the port for one caller.
+			const r = result as {
+				model?: string
+				markdown?: string
+				data?: Record<string, unknown> | null
+				headSha?: string
+			} | null
+			await history.finish(reviewId, {
+				owner: job.owner,
+				repo: job.repo,
+				pr: job.pr,
+				status: "success",
+				model: r?.model,
+				markdown: r?.markdown,
+				score: extractReviewScore(r?.data ?? null),
+				headSha: r?.headSha,
+			})
 		} catch (err) {
 			// Rethrown, not logged-and-swallowed. `db-review-queue` records a
 			// rejection as `failed` with the error, while a resolved promise is
@@ -109,6 +138,13 @@ export async function startApp(options: StartOptions = {}) {
 			// success. The queue drained, nothing was ever retried, and the PR
 			// silently never got its review comment. A failing review must be a
 			// failing job.
+			await history.finish(reviewId, {
+				owner: job.owner,
+				repo: job.repo,
+				pr: job.pr,
+				status: "failed",
+				error: err instanceof Error ? err.message : String(err),
+			})
 			console.error(`[queue] review FAILED for ${job.owner}/${job.repo}#${job.pr}: ${String(err)}`)
 			throw err
 		}

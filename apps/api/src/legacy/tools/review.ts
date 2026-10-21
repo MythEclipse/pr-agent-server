@@ -23,6 +23,14 @@ export interface ReviewResult {
 	remainingFiles: string[]
 	diff: string
 	status: string
+	/**
+	 * The head SHA this review actually read.
+	 *
+	 * Returned so the caller can record history against the commit it describes.
+	 * The dashboard's `reviews` table has a `head_sha` column for exactly this,
+	 * and without it a stored row could not be matched to the commit it judged.
+	 */
+	headSha: string
 }
 
 export async function runReview(
@@ -193,6 +201,9 @@ export async function runReview(
 		remainingFiles,
 		diff,
 		status: "success",
+		// Already fetched at the top of this function for the diff; no extra
+		// round-trip. `pr.head.sha` is the commit the prompt was built from.
+		headSha: pr.head.sha,
 	}
 }
 
