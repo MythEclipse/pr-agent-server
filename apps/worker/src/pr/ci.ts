@@ -49,6 +49,26 @@ const joinNames = (checks: any[]): string =>
 		.join(", ")
 
 /**
+ * Every `conclusion` that means the run did NOT pass.
+ *
+ * GitHub's set is `success | failure | neutral | cancelled | skipped |
+ * timed_out | action_required | stale | startup_failure`. Only `success`,
+ * `neutral` and `skipped` are non-blocking; the five below are all "the suite
+ * did not run to a pass", and a required-check rule refuses to merge on every
+ * one of them. Enumerating the red set rather than the green set is deliberate:
+ * a conclusion GitHub adds later defaults to GREEN under a green-list, and this
+ * gate's failure mode is a merge.
+ */
+const FAILED_CONCLUSIONS = new Set([
+	"failure",
+	"cancelled",
+	"timed_out",
+	"action_required",
+	"stale",
+	"startup_failure",
+])
+
+/**
  * Python `check_ci_passed(token, repo_full, sha)` (lines 395-406).
  *
  * No CI CONFIGURED is a pass, not a failure: a repo with no checks has nothing
@@ -91,11 +111,22 @@ export async function checkCiPassed(
 		return { ok: true, msg: "✅ No CI configured — skipping CI gate" } // line 399
 	}
 
-	// Python lines 400-405. `conclusion === "failure"` only — a cancelled or
-	// timed-out run is NOT a failure here, it is pending, and the two produce
-	// different messages. The failure check comes first so a mixed run reports
-	// the terminal problem rather than the in-flight one.
-	const failed = checks.filter((c) => c?.conclusion === "failure")
+	// Python lines 400-405. The FAILURE SET, not the single string "failure".
+	//
+	// GitHub reports nine conclusions, and only `success` means a run passed.
+	// This gate used to test `conclusion === "failure"` alone and then treat
+	// every `completed` check as green, so a `cancelled`, `timed_out`,
+	// `startup_failure`, `action_required` or `stale` run — none of which
+	// executed any of the suite — walked through the gate and the worker merged
+	// on it. Probed directly: all five returned `✅ 1 checks green`.
+	//
+	// `neutral` and `skipped` stay GREEN deliberately. They are GitHub's
+	// non-blocking verdicts (a path-filtered job, a conditional step) and a
+	// required-check rule does not count them as failures either; treating them
+	// as red would block every PR in a repo that skips a job on some paths.
+	const failed = checks.filter(
+		(c) => c?.status === "completed" && FAILED_CONCLUSIONS.has(c?.conclusion),
+	)
 	if (failed.length) return { ok: false, msg: `CI FAILED: ${joinNames(failed)}` }
 	const pending = checks.filter((c) => c?.status !== "completed")
 	if (pending.length) return { ok: false, msg: `CI pending: ${joinNames(pending)}` }

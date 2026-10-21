@@ -466,6 +466,52 @@ describe("ci gate — messages and guard", () => {
 		)
 		expect(r).toEqual({ ok: true, msg: "✅ 2 checks green" })
 	})
+	test("a cancelled or timed-out run is RED, not green", async () => {
+		// The gate used to test `conclusion === "failure"` alone and treat every
+		// other `completed` verdict as a pass, so a run that never executed the
+		// suite merged the PR. Probed before the fix: all five of these returned
+		// `✅ 1 checks green`.
+		for (const conclusion of [
+			"cancelled",
+			"timed_out",
+			"startup_failure",
+			"action_required",
+			"stale",
+		]) {
+			const r = await checkCiPassed(
+				{
+					request: async () => ({
+						status: 200,
+						data: { check_runs: [{ name: "ci", conclusion, status: "completed" }] },
+					}),
+				},
+				"t",
+				"o/r",
+				"sha",
+			)
+			expect(r.ok).toBe(false)
+			expect(r.msg).toBe("CI FAILED: ci")
+		}
+	})
+	test("a non-blocking verdict stays green", async () => {
+		// `neutral` and `skipped` are GitHub's non-blocking conclusions and a
+		// required-check rule passes them too. Treating them as red would block
+		// every PR in a repo that path-filters a job.
+		for (const conclusion of ["success", "neutral", "skipped"]) {
+			const r = await checkCiPassed(
+				{
+					request: async () => ({
+						status: 200,
+						data: { check_runs: [{ name: "a", conclusion, status: "completed" }] },
+					}),
+				},
+				"t",
+				"o/r",
+				"sha",
+			)
+			expect(r.ok).toBe(true)
+		}
+	})
 	test("a transport failure is reported as unknown, never as 'no CI'", async () => {
 		const r = await checkCiPassed(
 			{ request: async () => ({ status: 0, data: {} }) },
