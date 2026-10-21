@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/asepharyana/pr-agent-server/compare/v1.4.4...v1.5.0) (2026-10-21)
+
+
+### Features
+
+* **worker:** fix until CI is green, with the real failure in the prompt ([d8f8de1](https://github.com/asepharyana/pr-agent-server/commit/d8f8de1d9f1d28df934daade41c49f48dd675351)), closes [mcpedia#28](https://github.com/mcpedia/issues/28) [mcpedia#28](https://github.com/mcpedia/issues/28)
+
 ## [1.4.4](https://github.com/asepharyana/pr-agent-server/compare/v1.4.3...v1.4.4) (2026-10-21)
 
 
