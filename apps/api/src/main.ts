@@ -23,6 +23,7 @@ import { requestId } from "hono/request-id"
 import { ReviewQueue } from "./application/queue/review-queue.ts"
 import { extractReviewScore, makeRecordReview } from "./application/review/record-review.ts"
 import { buildUseCases } from "./application/use-cases.ts"
+import { describeAdminLockout, listAdminEmails } from "./infrastructure/auth/admin-lockout.ts"
 import { isEmailAllowed, parseAllowlist } from "./infrastructure/auth/allowlist.ts"
 import { buildAuth } from "./infrastructure/auth/better-auth.ts"
 import { loadEnv, type TEnv } from "./infrastructure/config/env.ts"
@@ -185,6 +186,10 @@ export async function startApp(options: StartOptions = {}) {
 	// is built per request at the call site, which is where the session cookie
 	// is actually readable.
 	const allowedEmails = parseAllowlist(env.AUTH_ALLOWED_EMAILS)
+	// Boot-time only: names the misconfiguration once, instead of the per-request
+	// 401s that made the dashboard look empty with no explanation.
+	const adminEmails = await listAdminEmails(db)
+	for (const line of describeAdminLockout(adminEmails, allowedEmails)) console.warn(line)
 
 	const resolveSession = async (headers: Headers): Promise<TSession | null> => {
 		const result = await auth.api.getSession({ headers })
