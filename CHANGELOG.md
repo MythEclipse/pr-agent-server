@@ -1,3 +1,10 @@
+## [1.4.4](https://github.com/asepharyana/pr-agent-server/compare/v1.4.3...v1.4.4) (2026-10-21)
+
+
+### Bug Fixes
+
+* **web:** explain the empty review history instead of guessing ([2d0e72a](https://github.com/asepharyana/pr-agent-server/commit/2d0e72a30b8bd142f7e753c13cadab0d39b3d9bd))
+
 ## [1.4.3](https://github.com/asepharyana/pr-agent-server/compare/v1.4.2...v1.4.3) (2026-10-21)
 
 
