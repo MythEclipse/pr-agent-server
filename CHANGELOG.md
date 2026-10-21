@@ -1,3 +1,10 @@
+## [1.2.3](https://github.com/asepharyana/pr-agent-server/compare/v1.2.2...v1.2.3) (2026-10-21)
+
+
+### Bug Fixes
+
+* **api:** survive a failed history write, and set the public auth origin ([bb5521d](https://github.com/asepharyana/pr-agent-server/commit/bb5521d38b1c4cbdc7a39ecb764a586850661959))
+
 ## [1.2.2](https://github.com/asepharyana/pr-agent-server/compare/v1.2.1...v1.2.2) (2026-10-21)
 
 
