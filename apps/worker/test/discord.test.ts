@@ -190,6 +190,9 @@ describe("notifyReview", () => {
 					"https://github.com/o/repo/pull/42",
 				),
 			).resolves.toBeUndefined()
+			// `notifyReview` swallows every fetch error, so its resolution is not
+			// evidence of delivery — wait for the stub to actually see the POST.
+			await server.waitForRequests(1)
 			expect(seen).toHaveLength(1)
 			expect(seen[0].path).toBe("/api/v1/notify_review")
 			expect(seen[0].method).toBe("POST")
@@ -217,6 +220,10 @@ describe("notifyReview", () => {
 		process.env.PR_AGENT_NOTIFY_URL = `${server.url}/api/v1/notify_review`
 		try {
 			await notifyReview("o/repo", 7, "changes", "s".repeat(900), 8.5, "")
+			// Same reason as the POST-shape test above: a resolved `notifyReview` does
+			// not prove the request landed, and this assertion read `seen[0]` before
+			// the loopback POST could arrive under load.
+			await server.waitForRequests(1)
 			const body = seen[0] as Record<string, unknown>
 			expect(body.summary).toHaveLength(500)
 			expect(body.summary).toBe("s".repeat(500))
