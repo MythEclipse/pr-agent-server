@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/asepharyana/pr-agent-server/compare/v1.2.0...v1.2.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **web:** stop the dashboard rendering a blank white page ([9729398](https://github.com/asepharyana/pr-agent-server/commit/9729398db78a1ed5551ecf9a035a89d2347922ef))
+
 # [1.2.0](https://github.com/asepharyana/pr-agent-server/compare/v1.1.13...v1.2.0) (2026-10-21)
 
 
