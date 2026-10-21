@@ -1,3 +1,10 @@
+## [1.3.2](https://github.com/asepharyana/pr-agent-server/compare/v1.3.1...v1.3.2) (2026-10-21)
+
+
+### Bug Fixes
+
+* **web:** show local time in the review history, and refresh without a reload ([96af3f6](https://github.com/asepharyana/pr-agent-server/commit/96af3f6161e5ec808e229e0d6c43defdd7597513))
+
 ## [1.3.1](https://github.com/asepharyana/pr-agent-server/compare/v1.3.0...v1.3.1) (2026-10-21)
 
 
