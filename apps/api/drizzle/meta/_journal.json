@@ -15,6 +15,13 @@
 			"when": 1791452050155,
 			"tag": "0001_auth_tables",
 			"breakpoints": true
+		},
+		{
+			"idx": 2,
+			"version": "7",
+			"when": 1792594267261,
+			"tag": "0002_add_served_model",
+			"breakpoints": true
 		}
 	]
 }

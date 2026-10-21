@@ -56,7 +56,20 @@ function ReviewDetail() {
 						</div>
 						<div>
 							<dt className="text-slate-500">Model</dt>
-							<dd>{row.model}</dd>
+							{/*
+							 * Show the SERVED model next to the requested one when they
+							 * differ. The gateway is configured with same-named "combo"
+							 * aliases that resolve to free-tier models, so a review
+							 * requested as `claude-sonnet-5` can be written by
+							 * `cat-jam-free`. Rendering only the request made the page
+							 * an attribution it could not support.
+							 */}
+							<dd>
+								{row.model}
+								{row.servedModel && row.servedModel !== row.model ? (
+									<span className="text-amber-600"> → served {row.servedModel}</span>
+								) : null}
+							</dd>
 						</div>
 						<div>
 							<dt className="text-slate-500">Head SHA</dt>

@@ -32,8 +32,17 @@ export interface RecordReviewFinishInput {
 	repo: string
 	pr: number
 	status: Extract<TReviewStatus, "success" | "failed">
-	/** The model that actually answered, after any fallback. */
+	/** The model we ASKED for, after any fallback. */
 	model?: string
+	/**
+	 * The model the endpoint reported it actually served.
+	 *
+	 * Recorded alongside `model` because they disagree on this deployment: the
+	 * gateway answers a request for `claude-sonnet-5` with `cat-jam-free`. When
+	 * present this is the honest attribution and should be preferred for
+	 * display; `model` remains what was requested.
+	 */
+	servedModel?: string
 	/** Rendered review markdown, as published to GitHub. */
 	markdown?: string
 	/** Extracted from the model's YAML. */
@@ -118,6 +127,11 @@ export function makeRecordReview(deps: RecordReviewDeps) {
 				await deps.reviews.updateReview(id, {
 					status: input.status,
 					model: input.model ?? null,
+					// Recorded when the endpoint reports it, so the dashboard can
+					// show the model that really answered rather than the one we
+					// asked for. Null when the endpoint omits `model` (some
+					// OpenAI-compatible servers do).
+					servedModel: input.servedModel ?? null,
 					markdown: input.markdown ?? null,
 					score:
 						input.score === undefined ? null : input.score === null ? null : String(input.score),

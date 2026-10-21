@@ -13,6 +13,23 @@ import type { Config } from "../config/legacy-config.ts"
 export interface ChatResult {
 	content: string
 	finishReason: string
+	/**
+	 * The model the endpoint says it ACTUALLY used.
+	 *
+	 * Distinct from the model we asked for, and the distinction is not academic:
+	 * the configured gateway resolves a request for `claude-sonnet-5` through a
+	 * `combos` row of the same name whose chain is free-tier models, and answers
+	 * `"model": "cat-jam-free"`. Verified 2026-10-21 against the live endpoint —
+	 * `claude-opus-5` came back as `deepseek-v4.1-flash-free`, `claude-sonnet-5`
+	 * as `cat-jam-free`, and there are ZERO `anthropic` provider connections in
+	 * the gateway's DB at all.
+	 *
+	 * Nothing recorded that, so `reviews.model` read `claude-sonnet-5` for every
+	 * review a free model wrote. That is an audit trail asserting something
+	 * false, which is worse than no audit trail: the operator lowered their
+	 * guard on the strength of an attribution that was never true.
+	 */
+	servedModel?: string
 	usage?: {
 		promptTokens?: number
 		completionTokens?: number
@@ -29,9 +46,31 @@ export type ChatCall = (o: {
 	cfg: Config
 }) => Promise<ChatResult>
 
+/**
+ * Warn when the endpoint answers with a different model than we asked for.
+ *
+ * This is not cosmetic. The configured gateway defines `combos` rows named after
+ * Claude models whose chains are free-tier models, so a request for
+ * `claude-sonnet-5` is answered by `cat-jam-free` while the response still says
+ * HTTP 200. Measured 2026-10-21: `claude-opus-5` → `deepseek-v4.1-flash-free`,
+ * `claude-sonnet-5` → `cat-jam-free`, and the gateway's DB holds ZERO
+ * `anthropic` provider connections, so no Claude model can be reached at all.
+ *
+ * A silent substitution makes every quality observation meaningless — you cannot
+ * reason about "Claude's review was shallow" when Claude never ran. One line per
+ * call is enough to make it visible in the logs, and `servedModel` carries the
+ * same fact into the database.
+ */
+function warnOnModelSubstitution(requested: string, served: string | undefined): void {
+	if (!served || served === requested) return
+	console.warn(
+		`[llm] model substituted: requested "${requested}", endpoint served "${served}" — ` +
+			"the gateway is answering with a different model than configured",
+	)
+}
+
 const isTransient = (e: unknown) => {
 	const m = String((e as Error)?.message ?? e)
-	if (/LLM request failed \((4\d\d)\)/.test(m)) return false // client error → don't retry
 	// An empty body is non-deterministic, not a client error, so the same model
 	// must get its retries. Measured against the real prod prompt: the identical
 	// request for claude-haiku-4-5 returned an empty `tool_calls` body on 3 of 3
@@ -111,9 +150,14 @@ export async function callWithFallback(opts: {
 						continue
 					}
 				}
+				warnOnModelSubstitution(model, r.servedModel)
 				return {
 					content: r.content,
 					model,
+					// Propagate what the endpoint actually served. `model` above is
+					// what we ASKED for and must stay that way — it keys the retry
+					// chain — but the caller needs the truth for the audit trail.
+					servedModel: r.servedModel,
 					usage: {
 						promptTokens: r.usage?.promptTokens ?? 0,
 						completionTokens: r.usage?.completionTokens ?? 0,
@@ -237,6 +281,7 @@ export async function chatCompletion(opts: {
 			throw new Error(`LLM request failed (${resp.status}): ${detail || resp.statusText}`)
 		}
 		const data = (await resp.json()) as {
+			model?: string
 			choices?: { message?: { content?: string | null }; finish_reason?: string }[]
 			usage?: {
 				prompt_tokens?: number
@@ -256,6 +301,10 @@ export async function chatCompletion(opts: {
 		return {
 			content,
 			finishReason: choice?.finish_reason ?? "stop",
+			// What the gateway says it served. Kept separate from the requested
+			// model so the caller can record the truth; undefined when the
+			// endpoint omits it.
+			servedModel: typeof data.model === "string" ? data.model : undefined,
 			usage: data.usage
 				? {
 						promptTokens: data.usage.prompt_tokens,

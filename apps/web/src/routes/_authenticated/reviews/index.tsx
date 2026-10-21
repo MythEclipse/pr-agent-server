@@ -136,7 +136,13 @@ function ReviewsPage() {
 											<Badge tone={STATUS_TONE[row.status] ?? "neutral"}>{row.status}</Badge>
 										</td>
 										<td className="px-5 py-3 tabular-nums">{row.score ?? "—"}</td>
-										<td className="px-5 py-3 text-slate-600">{row.model ?? "—"}</td>
+										<td className="px-5 py-3 text-slate-600">
+											{/* Served model in parens when the gateway substituted it. */}
+											{row.model ?? "—"}
+											{row.servedModel && row.servedModel !== row.model ? (
+												<span className="text-amber-600"> ({row.servedModel})</span>
+											) : null}
+										</td>
 										<td className="px-5 py-3 text-slate-600">{formatWhen(row.createdAt)}</td>
 									</tr>
 								))

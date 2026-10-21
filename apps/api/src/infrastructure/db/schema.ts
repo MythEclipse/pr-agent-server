@@ -40,6 +40,16 @@ export const reviews = pgTable(
 		status: text("status").$type<TReviewStatus>().notNull().default("queued"),
 		/** Model that actually answered, after any fallback. */
 		model: text("model"),
+		/**
+		 * The model the LLM endpoint reported it actually SERVED.
+		 *
+		 * Needed because `model` is what we asked for and the gateway may answer
+		 * with something else entirely: it resolves `claude-sonnet-5` through a
+		 * same-named `combos` row whose chain is free-tier models and returns
+		 * `"model": "cat-jam-free"`. Without this column the dashboard attributed
+		 * every review to Claude while a free model wrote it.
+		 */
+		servedModel: text("served_model"),
 		/** Rendered review markdown, as published to GitHub. */
 		markdown: text("markdown"),
 		/** Kept as text because the prompt may emit "8", "8/10" or "85%". */

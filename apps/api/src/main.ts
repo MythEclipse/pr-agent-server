@@ -141,6 +141,7 @@ export async function startApp(options: StartOptions = {}) {
 			// than widening the port for one caller.
 			const r = result as {
 				model?: string
+				servedModel?: string
 				markdown?: string
 				data?: Record<string, unknown> | null
 				headSha?: string
@@ -151,6 +152,9 @@ export async function startApp(options: StartOptions = {}) {
 				pr: job.pr,
 				status: "success",
 				model: r?.model,
+				// The honest attribution. The gateway rewrites `claude-sonnet-5`
+				// to a free-tier model and only this field reveals it.
+				servedModel: r?.servedModel,
 				markdown: r?.markdown,
 				score: extractReviewScore(r?.data ?? null),
 				headSha: r?.headSha,

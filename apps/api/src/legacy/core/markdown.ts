@@ -112,7 +112,15 @@ export function convertToMarkdownV2(
 				md += `</td></tr>\n`
 			}
 		} else if (keyNice.toLowerCase().includes("key issues to review")) {
-			// array of {relevant_file, relevant_line, suggestion} objects (or string)
+			// Each item is either a string or a KeyIssuesComponentLink.
+			//
+			// The PROMPT asks for {relevant_file, issue_header, issue_content,
+			// start_line, end_line} (see prompts/review.ts), but this renderer used
+			// to read only {relevant_file, relevant_line, suggestion} — an older
+			// schema. With the current prompt BOTH the line number and the ENTIRE
+			// issue body were dropped: a review reporting a real bug rendered as
+			// "**path** — " with an empty description, and the worker's safety gate
+			// then had nothing to read. Read both shapes.
 			const items = Array.isArray(value) ? value : [value]
 			let v = ""
 			const parts: string[] = []
@@ -121,12 +129,26 @@ export function convertToMarkdownV2(
 					parts.push(it)
 					continue
 				}
-				const o = (it ?? {}) as Record<string, string>
-				const file = o.relevant_file || ""
-				const line = o.relevant_line || ""
-				const sug = o.suggestion || ""
+				const o = (it ?? {}) as Record<string, unknown>
+				const str = (k: string): string => {
+					const x = o[k]
+					return typeof x === "string" ? x : typeof x === "number" ? String(x) : ""
+				}
+				const file = str("relevant_file")
+				// line: `relevant_line` (old) or start_line/end_line (current prompt)
+				const start = str("start_line")
+				const end = str("end_line")
+				const line = start
+					? end && end !== start
+						? `${start}-${end}`
+						: start
+					: str("relevant_line")
+				// body: `suggestion` (old) or issue_header + issue_content (current)
+				const header = str("issue_header")
+				const content = str("issue_content") || str("suggestion")
+				const body = header && content ? `**${header}** — ${content}` : header || content
 				const loc = file ? `${file}${line ? `:${line}` : ""}` : ""
-				parts.push(loc ? `**${loc}** — ${sug}` : sug)
+				parts.push(loc ? (body ? `**${loc}** — ${body}` : `**${loc}**`) : body)
 			}
 			v = parts.filter(Boolean).join("\n\n") || "No key issues identified"
 			if (gfmSupported) {

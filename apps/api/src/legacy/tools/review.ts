@@ -11,12 +11,24 @@ import { countPromptTokens } from "../core/token.ts"
 import { loadYaml } from "../core/yaml.ts"
 import { clipTokens, getPrDiff } from "../diff/index.ts"
 import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "../prompts/review.ts"
+import { analyseDependencyPr, renderDependencyFacts } from "./dependency-facts.ts"
 import { publishPersistent } from "./publish.ts"
 
 export interface ReviewResult {
 	markdown: string
 	data: Record<string, unknown> | null
 	model: string
+	/**
+	 * The model the LLM endpoint reported it actually served, when it says.
+	 *
+	 * `model` is what we ASKED for. On the configured gateway those differ: the
+	 * gateway resolves `claude-sonnet-5` through a same-named `combos` row whose
+	 * chain is free-tier models, so the answer comes back attributed to
+	 * `cat-jam-free` and no `anthropic` connection exists at all. Recording only
+	 * the requested name made the dashboard claim every review was written by
+	 * Claude, which is the opposite of an audit trail.
+	 */
+	servedModel?: string
 	promptTokens: number
 	completionTokens: number
 	cachedTokens: number
@@ -184,33 +196,51 @@ export async function runReview(
 	//
 	// Measured before this: a PR of ~5000 changed lines (~128k tokens) hit the
 	// 128k cap and was silently compressed to a subset.
+	// Compute the dependency movement BEFORE the model is asked anything.
+	//
+	// A version bump is mechanically knowable, so it must not depend on a model's
+	// reading of a 500-line lockfile diff. On asepharyana/GMW#119 the model
+	// returned "No key issues identified" at score 95 for two version bumps; the
+	// facts below say which packages moved, by how much, and whether the lockfile
+	// kept up — and they are true regardless of which model answers, or whether
+	// the gateway substitutes a weaker one.
+	const depReport = analyseDependencyPr(files)
+	const depFacts = renderDependencyFacts(depReport)
+
 	const published =
 		remainingFiles.length > 0 ? `${markdown}\n\n${largePrNotice(remainingFiles)}` : markdown
 
+	// Prepend the computed facts for a dependency PR. Placed ABOVE the model's
+	// table because it is the reliable half of the review: whatever the model
+	// concluded, the reader can see exactly what moved.
+	const withFacts = depFacts ? `${depFacts}\n\n${published}` : published
+
 	// publish
 	if (opts?.publish !== false) {
-		if (published) {
+		if (withFacts) {
 			// persistent comment (replace prev "## PR Reviewer Guide 🔍")
 			if (r.persistentComment) {
 				await publishPersistent(
 					provider,
-					published,
+					withFacts,
 					"## PR Reviewer Guide 🔍",
 					"review",
 					r.finalUpdateMessage,
 				)
 			} else {
-				await provider.publishComment(published)
+				await provider.publishComment(withFacts)
 			}
 		}
 	}
 
 	return {
-		// The published body, notice included: this is what the PR actually shows,
-		// so history and the dashboard must record the same text the reader saw.
-		markdown: published,
+		// The published body, facts and notice included: this is what the PR
+		// actually shows, so history and the dashboard must record the same text
+		// the reader saw.
+		markdown: withFacts,
 		data,
 		model: llm.model,
+		servedModel: llm.servedModel,
 		promptTokens: llm.usage.promptTokens || promptTokens,
 		completionTokens: llm.usage.completionTokens,
 		cachedTokens: llm.usage.cachedTokens,
