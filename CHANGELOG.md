@@ -1,3 +1,10 @@
+## [1.4.2](https://github.com/asepharyana/pr-agent-server/compare/v1.4.1...v1.4.2) (2026-10-21)
+
+
+### Bug Fixes
+
+* **auth:** stop the allowlist locking the admin out of their own dashboard ([e93aa65](https://github.com/asepharyana/pr-agent-server/commit/e93aa65fa7ce3e00817b8cd751625d22eb24dee1))
+
 ## [1.4.1](https://github.com/asepharyana/pr-agent-server/compare/v1.4.0...v1.4.1) (2026-10-21)
 
 
