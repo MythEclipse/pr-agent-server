@@ -1,3 +1,10 @@
+## [1.5.4](https://github.com/asepharyana/pr-agent-server/compare/v1.5.3...v1.5.4) (2026-10-21)
+
+
+### Bug Fixes
+
+* **review:** stop publishing reviews that say nothing, and stop attributing them to a model that never ran ([b8fed30](https://github.com/asepharyana/pr-agent-server/commit/b8fed30e0b62bf6d4fcc38bdb7b79f7c6c470ef7))
+
 ## [1.5.3](https://github.com/asepharyana/pr-agent-server/compare/v1.5.2...v1.5.3) (2026-10-21)
 
 
