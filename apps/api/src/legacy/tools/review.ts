@@ -173,26 +173,42 @@ export async function runReview(
 	}
 	const { markdown, data } = accepted
 
+	// SAY SO when the diff was too large to review whole.
+	//
+	// `getPrDiff` drops files once the prompt budget is spent and reports them in
+	// `remainingFiles`, but nothing ever surfaced that: the review was published
+	// as if it had covered the whole PR. The reader of the comment — the person
+	// deciding whether to merge — had no way to know that part of the diff was
+	// never looked at. A partial review presented as a complete one is worse than
+	// an obviously missing one, because it reads as approval of code nobody read.
+	//
+	// Measured before this: a PR of ~5000 changed lines (~128k tokens) hit the
+	// 128k cap and was silently compressed to a subset.
+	const published =
+		remainingFiles.length > 0 ? `${markdown}\n\n${largePrNotice(remainingFiles)}` : markdown
+
 	// publish
 	if (opts?.publish !== false) {
-		if (markdown) {
+		if (published) {
 			// persistent comment (replace prev "## PR Reviewer Guide 🔍")
 			if (r.persistentComment) {
 				await publishPersistent(
 					provider,
-					markdown,
+					published,
 					"## PR Reviewer Guide 🔍",
 					"review",
 					r.finalUpdateMessage,
 				)
 			} else {
-				await provider.publishComment(markdown)
+				await provider.publishComment(published)
 			}
 		}
 	}
 
 	return {
-		markdown,
+		// The published body, notice included: this is what the PR actually shows,
+		// so history and the dashboard must record the same text the reader saw.
+		markdown: published,
 		data,
 		model: llm.model,
 		promptTokens: llm.usage.promptTokens || promptTokens,
@@ -205,6 +221,32 @@ export async function runReview(
 		// round-trip. `pr.head.sha` is the commit the prompt was built from.
 		headSha: pr.head.sha,
 	}
+}
+
+/**
+ * The disclosure appended to the comment when part of the diff was not sent.
+ *
+ * Deliberately explicit about the count and names, and deliberately NOT phrased
+ * as a warning banner: the point is that a reader can tell which files were
+ * never reviewed, not that they should panic. Listing is capped because a
+ * 500-file truncation would bury the review it is annotating.
+ */
+export function largePrNotice(remainingFiles: string[]): string {
+	const shown = remainingFiles.slice(0, 20)
+	const more = remainingFiles.length - shown.length
+	const list = shown.map((f) => `- \`${f}\``).join("\n")
+	const overflow = more > 0 ? `\n- …and ${more} more` : ""
+	return [
+		"---",
+		"",
+		`**⚠️ Partial review — ${remainingFiles.length} file(s) were not analysed.**`,
+		"",
+		"This PR's diff exceeded the prompt budget, so the files below were dropped",
+		"before the review ran. Their contents were never seen by the model, and any",
+		"assessment above does not cover them.",
+		"",
+		list + overflow,
+	].join("\n")
 }
 
 function getMainPrLanguage(

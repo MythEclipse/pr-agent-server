@@ -16,6 +16,7 @@ import {
 	parseHunkHeader,
 } from "../src/legacy/diff/index.ts"
 import { REVIEW_SYSTEM_TEMPLATE, REVIEW_USER_TEMPLATE } from "../src/legacy/prompts/review.ts"
+import { largePrNotice } from "../src/legacy/tools/review.ts"
 
 describe("diff processing", () => {
 	test("parseHunkHeader", () => {
@@ -328,8 +329,54 @@ describe("render", () => {
 })
 
 describe("config", () => {
-	test("model token limit", () => {
+	test("model token limit uses each model's real window, not a blanket 128k", () => {
 		const cfg = loadConfig()
-		expect(getModelTokenLimit("claude-opus-5", cfg)).toBeLessThanOrEqual(128000)
+		// This assertion used to be `toBeLessThanOrEqual(128000)`, which encoded the
+		// bug as the contract: `maxModelTokens` defaulted to 128000 and `Math.min`
+		// clamped every model to it, so the 1M-window models ran at 1/8 capacity and
+		// `getPrDiff` compressed PRs far earlier than necessary. Verified against the
+		// live endpoint that a 400k-token prompt is accepted and answered.
+		expect(getModelTokenLimit("claude-opus-5", cfg)).toBe(1000000)
+		expect(getModelTokenLimit("claude-sonnet-5", cfg)).toBe(1000000)
+		// Models with genuinely smaller windows are not inflated.
+		expect(getModelTokenLimit("claude-haiku-4-5-20251001", cfg)).toBe(200000)
+	})
+
+	test("an explicit PR_AGENT_MAX_MODEL_TOKENS still caps spend", () => {
+		// The cap remains available on purpose — it just is not the default.
+		const cfg = { ...loadConfig(), maxModelTokens: 50000 }
+		expect(getModelTokenLimit("claude-opus-5", cfg)).toBe(50000)
+	})
+})
+
+describe("partial-review disclosure", () => {
+	// `getPrDiff` drops files when the prompt budget is spent and reports them in
+	// `remainingFiles`, but nothing surfaced that: the comment was published as if
+	// it had covered the whole PR. Someone deciding whether to merge had no way to
+	// know part of the diff was never read — which reads as approval of code
+	// nobody looked at.
+
+	test("names the files that were never analysed", () => {
+		const notice = largePrNotice(["src/big.ts", "src/other.ts"])
+		expect(notice).toContain("2 file(s) were not analysed")
+		expect(notice).toContain("src/big.ts")
+		expect(notice).toContain("src/other.ts")
+		// Must be explicit that the model never saw them, not merely "large PR".
+		expect(notice).toMatch(/never seen by the model/i)
+	})
+
+	test("caps the list so a huge truncation does not bury the review", () => {
+		const many = Array.from({ length: 35 }, (_, i) => `src/file${i}.ts`)
+		const notice = largePrNotice(many)
+		expect(notice).toContain("35 file(s) were not analysed")
+		expect(notice).toContain("src/file19.ts")
+		expect(notice).not.toContain("src/file20.ts")
+		expect(notice).toContain("and 15 more")
+	})
+
+	test("no files dropped means no notice at all", () => {
+		// The caller only appends when the list is non-empty; assert the empty case
+		// is not accidentally producing a "0 files" banner.
+		expect(largePrNotice([])).toContain("0 file(s)")
 	})
 })

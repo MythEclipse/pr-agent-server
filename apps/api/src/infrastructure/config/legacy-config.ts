@@ -114,7 +114,11 @@ export function loadConfig(): Config {
 		modelDescribe: env.PR_AGENT_MODEL_DESCRIBE || env.PR_AGENT_MODEL || "claude-opus-5",
 		modelImprove: env.PR_AGENT_MODEL_IMPROVE || env.PR_AGENT_MODEL || "claude-opus-5",
 		fallbackModels,
-		maxModelTokens: envInt("PR_AGENT_MAX_MODEL_TOKENS", 128000),
+		// 0 = no extra cap: use each model's real window from the table below.
+		// This was 128000, which silently clamped the 1M-token models to 128k and
+		// made `getPrDiff` compress PRs far earlier than necessary. Set
+		// PR_AGENT_MAX_MODEL_TOKENS to impose a deliberate spend ceiling.
+		maxModelTokens: envInt("PR_AGENT_MAX_MODEL_TOKENS", 0),
 		customModelMaxTokens: envInt("PR_AGENT_CUSTOM_MODEL_MAX_TOKENS", 128000),
 		aiTimeoutMs: envInt("PR_AGENT_AI_TIMEOUT", 600) * 1000,
 		temperature: envInt("PR_AGENT_TEMPERATURE", 20) / 100,
@@ -194,6 +198,17 @@ export function getModelTokenLimit(model: string, cfg?: Config): number {
 	if (limit === undefined) {
 		limit = c.customModelMaxTokens > 0 ? c.customModelMaxTokens : 128000
 	}
+	// `maxModelTokens` is an OPTIONAL CEILING, not a default cap. It used to
+	// default to 128000, and `Math.min` against it clamped every model to 128k —
+	// so the 1M-window models above ran at one eighth of their capacity. The cost
+	// was invisible but real: `getPrDiff` compresses the diff once
+	// `totalTokens + outputBufferSoftThreshold` exceeds this number, so a PR of
+	// ~5000 changed lines (~128k tokens) was silently truncated to a subset of its
+	// files while the model could have taken the lot. Measured against the live
+	// endpoint: a 400k-token prompt is accepted and answered normally.
+	//
+	// A configured value still wins (`PR_AGENT_MAX_MODEL_TOKENS`), so an operator
+	// can cap spend deliberately; 0 means "no cap, use the model's own window".
 	if (c.maxModelTokens > 0) limit = Math.min(c.maxModelTokens, limit)
 	return limit
 }
