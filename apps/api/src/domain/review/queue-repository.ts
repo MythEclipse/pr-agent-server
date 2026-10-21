@@ -36,6 +36,15 @@ export interface TQueueStats {
 	failed: number
 }
 
+/**
+ * What settling a job decided. `rerun` is true when the job was put back on
+ * `pending` because a webhook arrived while it was running, so the pump knows
+ * there is more work immediately rather than after the next poll interval.
+ */
+export interface TCompleteResult {
+	rerun: boolean
+}
+
 export interface QueueRepository {
 	/**
 	 * Insert a job, or return the existing one when `key` is already queued or
@@ -48,7 +57,7 @@ export interface QueueRepository {
 	claimDue(limit: number): Promise<TQueueJob[]>
 
 	/** Move a job to a terminal state, recording any error. */
-	complete(key: string, error?: string | null): Promise<void>
+	complete(key: string, error?: string | null): Promise<TCompleteResult>
 
 	/**
 	 * Re-queue every job left `running` by a crash. Called once on boot so an

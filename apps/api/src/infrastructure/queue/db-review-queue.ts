@@ -47,17 +47,28 @@ export function makeDbReviewQueue(opts: DbReviewQueueOptions): IDbReviewQueue {
 
 	const execute = async (job: ReviewJob): Promise<void> => {
 		inFlight++
+		const key = `${job.owner}/${job.repo}#${job.pr}`
+		let rerun = false
 		try {
 			await run(job)
-			await store.complete(`${job.owner}/${job.repo}#${job.pr}`)
+			// `complete` reports whether a webhook landed while this ran. It puts the
+			// row back on `pending` itself, so all this side needs to do is know that
+			// there IS work — the next `pump()` claims it.
+			rerun = (await store.complete(key)).rerun
 		} catch (err) {
 			// A failing job must never wedge the queue: record it and move on,
 			// which is what the in-memory queue does too.
-			log(`[queue] review FAILED for ${job.owner}/${job.repo}#${job.pr}: ${String(err)}`)
-			await store.complete(`${job.owner}/${job.repo}#${job.pr}`, String(err))
+			log(`[queue] review FAILED for ${key}: ${String(err)}`)
+			await store.complete(key, String(err))
 		} finally {
 			inFlight--
-			settleIfIdle()
+			// A re-queued job means the queue is NOT idle: pump immediately instead
+			// of waiting out the poll interval. `settleIfIdle` still runs once the
+			// pump has claimed — it is a no-op when a job was taken, and it releases
+			// `drain()` in the (impossible-but-cheap) case that nothing was due, so a
+			// waiter can never be stranded on a rerun that produced no work.
+			if (rerun) void pump().then(settleIfIdle, settleIfIdle)
+			else settleIfIdle()
 		}
 	}
 
@@ -105,8 +116,24 @@ export function makeDbReviewQueue(opts: DbReviewQueueOptions): IDbReviewQueue {
 			void loop()
 		},
 		async drain() {
-			while (inFlight > 0) {
-				await new Promise<void>((r) => idleWaiters.push(r))
+			// WAIT FOR THE ROWS, NOT FOR `inFlight`.
+			//
+			// `inFlight` only counts what has been CLAIMED. Probed: six jobs at
+			// concurrency 2 returned from `drain()` after 123ms with 2 completed and
+			// 4 rows still `pending`/`running` — because the `while (inFlight > 0)`
+			// loop saw zero between poll ticks and resolved immediately. That makes
+			// `drain()` useless for both of its callers: a test asserting on the
+			// results reads a half-finished queue, and a graceful shutdown lets the
+			// process exit with unclaimed work still in the table.
+			//
+			// So: stop the loop taking new work, then wait until nothing is left
+			// unsettled in the store. `inFlight > 0` is still checked because a job
+			// claimed but not yet marked running-in-store is invisible to `stats()`.
+			while (true) {
+				await pump()
+				const stats = await store.stats()
+				if (inFlight === 0 && stats.pending === 0 && stats.running === 0) return
+				await new Promise<void>((r) => setTimeout(r, pollIntervalMs))
 			}
 		},
 	}

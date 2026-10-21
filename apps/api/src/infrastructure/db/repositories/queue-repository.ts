@@ -10,6 +10,7 @@ import { and, asc, count, eq, inArray, lte, sql } from "drizzle-orm"
 import type { PgDatabase } from "drizzle-orm/pg-core"
 import type {
 	QueueRepository,
+	TCompleteResult,
 	TEnqueueInput,
 	TQueueJob,
 	TQueueStats,
@@ -146,16 +147,53 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 			})
 		},
 
-		async complete(key: string, error?: string | null): Promise<void> {
-			await db
-				.update(reviewQueueJobs)
-				.set({
-					state: error ? "failed" : "done",
-					lastError: error ?? null,
-					rerunRequested: false,
-					updatedAt: new Date(),
-				})
-				.where(eq(reviewQueueJobs.key, key))
+		async complete(key: string, error?: string | null): Promise<TCompleteResult> {
+			// A COALESCED RE-RUN IS RESOLVED HERE, not in `claimDue`.
+			//
+			// `rerunRequested` used to be WRITTEN and never READ. The conflict clause
+			// set it when a webhook landed on a running job, `complete()` then cleared
+			// it on the way out, and `claimDue` only ever selected `pending` — so the
+			// re-run it promised never happened. Probed against a live PGlite store:
+			// a re-enqueue mid-review answered `deduped` and `run()` was invoked ONCE
+			// where the in-memory queue invokes it TWICE. A push that landed during a
+			// review was dropped, and the PR kept its comment for the OLD head.
+			//
+			// Settling is the only correct place to decide this: it is the moment the
+			// job stops being `running`, and it is the same place the in-memory queue
+			// re-queues (`review-queue.ts` pushes the job back onto `pending` in its
+			// `finally`). Doing it in `claimDue` instead would be dead code, because
+			// this method has already cleared the flag by then.
+			//
+			// A FAILED job is NOT re-armed. The error is the fresher fact: retrying the
+			// same PR immediately would replay the failure the operator needs to see,
+			// and `enqueue` already re-arms a `failed` row when the next webhook
+			// arrives. Re-arming here too would double-run it.
+			const settled = await db.transaction(async (tx) => {
+				const current = await tx
+					.select({ rerun: reviewQueueJobs.rerunRequested })
+					.from(reviewQueueJobs)
+					.where(eq(reviewQueueJobs.key, key))
+					.for("update")
+					.limit(1)
+
+				const rerun = !error && current[0]?.rerun === true
+
+				await tx
+					.update(reviewQueueJobs)
+					.set({
+						state: error ? "failed" : rerun ? "pending" : "done",
+						lastError: error ?? null,
+						rerunRequested: false,
+						// A re-armed row is claimable NOW; otherwise the timestamp is
+						// left alone, exactly as before.
+						...(rerun ? { runAfter: new Date() } : {}),
+						updatedAt: new Date(),
+					})
+					.where(eq(reviewQueueJobs.key, key))
+
+				return { rerun }
+			})
+			return settled
 		},
 
 		async requeueInterrupted(): Promise<number> {

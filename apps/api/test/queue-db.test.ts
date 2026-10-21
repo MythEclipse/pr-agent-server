@@ -56,6 +56,58 @@ describe("db queue — dedupe", () => {
 		await expect(queue.stats()).resolves.toMatchObject({ running: 1 })
 	})
 
+	test("complete() reports no rerun when nothing landed mid-flight", async () => {
+		await queue.enqueue({ owner: "o", repo: "r", pr: 8 })
+		const [claimed] = await queue.claimDue(1)
+		expect(claimed?.state).toBe("running")
+		const settled = await queue.complete("o/r#8")
+		expect(settled.rerun).toBe(false)
+		await expect(queue.stats()).resolves.toMatchObject({ done: 1, pending: 0 })
+	})
+
+	test("a webhook that lands mid-review puts the job back on pending", async () => {
+		// `rerunRequested` used to be written and never read: the flag was set
+		// here, then cleared by complete() on the way out, and claimDue only ever
+		// selected `pending` — so the coalesced re-run the schema promised never
+		// happened and a push during a review was dropped.
+		await queue.enqueue({ owner: "o", repo: "r", pr: 9 })
+		await queue.claimDue(1)
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 9 })
+		expect(again.deduped).toBe(true)
+		expect(again.job.rerunRequested).toBe(true)
+
+		const settled = await queue.complete("o/r#9")
+		expect(settled.rerun).toBe(true)
+		// Re-armed, not merely recorded: claimable again right now.
+		await expect(queue.stats()).resolves.toMatchObject({ pending: 1, done: 0 })
+		const [rerun] = await queue.claimDue(1)
+		expect(rerun?.attempts).toBe(2)
+	})
+
+	test("a FAILED job is not re-armed by a coalesced rerun", async () => {
+		// The error is the fresher fact: replaying the same failing review
+		// immediately would hide it. `enqueue` re-arms a failed row on the next
+		// webhook, which is the correct recovery.
+		await queue.enqueue({ owner: "o", repo: "r", pr: 10 })
+		await queue.claimDue(1)
+		await queue.enqueue({ owner: "o", repo: "r", pr: 10 })
+
+		const settled = await queue.complete("o/r#10", "boom")
+		expect(settled.rerun).toBe(false)
+		await expect(queue.stats()).resolves.toMatchObject({ failed: 1, pending: 0 })
+	})
+
+	test("a collapsing burst of re-requests coalesces into ONE rerun", async () => {
+		await queue.enqueue({ owner: "o", repo: "r", pr: 11 })
+		await queue.claimDue(1)
+		for (let i = 0; i < 5; i++) await queue.enqueue({ owner: "o", repo: "r", pr: 11 })
+
+		await queue.complete("o/r#11")
+		// One pending row, not five.
+		await expect(queue.stats()).resolves.toMatchObject({ pending: 1 })
+	})
+
 	test("different PRs are different jobs", async () => {
 		await queue.enqueue({ owner: "o", repo: "r", pr: 1 })
 		await queue.enqueue({ owner: "o", repo: "r", pr: 2 })
