@@ -1,3 +1,11 @@
+## [1.5.2](https://github.com/asepharyana/pr-agent-server/compare/v1.5.1...v1.5.2) (2026-10-21)
+
+
+### Bug Fixes
+
+* auto-fix code quality [skip ci] ([fc3a670](https://github.com/asepharyana/pr-agent-server/commit/fc3a67043fc9c6878fa3ba08952f9f9e8efc1db8))
+* **worker:** a green verdict requires a real suite, and the fix commit must run CI ([331a1f0](https://github.com/asepharyana/pr-agent-server/commit/331a1f0da9c40cf30f9adf0f62423d82eaa10b2f)), closes [#19](https://github.com/asepharyana/pr-agent-server/issues/19) [#19](https://github.com/asepharyana/pr-agent-server/issues/19)
+
 ## [1.5.1](https://github.com/asepharyana/pr-agent-server/compare/v1.5.0...v1.5.1) (2026-10-21)
 
 
