@@ -1,3 +1,15 @@
+# [1.3.0](https://github.com/asepharyana/pr-agent-server/compare/v1.2.3...v1.3.0) (2026-10-21)
+
+
+### Bug Fixes
+
+* **llm:** the review never worked — model fabricated a tool call we never offered ([0c4d84d](https://github.com/asepharyana/pr-agent-server/commit/0c4d84d4f5d1e69072fdcf3c25796bc5172aa826))
+
+
+### Features
+
+* **review:** stop truncating at 128k, and disclose what was not analysed ([26ff77e](https://github.com/asepharyana/pr-agent-server/commit/26ff77e13ee4d9ddda4fa99d95d17a4876c6743c))
+
 ## [1.2.3](https://github.com/asepharyana/pr-agent-server/compare/v1.2.2...v1.2.3) (2026-10-21)
 
 
