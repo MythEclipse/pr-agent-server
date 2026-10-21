@@ -1,3 +1,10 @@
+## [1.5.5](https://github.com/asepharyana/pr-agent-server/compare/v1.5.4...v1.5.5) (2026-10-21)
+
+
+### Bug Fixes
+
+* **review:** collapse newlines inside rendered issue fields ([8cdfeb7](https://github.com/asepharyana/pr-agent-server/commit/8cdfeb70d64220660e60660f94f1d8c052d8c935))
+
 ## [1.5.4](https://github.com/asepharyana/pr-agent-server/compare/v1.5.3...v1.5.4) (2026-10-21)
 
 
