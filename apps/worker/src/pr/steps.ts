@@ -32,6 +32,7 @@ import {
 } from "./context.ts"
 import {
 	CI_WAIT_TIMEOUT_MS,
+	EXPECTED_CI_CHECKS,
 	iterationLine,
 	MAX_FIX_ITERATIONS,
 	shouldIterateAgain,
@@ -279,6 +280,10 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 
 		const verdict = await waitForCiSettled(deps.api, c.token, c.repo, c.headSha, {
 			sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+			// The fix MUST be verified by the real suite: a head with no workflow run
+			// reads as green on zero checks otherwise, which is how an untested fix
+			// got auto-merged.
+			expectedChecks: EXPECTED_CI_CHECKS,
 		})
 		if (verdict.ci.ok) {
 			deps.report.push(`   ✅ CI green after iteration ${iteration} — ${verdict.ci.msg}`)

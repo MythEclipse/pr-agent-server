@@ -135,6 +135,56 @@ export async function checkCiPassed(
 }
 
 /**
+ * Wrap a SHA's CI query so that "this head was never tested" is NOT read as green.
+ *
+ * THE BUG THIS EXISTS FOR, found by running the loop against a real PR rather than
+ * by reading the code. The AI fix committed with the message
+ * `fix: auto-fix code quality [skip ci]`, and `[skip ci]` is honoured by GitHub
+ * Actions — so NO workflow ran on the commit the agent had just pushed. The only
+ * check on that head was a third-party security app. `checkCiPassed` then saw zero
+ * failing and zero pending checks and answered `✅ 1 checks green`.
+ *
+ * The consequence was not theoretical: the worker APPROVED AND MERGED that PR
+ * (pr-agent-server#19, `Auto-merge PR #19`) onto a main that was never tested. A red
+ * PR can be merged by its own unverified fix.
+ *
+ * So a caller that KNOWS the head touched code must demand evidence that a real
+ * suite ran. The check only ever ADDS refusal: a red or pending verdict passes
+ * through untouched.
+ *
+ * @param expectedChecks job names that must appear, e.g. `["verify"]`. Empty
+ *   disables the requirement, preserving `checkCiPassed` for repos with no CI.
+ */
+export async function checkCiWithSuiteRequirement(
+	api: GhClient,
+	token: string,
+	repo: string,
+	sha: string,
+	expectedChecks: readonly string[],
+): Promise<CiResult> {
+	const result = await checkCiPassed(api, token, repo, sha)
+	// Only a GREEN verdict is suspicious this way.
+	if (!result.ok || expectedChecks.length === 0) return result
+
+	const { status, data } = await api.request("GET", `/repos/${repo}/commits/${sha}/check-runs`, {
+		token,
+	})
+	if (status !== 200) return result
+	const checks =
+		data !== null && typeof data === "object" && Array.isArray((data as any).check_runs)
+			? ((data as any).check_runs as any[])
+			: []
+	const names = new Set(checks.map((c) => String(c?.name ?? "")))
+	if (expectedChecks.some((name) => names.has(name))) return result
+
+	return {
+		ok: false,
+		unknown: true,
+		msg: `⚠️ No real CI ran on this head (only: ${[...names].join(", ") || "nothing"}) — likely a [skip ci] commit`,
+	}
+}
+
+/**
  * Python `close_stale_ci_pr(token, repo_full, pr_num, title, ci_msg)`
  * (lines 564-580).
  *

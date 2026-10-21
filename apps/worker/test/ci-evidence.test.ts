@@ -185,7 +185,7 @@ describe("the prompt", () => {
 		const prompt = buildAiFixPrompt(1, "o/r", "t", "main", files)
 		expect(prompt).not.toContain("CI IS FAILING")
 		expect(prompt).toContain("git merge origin/main --no-edit")
-		expect(prompt).toContain('EXACTLY "fix: auto-fix code quality [skip ci]"')
+		expect(prompt).toContain('EXACTLY "fix: auto-fix code quality"')
 	})
 
 	it("puts the failures BEFORE the generic task list", () => {

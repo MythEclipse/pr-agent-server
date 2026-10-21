@@ -211,8 +211,19 @@ export async function checkPrStillValid(
  * LOAD-BEARING, do not reflow: "4. Do NOT push" is the boundary that keeps the
  * agent from pushing a commit the worker has not validated, and the merge-base
  * instruction must come FIRST (step 1 before step 2) or the agent improves code
- * against a base it is about to merge. The commit message is exact — the
- * pipeline matches on `[skip ci]`.
+ * against a base it is about to merge.
+ *
+ * THE COMMIT MESSAGE NO LONGER CARRIES `[skip ci]`, and that is a correction, not a
+ * style change. It was transcribed that way so the push would not re-trigger the
+ * review loop — but `[skip ci]` is honoured by GitHub Actions, so it suppressed CI on
+ * the very commit whose purpose is to FIX CI. Measured on a real PR: the fix commit
+ * landed with no workflow run, leaving one third-party check, which `checkCiPassed`
+ * read as `✅ 1 checks green` — a green verdict for an untested commit, and the
+ * worker MERGED that PR on it (pr-agent-server#19). The fix-until-green loop added in
+ * this change exists to verify its own work, and this marker made that impossible.
+ *
+ * Nothing in the worker branches on the message text (checked: no `includes`/`match`
+ * on it anywhere), so dropping the marker changes no logic; it only lets CI run.
  *
  * WHY THE OPTIONAL EVIDENCE PARAMETER EXISTS. The transcribed prompt is generic:
  * "improve code quality of ALL changed files". Handed a red CI, that instruction
@@ -259,7 +270,7 @@ export function buildAiFixPrompt(
 		"   - Add type hints / type annotations where missing\n" +
 		"   - Fix anti-patterns, improve structure, add docstrings\n" +
 		"3. Commit ALL changes with EXACT message:\n" +
-		'     git add -A && git commit --message="fix: auto-fix code quality [skip ci]"\n' +
+		'     git add -A && git commit --message="fix: auto-fix code quality"\n' +
 		"4. Do NOT push — a separate step pushes your commit.\n\n" +
 		"CRITICAL RULES:\n" +
 		// The scope rule is RELAXED when failure evidence is present, because the
@@ -275,7 +286,7 @@ export function buildAiFixPrompt(
 		"- Do NOT change program logic or add features\n" +
 		"- Resolve merge conflicts carefully - keep BOTH sides where needed\n" +
 		"- You are mytheclipsebotreview - git identity already set\n" +
-		'- Use EXACTLY "fix: auto-fix code quality [skip ci]" as the commit message'
+		'- Use EXACTLY "fix: auto-fix code quality" as the commit message'
 	)
 }
 

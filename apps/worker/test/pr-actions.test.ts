@@ -732,14 +732,14 @@ const expectedPrompt = (title: string, baseRef: string, files: string[]) => {
 		"   - Add type hints / type annotations where missing\n" +
 		"   - Fix anti-patterns, improve structure, add docstrings\n" +
 		"3. Commit ALL changes with EXACT message:\n" +
-		'     git add -A && git commit --message="fix: auto-fix code quality [skip ci]"\n' +
+		'     git add -A && git commit --message="fix: auto-fix code quality"\n' +
 		"4. Do NOT push — a separate step pushes your commit.\n\n" +
 		"CRITICAL RULES:\n" +
 		"- ONLY modify the files listed above (plus commit/merge resolution)\n" +
 		"- Do NOT change program logic or add features\n" +
 		"- Resolve merge conflicts carefully - keep BOTH sides where needed\n" +
 		"- You are mytheclipsebotreview - git identity already set\n" +
-		'- Use EXACTLY "fix: auto-fix code quality [skip ci]" as the commit message'
+		'- Use EXACTLY "fix: auto-fix code quality" as the commit message'
 	)
 }
 
@@ -913,7 +913,7 @@ describe("runAiFix", () => {
 		)
 		expect(calls[0].prompt).toBe(expectedPrompt("feat: x", "main", ["src/a.ts", "src/b.ts"]))
 		expect(calls[0].prompt).toContain("Do NOT push — a separate step pushes your commit.")
-		expect(calls[0].prompt).toContain('git commit --message="fix: auto-fix code quality [skip ci]"')
+		expect(calls[0].prompt).toContain('git commit --message="fix: auto-fix code quality"')
 		expect(calls[0].opts).toEqual({ workdir: AI_WD, timeoutSec: 1800, label: "claude_pr_7" })
 		expect(AI_FIX_TIMEOUT).toBe(1800)
 		expect(notes).toEqual(["   🤖 Running Claude Code AI fix (max 100 turns)..."])

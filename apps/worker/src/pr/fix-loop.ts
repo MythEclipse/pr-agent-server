@@ -23,7 +23,7 @@
 // deliberately bounded, and it reports every iteration so the operator can see it
 // spending that budget rather than discovering it afterwards.
 
-import { type CiResult, checkCiPassed } from "./ci.ts"
+import { type CiResult, checkCiPassed, checkCiWithSuiteRequirement } from "./ci.ts"
 import type { GhClient } from "./scan.ts"
 
 /** How many fix→wait→re-check iterations one tick may do. */
@@ -39,12 +39,33 @@ export const MAX_FIX_ITERATIONS = 3
 export const CI_POLL_INTERVAL_MS = 20_000
 export const CI_WAIT_TIMEOUT_MS = 10 * 60 * 1000
 
+/**
+ * Check names that must have run for a GREEN verdict to be believed.
+ *
+ * `verify` is this repo's CI job (`.github/workflows/ci.yml`). Without a requirement
+ * like this, a head with NO workflow run reads as green — which is exactly what the
+ * `[skip ci]` fix commit produced: one third-party check, zero failing, zero pending,
+ * verdict green, on a commit that was never tested. The worker merged that PR.
+ *
+ * A repo whose job is named differently is simply not covered; the requirement only
+ * ever ADDS refusal.
+ */
+export const EXPECTED_CI_CHECKS: readonly string[] = ["verify"]
+
 export interface PollOpts {
 	/** Injected so tests do not wait in real time. */
 	sleep: (ms: number) => Promise<void>
 	now?: () => number
 	intervalMs?: number
 	timeoutMs?: number
+	/**
+	 * Check names that must have reported for a GREEN verdict to be believed.
+	 *
+	 * Empty means "trust whatever GitHub says", which is right for a caller with no
+	 * expectation and wrong for the fix loop, where the point is to prove the push
+	 * was actually tested.
+	 */
+	expectedChecks?: readonly string[]
 }
 
 export interface PollResult {
@@ -82,7 +103,9 @@ export async function waitForCiSettled(
 	let last: CiResult = { ok: false, unknown: true, msg: "CI not read yet" }
 	for (;;) {
 		polls += 1
-		last = await checkCiPassed(api, token, repo, sha)
+		last = opts.expectedChecks?.length
+			? await checkCiWithSuiteRequirement(api, token, repo, sha, opts.expectedChecks)
+			: await checkCiPassed(api, token, repo, sha)
 
 		// A red CI is final. So is green. Only "pending" (and a read we could not
 		// perform) is worth another look.
