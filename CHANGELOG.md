@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/asepharyana/pr-agent-server/compare/v1.3.2...v1.4.0) (2026-10-21)
+
+
+### Features
+
+* **auth:** Google sign-in, gated by an email allowlist ([72dc68b](https://github.com/asepharyana/pr-agent-server/commit/72dc68bf25cb46b80f14b6719aad5b2e3d7c38ac))
+
 ## [1.3.2](https://github.com/asepharyana/pr-agent-server/compare/v1.3.1...v1.3.2) (2026-10-21)
 
 
