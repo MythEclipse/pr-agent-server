@@ -1,3 +1,10 @@
+## [1.4.3](https://github.com/asepharyana/pr-agent-server/compare/v1.4.2...v1.4.3) (2026-10-21)
+
+
+### Bug Fixes
+
+* **auth:** new sign-ins are admins, so Google login reaches a usable dashboard ([ecb905b](https://github.com/asepharyana/pr-agent-server/commit/ecb905b5cfba93d1b7fc07c3ca29c6496508ab78))
+
 ## [1.4.2](https://github.com/asepharyana/pr-agent-server/compare/v1.4.1...v1.4.2) (2026-10-21)
 
 
