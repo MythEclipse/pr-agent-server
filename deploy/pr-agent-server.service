@@ -57,6 +57,19 @@ Environment=PR_AGENT_ANALYTICS_DIR=/var/lib/pr-agent-server/analytics
 # pointing it at the real host keeps the session cookie first-party.
 Environment=BETTER_AUTH_URL=https://pr-agent.asepharyana.my.id
 Environment=WEB_ORIGIN=https://pr-agent.asepharyana.my.id
+# Google sign-in. WHO may sign in is decided by AUTH_ALLOWED_EMAILS, NOT by Google:
+# Google authenticates any account, so without the list this button would expose the
+# review history to anyone. Comma-separated, case-insensitive, no wildcards.
+#
+# The list is also re-checked on every request (see resolveSession), so removing an
+# address takes effect immediately instead of at session expiry. An EMPTY value
+# denies everybody by design — it does not mean "allow all".
+Environment=AUTH_ALLOWED_EMAILS=superaseph@gmail.com
+# GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are NOT set here: `bws-exec pr-agent`
+# already exports every `pr_agent_*` vault entry with the prefix stripped and
+# uppercased, so `pr_agent_google_client_id` arrives as GOOGLE_CLIENT_ID inside the
+# ExecStart below. Listing them again here would be redundant, and a `%name`
+# indirection is not systemd syntax at all.
 # Analytics are append-only JSONL under /var/lib/pr-agent-server, and the
 # worker's /tmp/pr-queue-* state must survive a restart — so this unit needs a
 # real filesystem, not a private /tmp namespace.
