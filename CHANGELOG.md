@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/asepharyana/pr-agent-server/compare/v1.3.0...v1.3.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **tools:** describe and improve threw away good retries, silently ([532b06c](https://github.com/asepharyana/pr-agent-server/commit/532b06cbf659ef1274447765c8a8ce293619acf1))
+
 # [1.3.0](https://github.com/asepharyana/pr-agent-server/compare/v1.2.3...v1.3.0) (2026-10-21)
 
 
