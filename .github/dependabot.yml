@@ -34,4 +34,4 @@ updates:
       default-days: 3
     groups:
       actions:
-        patterns: ['*']
+        patterns: ["*"]

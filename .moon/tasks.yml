@@ -1,11 +1,11 @@
-$schema: './cache/schemas/tasks.json'
+$schema: "./cache/schemas/tasks.json"
 
 tasks:
   check:
-    command: 'biome check .'
+    command: "biome check ."
     inputs:
-      - '**/*.{ts,tsx,js,json,md}'
+      - "**/*.{ts,tsx,js,json,md}"
   lint:
-    command: 'biome lint .'
+    command: "biome lint ."
   format:
-    command: 'biome format --write .'
+    command: "biome format --write ."

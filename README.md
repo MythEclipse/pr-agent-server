@@ -56,6 +56,7 @@ pr-agent-server/
 ## Development
 
 ### Prerequisites
+
 - Node 24.21.0+ (runtime), pnpm 10.33.2+
 - GitHub App credentials (App ID, private key, webhook secret)
 - 9router/OpenAI-compatible key for the LLM
@@ -105,10 +106,10 @@ Deploy is fully automated via GitHub Actions on push to `main`:
 ```yaml
 # .github/workflows/deploy.yml
 1. build-and-deploy → pnpm install → lint → typecheck → tests → build
-   → pnpm deploy --prod (self-contained node_modules) → tar → scp to VPS
-   → swap /opt/pr-agent-server/{dist,node_modules,drizzle,web-dist}
-   → node dist/migrate.js → restart pr-agent-server.service
-   → health check on :4023
+→ pnpm deploy --prod (self-contained node_modules) → tar → scp to VPS
+→ swap /opt/pr-agent-server/{dist,node_modules,drizzle,web-dist}
+→ node dist/migrate.js → restart pr-agent-server.service
+→ health check on :4023
 2. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
 ```
 
@@ -152,11 +153,11 @@ MIT.
 Every push to `main` is analysed by [semantic-release](https://semantic-release.gitbook.io/).
 The commit prefix decides the version bump — nobody types a version number:
 
-| Commit | Result |
-|---|---|
-| `feat(scope): …` | minor bump |
-| `fix(scope): …` | patch bump |
-| `BREAKING CHANGE:` in the footer | major bump |
+| Commit                                             | Result                           |
+| -------------------------------------------------- | -------------------------------- |
+| `feat(scope): …`                                   | minor bump                       |
+| `fix(scope): …`                                    | patch bump                       |
+| `BREAKING CHANGE:` in the footer                   | major bump                       |
 | `chore`, `ci`, `docs`, `refactor`, `test`, `build` | patch bump, or no release at all |
 
 A release publishes a tag, a GitHub Release and the changelog. The same workflow
@@ -165,11 +166,11 @@ version, so an image tag always matches a git tag:
 
 This repo publishes 3 image(s):
 
-| Package | Image |
-|---|---|
-| `pr-agent-api` | `ghcr.io/asepharyana/pr-agent-server:pr-agent-api:<version>` |
+| Package           | Image                                                           |
+| ----------------- | --------------------------------------------------------------- |
+| `pr-agent-api`    | `ghcr.io/asepharyana/pr-agent-server:pr-agent-api:<version>`    |
 | `pr-agent-worker` | `ghcr.io/asepharyana/pr-agent-server:pr-agent-worker:<version>` |
-| `pr-agent-web` | `ghcr.io/asepharyana/pr-agent-server:pr-agent-web:<version>` |
+| `pr-agent-web`    | `ghcr.io/asepharyana/pr-agent-server:pr-agent-web:<version>`    |
 
 
 Pull one without touching the registry UI:
@@ -184,9 +185,7 @@ Do not edit `.github/workflows/release.yml` to change which images are built.
 The list lives in `.github/docker-images.json`:
 
 ```json
-{ "images": [
-  { "package": "<service>", "context": ".", "file": "Dockerfile" }
-] }
+{ "images": [{ "package": "<service>", "context": ".", "file": "Dockerfile" }] }
 ```
 
 - `package` becomes the GHCR path component, so it must be lowercase

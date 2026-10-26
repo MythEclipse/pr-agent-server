@@ -12,6 +12,7 @@
    - `scripts/` for setup/deployment helpers
    - `deploy/` for the systemd units
 4. Verify before committing:
+
    ```bash
    pnpm exec biome check .
    moon run :typecheck
