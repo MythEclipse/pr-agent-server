@@ -1,26 +1,26 @@
-$schema: 'https://moonrepo.dev/schemas/moon-project.json'
+$schema: "https://moonrepo.dev/schemas/moon-project.json"
 
-language: 'typescript'
+language: "typescript"
 
 tasks:
   dev:
-    command: 'pnpm run dev'
+    command: "pnpm run dev"
   build:
-    command: 'pnpm run build'
+    command: "pnpm run build"
     inputs:
-      - 'src/**'
-      - 'tsconfig.json'
-      - 'tsconfig.build.json'
+      - "src/**"
+      - "tsconfig.json"
+      - "tsconfig.build.json"
     outputs:
-      - 'dist/**'
+      - "dist/**"
   test:
-    command: 'pnpm run test'
+    command: "pnpm run test"
     inputs:
-      - 'src/**'
-      - 'test/**'
+      - "src/**"
+      - "test/**"
   typecheck:
-    command: 'pnpm run typecheck'
+    command: "pnpm run typecheck"
     inputs:
-      - 'src/**'
-      - 'test/**'
-      - 'tsconfig.json'
+      - "src/**"
+      - "test/**"
+      - "tsconfig.json"

@@ -2,7 +2,6 @@
 
 `apps/worker/` (TypeScript/Node) — the 5-minute job that watches open PRs across every
 repo where the PR-Agent GitHub App is installed, and drives the full lifecycle:
-
 1. **Open PR found** → ensure a PR-Agent review exists (fabricates a webhook to
    `pr-agent.asepharyana.my.id` if not)
 2. **Toolchain pin guard** → closes dependabot PRs that bump pinned toolchain
@@ -27,7 +26,6 @@ Every repo in the App installation whose GitHub metadata says `fork: true`: new
 upstream (parent) commits are **merged** (never rebased) into the fork's default
 branch, gated by a per-repo interval (default **1 hour**; the `UPSTREAM_SYNC`
 config block in `apps/worker/src/sync/config.ts`).
-
 - **Conflicted merge** → the Hermes agent (via the gateway API server) resolves
   it (merge-reconciler rules: merge hunks by hand, never wholesale
   `--ours/--theirs`, run the repo's own typecheck/tests before committing). The
@@ -91,14 +89,14 @@ sudo journalctl -u pr-agent-sync-hooks.service -n 40
 
 The worker is **deployed as a systemd timer on the VPS**, not as a cron job.
 
-| | |
-|---|---|
-| Unit | `pr-agent-worker.service` (`Type=oneshot`) |
-| Timer | `pr-agent-worker.timer` — `OnBootSec=2min`, `OnUnitActiveSec=5min` |
+|               |                                                                    |
+| ------------- | ------------------------------------------------------------------ |
+| Unit          | `pr-agent-worker.service` (`Type=oneshot`)                         |
+| Timer         | `pr-agent-worker.timer` — `OnBootSec=2min`, `OnUnitActiveSec=5min` |
 | Deployed code | `/opt/pr-agent-worker/` (`dist/`, `package.json`, `run-worker.sh`) |
-| Entrypoint | `/opt/pr-agent-worker/run-worker.sh` |
-| User | `pr-agent` |
-| Logs | `journalctl -u pr-agent-worker.service` |
+| Entrypoint    | `/opt/pr-agent-worker/run-worker.sh`                               |
+| User          | `pr-agent`                                                         |
+| Logs          | `journalctl -u pr-agent-worker.service`                            |
 
 A second pair, `pr-agent-sync-hooks.{service,timer}`, runs the daily fork-config
 sync and is gated — see `--sync-hooks` above. Both pairs are in `deploy/` so the
@@ -127,10 +125,10 @@ runs under `bws-exec pr-agent`, which fetches the environment from Bitwarden
 Secrets Manager at start-up, and maps the two names the worker expects onto the
 ones already in that secret set:
 
-| Worker expects | Provided by BWS as | Why not renamed |
-|---|---|---|
-| `PR_AGENT_APP_ID` | `GITHUB_APP_ID` | same App, shared with the webhook server |
-| `PR_AGENT_WEBHOOK_SECRET` | `GITHUB_WEBHOOK_SECRET` | same webhook, shared with the server |
+| Worker expects            | Provided by BWS as      | Why not renamed                          |
+| ------------------------- | ----------------------- | ---------------------------------------- |
+| `PR_AGENT_APP_ID`         | `GITHUB_APP_ID`         | same App, shared with the webhook server |
+| `PR_AGENT_WEBHOOK_SECRET` | `GITHUB_WEBHOOK_SECRET` | same webhook, shared with the server     |
 
 Non-secret values are plain `Environment=` lines in the unit:
 `PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem`,

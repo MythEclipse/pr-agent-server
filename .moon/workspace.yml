@@ -1,7 +1,7 @@
-$schema: './cache/schemas/workspace.json'
+$schema: "./cache/schemas/workspace.json"
 
 projects:
-  - 'apps/*'
+  - "apps/*"
 
 vcs:
-  defaultBranch: 'main'
+  defaultBranch: "main"
