@@ -7,12 +7,18 @@
  *
  * THE PROBLEM. Dependabot bumps `package.json` but not the lockfile, and bun /
  * uv re-resolve dependencies at install time, so CI's frozen-lockfile install
- * rejects the PR even though the code is fine. Both fixes are the same shape —
- * clone the branch, merge the base in (to match CI's merge state), re-resolve,
- * commit ONLY the lockfile, push — and they are kept separate because they
- * differ in five load-bearing details: the clone depth (5 / none), the merge
- * flags (`--no-edit` vs `--no-edit --no-ff`), the `git add` (`-A` vs
- * `bun.lock`), the commit message, and the "nothing to commit" tolerance.
+ * rejects the PR even though the code is fine.
+ *
+ * WHERE THE PIECES LIVE NOW. This module holds the pieces the repair SHARES with
+ * the rest of the worker — the `deps` types, the credential-redacting
+ * `reportable` door, the clone, the workdir lifecycle and its sweep, and
+ * `isTrivialPr`. The per-toolchain data is `./managers`, and the single
+ * re-resolve-and-push flow is `./relock`; both are re-exported at the bottom so
+ * callers keep importing them from here. The flows used to be two near-identical
+ * functions in THIS file (`fixUvLock` / `fixBunLock`), differing in five
+ * load-bearing details — clone depth, merge flags, `git add`, commit message,
+ * "nothing to commit" tolerance — every one of which is now a field on a
+ * `PackageManager` row rather than a copy of the flow.
  *
  * FOUR INVARIANTS:
  *
@@ -35,6 +41,8 @@
  */
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { type GitResult, type GitRunner, redactCredentials, setBotIdentity } from "../git.ts"
+import { detectPackageManagers } from "./managers.ts"
+import { fixBunLock, fixLockfile, fixUvLock } from "./relock.ts"
 import type { GhClient } from "./scan.ts"
 
 /** Python `TMP_BASE` (line 67). The parent of all three workdirs. */
@@ -79,11 +87,11 @@ export type Workdirs = {
  */
 export type ProcRunner = (args: string[], cwd?: string, timeoutSec?: number) => GitResult
 
-/** What `fixUvLock` / `fixBunLock` need from the world. */
+/** What the lockfile flows need from the world (`fixLockfile` and its wrappers). */
 export type LockfixDeps = {
 	/** Git. Never throws (git.ts). */
 	run: GitRunner
-	/** `uv` / `bun`. Never throws. */
+	/** `uv` / `bun` / `npm` / … . Never throws. */
 	exec: ProcRunner
 	workdirs: Workdirs
 	/** Python `_fetch_gh_token()` (lines 599-605). `""` means "no PAT". */
@@ -186,25 +194,30 @@ export function nodeWorkdirs(): Workdirs {
  * The name→PR-key mapping for a workdir under `TMP_BASE`, or `null` when the name
  * is not one of ours.
  *
- * THE INFIX IS LOAD-BEARING. Three flows create workdirs and only one has no
+ * THE INFIX IS LOAD-BEARING. Two flows create workdirs and only one has no
  * infix:
  *
  *   autofix.ts   `${repo}_${pr}`                 -> asepharyana_hub_47
- *   relock.ts    `${repo}_lockfix_${pr}`         -> asepharyana_hub_lockfix_47
- *   relock.ts    `${repo}_bunfix_${pr}`          -> asepharyana_hub_bunfix_47
+ *   relock.ts    `${repo}_<id>fix_${pr}`         -> asepharyana_hub_pnpmfix_47
+ *
+ * The `<id>` is the `PackageManager.id` that owns the repair — `bunfix`,
+ * `lockfix` (uv, before the row table), `npmfix`, `pnpmfix`, … — so the set is
+ * open-ended and matched by SHAPE rather than by a list of known names. A hard
+ * list here is what would silently start sweeping a live pnpm repair the day a
+ * seventh toolchain was added.
  *
  * `repo` is the full `owner/name` with slashes replaced by underscores, so the
  * FIRST underscore separates owner from name and everything after the name is
  * either the PR or an infix + the PR. Stripping the infix is not cosmetic: the
- * naive `owner/name_<infix>/pr` key never matches the open set, so a LIVE PR's
- * lockfix workdir would be swept mid-use — an agent run losing its clone, or a
- * relock deleting the tree it is about to `bun install` into. Caught by writing
- * the test against the real function instead of a copy of its logic.
+ * naive `owner/name_<infix>_pr` key never matches the open set, so a LIVE PR's
+ * relock workdir would be swept mid-use — a relock deleting the tree it is about
+ * to run `npm ci` in. Caught by writing the test against the real function
+ * instead of a copy of its logic.
  */
 export function workdirPrKey(name: string): string | null {
 	const m = /^(.+)_(\d+)$/.exec(name)
 	if (!m) return null
-	const repoPart = m[1].replace(/_(?:lockfix|bunfix)$/, "")
+	const repoPart = m[1].replace(/_[a-z0-9]+fix$/, "")
 	const us = repoPart.indexOf("_")
 	if (us < 0) return null
 	return `${repoPart.slice(0, us)}/${repoPart.slice(us + 1)}/${m[2]}`
@@ -246,6 +259,62 @@ export function workdirPrKey(name: string): string | null {
  */
 export const SWEEP_MIN_AGE_HOURS = 6
 
+/** Knobs shared by both sweeps; both default to their module constant. */
+export type SweepOptions = {
+	/** Age floor in ms; 0 disables it (tests only). */
+	minAgeMs?: number
+	/** Injected clock, so a test never depends on wall time. */
+	now?: number
+}
+
+/**
+ * Remove the entries of `dir` that `shouldRemove` selects and that are older
+ * than the age floor; return the count.
+ *
+ * THE SKELETON BOTH SWEEPS SHARE, factored out so the two callers differ only in
+ * what they claim and whether they remove a tree: readdir (an absent directory
+ * is zero work, not an error), stat (an entry that vanished between the two is
+ * skipped), the age floor, then a best-effort removal that must not abort the
+ * tick.
+ */
+function sweepAged(
+	dir: string,
+	shouldRemove: (name: string) => boolean,
+	recursive: boolean,
+	opts: SweepOptions,
+	defaultMinAgeMs: number,
+): number {
+	const minAgeMs = opts.minAgeMs ?? defaultMinAgeMs
+	const now = opts.now ?? Date.now()
+	let names: string[]
+	try {
+		names = readdirSync(dir)
+	} catch {
+		return 0 // no such directory yet: nothing to sweep, not an error.
+	}
+	let removed = 0
+	for (const name of names) {
+		if (!shouldRemove(name)) continue
+		const path = `${dir}/${name}`
+		// `statSync`, not the dirent's type: the mtime is what decides here, and a
+		// broken symlink (a real leftover shape) must still be swept.
+		let mtimeMs: number
+		try {
+			mtimeMs = statSync(path).mtimeMs
+		} catch {
+			continue // vanished between readdir and stat; nothing to do.
+		}
+		if (now - mtimeMs < minAgeMs) continue
+		try {
+			rmSync(path, { recursive, force: true })
+			removed += 1
+		} catch {
+			// Leave it; one failure must not abort the tick's report.
+		}
+	}
+	return removed
+}
+
 /**
  * Remove every workdir under `dir` whose PR is not in `openKeys` AND whose mtime
  * is older than the age floor; return the count.
@@ -265,38 +334,18 @@ export const SWEEP_MIN_AGE_HOURS = 6
 export function sweepStaleWorkdirs(
 	dir: string,
 	openKeys: ReadonlySet<string>,
-	opts: { minAgeMs?: number; now?: number } = {},
+	opts: SweepOptions = {},
 ): number {
-	const minAgeMs = opts.minAgeMs ?? SWEEP_MIN_AGE_HOURS * 3_600_000
-	const now = opts.now ?? Date.now()
-	let names: string[]
-	try {
-		names = readdirSync(dir)
-	} catch {
-		return 0 // no such directory yet: nothing to sweep, not an error.
-	}
-	let removed = 0
-	for (const name of names) {
-		const key = workdirPrKey(name)
-		if (key === null || openKeys.has(key)) continue
-		const path = `${dir}/${name}`
-		// `statSync`, not the dirent's type: the mtime is what decides here, and a
-		// broken symlink (a real leftover shape) must still be swept.
-		let mtimeMs: number
-		try {
-			mtimeMs = statSync(path).mtimeMs
-		} catch {
-			continue // vanished between readdir and stat; nothing to do.
-		}
-		if (now - mtimeMs < minAgeMs) continue
-		try {
-			rmSync(path, { recursive: true, force: true })
-			removed += 1
-		} catch {
-			// Leave it; one failure must not abort the tick's report.
-		}
-	}
-	return removed
+	return sweepAged(
+		dir,
+		(name) => {
+			const key = workdirPrKey(name)
+			return key !== null && !openKeys.has(key)
+		},
+		true,
+		opts,
+		SWEEP_MIN_AGE_HOURS * 3_600_000,
+	)
 }
 
 /**
@@ -323,96 +372,82 @@ export function sweepStaleWorkdirs(
  */
 export const PROMPT_AUDIT_KEEP_DAYS = 7
 
-export function sweepPromptAudits(
-	dir: string,
-	opts: { minAgeMs?: number; now?: number } = {},
-): number {
-	const minAgeMs = opts.minAgeMs ?? PROMPT_AUDIT_KEEP_DAYS * 86_400_000
-	const now = opts.now ?? Date.now()
-	let names: string[]
-	try {
-		names = readdirSync(dir)
-	} catch {
-		return 0
-	}
-	let removed = 0
-	for (const name of names) {
-		// `<label>.prompt.txt` is the only shape this owns. Anything else in the
-		// parent — the state files, the lock, `cc-socks`, the pnpm store — is
-		// either protected by the host reaper or belongs to another run, and is
-		// NOT matched here.
-		if (!name.endsWith(".prompt.txt")) continue
-		const path = `${dir}/${name}`
-		let mtimeMs: number
-		try {
-			mtimeMs = statSync(path).mtimeMs
-		} catch {
-			continue
-		}
-		if (now - mtimeMs < minAgeMs) continue
-		try {
-			rmSync(path, { force: true })
-			removed += 1
-		} catch {
-			// Leave it.
-		}
-	}
-	return removed
+/**
+ * `<label>.prompt.txt` is the only shape this owns. Anything else in the parent
+ * — the state files, the lock, `cc-socks`, the pnpm store — is either protected
+ * by the host reaper or belongs to another run, and is NOT matched here.
+ */
+const isPromptAudit = (name: string): boolean => name.endsWith(".prompt.txt")
+
+/**
+ * Reclaim the aged prompt audits under `dir`; return the count.
+ *
+ * A file, not a directory, so the removal is not recursive. The shared skeleton
+ * (`sweepAged`) supplies the age floor, the injected clock and the
+ * best-effort semantics.
+ */
+export function sweepPromptAudits(dir: string, opts: SweepOptions = {}): number {
+	return sweepAged(dir, isPromptAudit, false, opts, PROMPT_AUDIT_KEEP_DAYS * 86_400_000)
 }
 
 // ── is_trivial_pr ───────────────────────────────────────────────────────────
 
 /**
+ * The trivial-title keywords, transcribed verbatim and in order from Python
+ * lines 591-594.
+ *
+ * Hoisted to module scope so `isTrivialPr` does not rebuild the list on every
+ * call — a constant array is not a module-scope EFFECT, so invariant 4 holds.
+ */
+const TRIVIAL_TITLE_KEYWORDS: readonly string[] = [
+	"dependabot",
+	"update",
+	"bump",
+	"chore(deps)",
+	"pin dependencies",
+	"update version",
+	"docs:",
+	"readme",
+	"changelog",
+]
+
+/**
  * Python `is_trivial_pr(title, author)` (lines 589-597): "Skip AI fix for
  * trivial PRs (dependabot bumps, docs-only, etc.)".
  *
- * The keyword list is transcribed verbatim and in order. Matching is a
- * SUBSTRING test against the LOWERCASED title, so "update" also matches
- * "refactor: update the parser" — a false positive, and the Python's behaviour.
- * This port does not get to fix it: a narrower rule changes which PRs reach the
- * AI agent, which changes cost and merge outcomes.
+ * Matching is a SUBSTRING test against the LOWERCASED title, so "update" also
+ * matches "refactor: update the parser" — a false positive, and the Python's
+ * behaviour. This port does not get to fix it: a narrower rule changes which PRs
+ * reach the AI agent, which changes cost and merge outcomes.
  *
  * `author` IS DELIBERATELY UNUSED. Python never reads it; adding an author check
  * would be a behaviour change disguised as a fix. It stays in the signature
  * because the pipeline calls it with an author (line 1912).
  */
 export function isTrivialPr(title: string, _author: string): boolean {
-	const trivialKw = [
-		"dependabot",
-		"update",
-		"bump",
-		"chore(deps)",
-		"pin dependencies",
-		"update version",
-		"docs:",
-		"readme",
-		"changelog",
-	]
 	// `String(...)` mirrors Python's `str(title)`, so a null/undefined/number
 	// title degrades instead of throwing inside a cron tick.
 	const titleLower = String(title).toLowerCase()
-	for (const kw of trivialKw) {
-		if (titleLower.includes(kw)) return true // Python line 595
-	}
-	return false // Python line 597
+	return TRIVIAL_TITLE_KEYWORDS.some((kw) => titleLower.includes(kw)) // Python 595 / 597
 }
 
-// ── _repo_has_bun_lock ──────────────────────────────────────────────────────
+// ── The per-toolchain probes and dispatch ───────────────────────────────────
+//
+// `repoHasBunLock` used to live here: Python's `_repo_has_bun_lock` (608-624),
+// which asked a binary "is this a Bun repo" question and answered it by
+// substring-matching `bun.lock` anywhere in the tree. That question cannot
+// express the fleet's reality — one repo can hold a pnpm workspace AND a
+// `uv.lock` — so detection moved to `./managers`, which returns EVERY toolchain
+// the tree proves. The name is kept as a thin wrapper because the Python-parity
+// suite pins it, and because a caller that genuinely wants the bun answer should
+// not have to know the shape of the wider table.
 
 /**
- * Python `_repo_has_bun_lock(token, repo_full, sha)` (lines 608-624): "True if
- * the repo's tree at `sha` contains a bun.lock (root or any workspace)".
+ * True when the repo tree at `sha` holds a `bun.lock` or `bun.lockb`.
  *
- * Read-only, and EVERY failure means "no": a non-200, a malformed body, or a
- * thrown request all fall into the single `except Exception: pass` at lines
- * 622-623. The port keeps that — this predicate only chooses WHICH lockfix to
- * try, so a false negative costs one extra uv attempt, whereas a throw would
- * abort the whole tick.
- *
- * The TREE endpoint, not the contents endpoint (line 614): it is the only way to
- * see a workspace's bun.lock, and the recursive form returns every path at once.
- * The match is a SUBSTRING on the path (line 620), so a workspace lockfile
- * counts — and so would a file merely named `bun.lock.bak`.
+ * Delegates to `detectPackageManagers`, so its failure mode and its notion of
+ * "is a lockfile" cannot drift from the dispatcher's. Still "EVERY failure means
+ * no": an unreadable tree yields no toolchains, hence `false`.
  */
 export async function repoHasBunLock(
 	api: GhClient,
@@ -420,31 +455,17 @@ export async function repoHasBunLock(
 	repo: string,
 	sha: string,
 ): Promise<boolean> {
-	try {
-		const { status, data } = await api.request(
-			"GET",
-			`/repos/${repo}/git/trees/${sha}?recursive=1`,
-			{
-				token,
-			},
-		)
-		if (status === 200 && Array.isArray(data?.tree)) {
-			for (const item of data.tree as any[]) {
-				const path = typeof item?.path === "string" ? item.path : ""
-				if (path.includes("bun.lock")) return true // Python line 620
-			}
-		}
-	} catch {
-		/* Python lines 622-623: `except Exception: pass` */
-	}
-	return false // Python line 624
+	const found = await detectPackageManagers(api, token, repo, sha)
+	return found.some((pm) => pm.id === "bun")
 }
 
-import { fixBunLock, fixUvLock } from "./relock.ts"
+export { detectPackageManagers } from "./managers.ts"
 
-// Re-exported so `pipeline.ts` and the test suite keep importing the two
-// flows from `./lockfix`. This is a live re-export and `./relock` imports
-// `clonePr`/`head`/`reportable` back, so the two modules form an ESM cycle;
-// it is safe because nothing either module reads is touched at
-// module-evaluation time.
-export { fixBunLock, fixUvLock }
+// Re-exported so `pipeline.ts` and the test suite keep importing the two flows
+// from `./lockfix`, and so `steps.ts` can dispatch any row of the manager table
+// without knowing which module owns the flow. `./relock` imports
+// `clonePr`/`head`/`reportable` back, so the two modules form an ESM cycle; it
+// is safe because nothing either module reads is touched at module-evaluation
+// time (import declarations are hoisted, so where this re-export sits in the
+// file does not affect that).
+export { fixBunLock, fixLockfile, fixUvLock }

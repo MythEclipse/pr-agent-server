@@ -49,7 +49,8 @@ import {
 	shouldIterateAgain,
 	waitForCiSettled,
 } from "./fix-loop.ts"
-import { fixBunLock, fixUvLock, isTrivialPr, repoHasBunLock } from "./lockfix.ts"
+import { detectPackageManagers, fixLockfile, isTrivialPr } from "./lockfix.ts"
+import { mentionsLockfile, primaryLockfile } from "./managers.ts"
 import { closeToolchainPr, TOOLCHAIN_PINS, toolchainPinViolation } from "./pins.ts"
 import { findReviewComment, findTrivialNoReviewMarker, triggerReview } from "./review.ts"
 
@@ -132,51 +133,68 @@ export async function stepReview(deps: WorkerDeps, c: Ctx): Promise<string | nul
 // ── STEP A2 — lockfile pre-fix for trivial PRs (1953-1986) ─────────────────
 
 /**
- * For a lockfile-only PR whose CI is red on a lockfile check, re-resolve and
- * push the lockfile BEFORE the AI agent runs. `bun.lock` first for a Bun repo;
- * `uv.lock` is the fallback, SKIPPED when the CI message already names it
- * (1973) — re-resolving the file uv just complained about costs a clone and
- * changes nothing.
+ * For a lockfile-only PR whose CI is red, re-resolve and push the stale
+ * lockfile BEFORE the AI agent runs — deterministically, for EVERY toolchain the
+ * repo actually uses.
+ *
+ * THE CONDITION THIS USED TO HAVE WAS THE BUG. `early.msg.includes("typecheck")`
+ * (ported from Python 1958) gated the whole step on a failing check being
+ * *named* `typecheck`. This repo's CI names its job `Lint and format`, `Test`,
+ * `Build` and `Drizzle drift`, and npm/pnpm/yarn installs all run in an
+ * `Install` step — so for the fleet's actual failures the deterministic repair
+ * never ran at all: the trivial bump fell through to the AI agent, which edits
+ * source files and cannot regenerate a lockfile. The gate is now "CI is red", and
+ * the TOOLCHAIN is decided by what is in the tree rather than by what a check is
+ * called.
+ *
+ * EVERY DETECTED TOOLCHAIN IS REPAIRED, in table order, and the loop stops at the
+ * first push that lands because that push changes the commit CI is judging. A
+ * repo holding both `pnpm-lock.yaml` and `uv.lock` therefore gets whichever one
+ * was actually stale, rather than a coin flip on detection order.
+ *
+ * THE UV GUARD SURVIVES. A CI message that already names `uv.lock` means the file
+ * uv would re-resolve is the one being complained about, so re-resolving costs a
+ * clone and changes nothing (Python 1973). The guard is now per toolchain — the
+ * message naming `bun.lock` skips only the bun arm — which is the same rule with
+ * the toolchain made explicit.
  */
 export async function stepLockPrefix(deps: WorkerDeps, c: Ctx): Promise<void> {
 	const early = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
-	if (early.ok || !early.msg.includes("typecheck")) return
-	// Python 1961-1973 is a THREE-way, not a two-way with a default:
-	//   if has_bun:                    -> fix_bun_lock
-	//   elif "uv.lock" not in ci_msg:  -> fix_uv_lock
-	//   (else)                         -> fall through, change nothing
-	//
-	// The third arm is the load-bearing one: a CI message that already names
-	// uv.lock is complaining about the file uv would re-resolve, so re-resolving
-	// costs a clone, changes nothing, and in a non-Bun repo the naive two-way
-	// rewrite ends up PUSHING a regenerated bun.lock the repo does not use, on a
-	// PR the Python left untouched. It cannot be a disjunction at all: `has_bun`
-	// alone must select bun (a Bun repo is unaffected by what CI names), and the
-	// negative guard belongs on the uv arm only.
-	const hasBun = await repoHasBunLock(deps.api, c.token, c.repo, c.headSha)
-	const uvBlocked = early.msg.includes("uv.lock")
-	if (!hasBun && uvBlocked) return // Python 1973's implicit else.
-	const useBun = hasBun
+	if (early.ok) return
 
-	deps.report.push(
-		useBun
-			? "   🔧 CI failing: bun.lock stale — pre-fixing..."
-			: "   🔧 CI failing: uv.lock stale — pre-fixing...",
+	// The message naming a toolchain's own lockfile skips only that toolchain
+	// (Python 1973): re-resolving the file CI just complained about costs a clone
+	// and changes nothing.
+	const candidates = (await detectPackageManagers(deps.api, c.token, c.repo, c.headSha)).filter(
+		(pm) => !mentionsLockfile(early.msg, pm),
 	)
-	if (deps.dry) {
-		deps.report.push("   🧪 dry run: would re-resolve and push the lockfile")
+	for (const pm of candidates) {
+		deps.report.push(`   🔧 CI failing: ${primaryLockfile(pm)} stale — pre-fixing...`)
+		if (deps.dry) {
+			deps.report.push("   🧪 dry run: would re-resolve and push the lockfile")
+			return
+		}
+		const { ok, summary } = await fixLockfile(
+			subDeps(deps),
+			pm,
+			c.repo,
+			c.prNum,
+			c.headRef,
+			c.baseRef,
+		)
+		if (!ok) {
+			// A failed repair reports nothing and moves on (Python 1965) — the PR
+			// is not blocked, the agent still gets its turn, and the CI gate stays
+			// the authority on whether it may merge.
+			continue
+		}
+		deps.report.push(`   ✅ ${summary}`)
+		const sha = movedSha(await refetchHead(deps, c), c.headSha)
+		if (sha) {
+			deps.report.push("   🔄 Head SHA updated")
+			c.headSha = sha
+		}
 		return
-	}
-	const { ok, summary } = useBun
-		? await fixBunLock(subDeps(deps), c.repo, c.prNum, c.headRef, c.baseRef)
-		: await fixUvLock(subDeps(deps), c.repo, c.prNum, c.headRef, c.baseRef)
-	if (!ok) return // Python 1965: a failed fix reports nothing and moves on.
-
-	deps.report.push(`   ✅ ${summary}`)
-	const sha = movedSha(await refetchHead(deps, c), c.headSha)
-	if (sha) {
-		deps.report.push("   🔄 Head SHA updated")
-		c.headSha = sha
 	}
 }
 
