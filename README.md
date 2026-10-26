@@ -103,13 +103,13 @@ pnpm -C apps/api exec tsx src/cli.ts --tool improve  --repo <owner>/<repo> --pr 
 
 Deploy is fully automated via GitHub Actions on push to `main`:
 
-```yaml
+```text
 # .github/workflows/deploy.yml
 1. build-and-deploy → pnpm install → lint → typecheck → tests → build
-→ pnpm deploy --prod (self-contained node_modules) → tar → scp to VPS
-→ swap /opt/pr-agent-server/{dist,node_modules,drizzle,web-dist}
-→ node dist/migrate.js → restart pr-agent-server.service
-→ health check on :4023
+   → pnpm deploy --prod (self-contained node_modules) → tar → scp to VPS
+   → swap /opt/pr-agent-server/{dist,node_modules,drizzle,web-dist}
+   → node dist/migrate.js → restart pr-agent-server.service
+   → health check on :4023
 2. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
 ```
 
@@ -166,17 +166,16 @@ version, so an image tag always matches a git tag:
 
 This repo publishes 3 image(s):
 
-| Package           | Image                                                           |
-| ----------------- | --------------------------------------------------------------- |
-| `pr-agent-api`    | `ghcr.io/asepharyana/pr-agent-server:pr-agent-api:<version>`    |
-| `pr-agent-worker` | `ghcr.io/asepharyana/pr-agent-server:pr-agent-worker:<version>` |
-| `pr-agent-web`    | `ghcr.io/asepharyana/pr-agent-server:pr-agent-web:<version>`    |
-
+| Package           | Image                                           |
+| ----------------- | ----------------------------------------------- |
+| `pr-agent-api`    | `ghcr.io/asepharyana/pr-agent-api:<version>`    |
+| `pr-agent-worker` | `ghcr.io/asepharyana/pr-agent-worker:<version>` |
+| `pr-agent-web`    | `ghcr.io/asepharyana/pr-agent-web:<version>`    |
 
 Pull one without touching the registry UI:
 
 ```bash
-docker pull ghcr.io/asepharyana/<repo>:<service>:<version>
+docker pull ghcr.io/asepharyana/<service>:<version>
 ```
 
 ### Adding or removing an image
