@@ -26,7 +26,7 @@
  */
 import { statSync } from "node:fs"
 import type { PostResult } from "../claude-agent.ts"
-import type { GitRunner } from "../git.ts"
+import type { GitResult, GitRunner } from "../git.ts"
 import { ciFailureSection, collectCiFailures } from "./ci-evidence.ts"
 import { clonePr, head, reportable, TMP_BASE, type Workdirs } from "./lockfix.ts"
 import type { GhClient } from "./scan.ts"
@@ -482,16 +482,34 @@ export async function runAiFix(
 		// The worker pushes the agent's commit — the agent must not (prompt rule 4).
 		const pushed = run(["push", "origin", `HEAD:${headRef}`], workdir, PUSH_TIMEOUT_SEC)
 		if (pushed.code !== 0) {
-			workdirs.remove(workdir)
-			workdirs.remove(pidFile) // Python lines 949-950
-			// Python line 951: `stderr or stdout or ""` — stderr first, stdout as the
-			// fallback, empty last, then 200 characters.
-			const detail = reportable(pushed.stderr || pushed.stdout || "")
-			return {
-				ok: false,
-				commits: 0,
-				tipSha: "",
-				summary: `AI committed but push failed: ${head(detail, PUSH_DETAIL)}`,
+			// NON-FAST-FORWARD RECOVERY, BEFORE DISCARDING THE RUN.
+			//
+			// A bare `push` is rejected when the branch moved while the agent was
+			// thinking — Dependabot re-running, a maintainer pushing, a previous
+			// tick's fix landing. That is the ORDINARY case on a five-minute
+			// timer, not an exotic one: GMW#125 hit it and the entire 335s run
+			// was thrown away, so the next tick re-cloned, re-prompted and paid
+			// the same cost to rediscover the same edits.
+			//
+			// Rebase the agent's commit onto what the branch IS now and push
+			// again. `--autostash` is not needed (a clean tree was required to
+			// get here) and a conflict is NOT resolved blindly: if the rebase
+			// stops, it is aborted and the original failure is reported, so a
+			// commit that cannot be replayed safely still costs nothing beyond
+			// the attempt.
+			const recovered = pushRebased(run, workdir, headRef)
+			if (recovered.code !== 0) {
+				workdirs.remove(workdir)
+				workdirs.remove(pidFile) // Python lines 949-950
+				// Python line 951: `stderr or stdout or ""` — stderr first, stdout as
+				// the fallback, empty last, then 200 characters.
+				const detail = reportable(pushed.stderr || pushed.stdout || "")
+				return {
+					ok: false,
+					commits: 0,
+					tipSha: "",
+					summary: `AI committed but push failed: ${head(detail, PUSH_DETAIL)}`,
+				}
 			}
 		}
 	}
@@ -600,4 +618,30 @@ export async function runAiFix(
 function workdirClean(run: GitRunner, workdir: string): boolean {
 	const r = run(["status", "--porcelain"], workdir, REV_LIST_TIMEOUT_SEC)
 	return r.code === 0 && r.stdout.trim() === ""
+}
+
+/**
+ * Second and final push attempt after a non-fast-forward rejection.
+ *
+ * The branch moved while the agent was working. Rebasing the agent's commit
+ * onto the current remote tip is the only way to keep the work without
+ * rewriting anyone else's history, so: fetch the branch, rebase onto it, push
+ * again.
+ *
+ * A rebase that stops on a conflict is aborted before returning, so the
+ * workdir is never left mid-rebase for the caller's cleanup to trip over, and
+ * the returned failure is the *original* one the operator needs to see — a
+ * commit that cannot replay is a real refusal, not something to paper over.
+ */
+function pushRebased(run: GitRunner, workdir: string, headRef: string): GitResult {
+	const fetched = run(["fetch", "origin", headRef], workdir, FETCH_TIMEOUT_SEC)
+	if (fetched.code !== 0) return fetched
+
+	const rebased = run(["rebase", "FETCH_HEAD"], workdir, PUSH_TIMEOUT_SEC)
+	if (rebased.code !== 0) {
+		run(["rebase", "--abort"], workdir, REV_LIST_TIMEOUT_SEC)
+		return rebased
+	}
+
+	return run(["push", "origin", `HEAD:${headRef}`], workdir, PUSH_TIMEOUT_SEC)
 }
