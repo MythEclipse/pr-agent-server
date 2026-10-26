@@ -1,3 +1,10 @@
+## [1.5.6](https://github.com/asepharyana/pr-agent-server/compare/v1.5.5...v1.5.6) (2026-10-26)
+
+
+### Bug Fixes
+
+* **worker:** stop pinning a timeout, and refuse a bump that cannot install ([89b2338](https://github.com/asepharyana/pr-agent-server/commit/89b2338a5d844644df77cdbc8a1cb82a3c323fb2)), closes [hub#61](https://github.com/hub/issues/61)
+
 ## [1.5.5](https://github.com/asepharyana/pr-agent-server/compare/v1.5.4...v1.5.5) (2026-10-21)
 
 
