@@ -15,7 +15,7 @@
 // evidence (a 4xx/5xx status, a quota or rate-limit shape, a network error).
 import { describe, expect, test } from "vitest"
 
-import { isInfra, isTransientInfra, stripInfra } from "../src/pr/context.ts"
+import { isBudgetExhaustion, isInfra, isTransientInfra, stripInfra } from "../src/pr/context.ts"
 
 describe("isInfra vs isTransientInfra", () => {
 	// The exact text the report showed, trimmed to the shape the CLI emits.
@@ -41,16 +41,42 @@ describe("isInfra vs isTransientInfra", () => {
 		expect(isTransientInfra(msg)).toBe(true)
 	})
 
-	// A 1800s agent timeout is INFRA and stays PERMANENT, deliberately, even
-	// though it is arguably "transient": it is pinned so the queue does not pay
-	// another 30-minute agent run every 5 minutes forever. `pipeline.test.ts`
-	// ("case 4") pins that contract by asserting the agent is called exactly
-	// once across two ticks, so this is asserted here too — as a boundary, in
-	// both directions, rather than left implicit.
-	test("a 1800s agent timeout stays permanent (it is not a retryable blip)", () => {
+	// A 1800s agent timeout is INFRA and is now RETRYABLE, which is the reverse
+	// of what this test used to assert. The old reading — "pin it so the queue
+	// does not pay another 30-minute run every 5 minutes" — named a real cost but
+	// chose the wrong remedy: a `skip_reason` is enforced "until head SHA
+	// changes", and a timeout is a property of one RUN, not of the branch, so
+	// nothing about it ever moves a head. hub#61 and pr-agent-server#27 became
+	// `Permanently skipped` that way, on a bump no edit could fix.
+	//
+	// The cost is now bounded where it belongs: `AI_FIX_BUDGET_CEILING` counts
+	// budget-exhausting runs and stops OFFERING the agent past the ceiling. So
+	// the contract is "retryable, then stop spending", not "never retry".
+	test("a 1800s agent timeout is retryable (it must not pin the PR)", () => {
 		const timeout = "[INFRA] Claude Code timed out after 1800s"
 		expect(isInfra(timeout)).toBe(true)
-		expect(isTransientInfra(timeout)).toBe(false)
+		expect(isTransientInfra(timeout)).toBe(true)
+		// ...and it is a BUDGET exhaustion, which is what gives it a ceiling.
+		expect(isBudgetExhaustion(timeout)).toBe(true)
+	})
+
+	test("a max-turns exit is retryable AND counted against the budget", () => {
+		const maxTurns = "[INFRA] Claude Code exited 1: Error: Reached max turns (100)"
+		expect(isInfra(maxTurns)).toBe(true)
+		expect(isTransientInfra(maxTurns)).toBe(true)
+		expect(isBudgetExhaustion(maxTurns)).toBe(true)
+	})
+
+	// The budget predicate must not catch an ordinary transient failure: a 403
+	// is retried with no ceiling, because it costs one refused request rather
+	// than 30 minutes of a model.
+	test.each([
+		["a 403", '[INFRA] Claude Code exited 1: API Error: 403 {"type":"FreeTierError"}'],
+		["a 429", "[INFRA] Claude Code exited 1: API Error: 429 rate_limit_error"],
+		["a socket error", "[INFRA] Claude Code exited 1: socket hang up"],
+		["a permanent install fault", "[INFRA] Claude Code binary not found"],
+	])("not a budget exhaustion: %s", (_label, msg) => {
+		expect(isBudgetExhaustion(msg)).toBe(false)
 	})
 
 	test.each([

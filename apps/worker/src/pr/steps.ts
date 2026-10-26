@@ -13,12 +13,23 @@
  * because it is the load-bearing part of that function, not decoration.
  */
 
-import { bumpAttempt, markFixed, markSkip } from "../state.ts"
+import {
+	badBumpReason,
+	budgetRunCount,
+	bumpAttempt,
+	bumpBudgetRun,
+	markBadBump,
+	markFixed,
+	markSkip,
+} from "../state.ts"
 import { checkPrStillValid, killOrphanedAgent, runAiFix } from "./autofix.ts"
+import { commentBadBump, findBadBump } from "./bump-guard.ts"
 import { checkCiPassed } from "./ci.ts"
 import {
+	AI_FIX_BUDGET_CEILING,
 	AI_FIX_ENABLED,
 	type Ctx,
+	isBudgetExhaustion,
 	isInfra,
 	isTransientInfra,
 	movedSha,
@@ -169,6 +180,57 @@ export async function stepLockPrefix(deps: WorkerDeps, c: Ctx): Promise<void> {
 	}
 }
 
+// ── STEP A1 — unshippable-bump guard ────────────────────────────────────────
+
+/**
+ * Refuse a Dependabot bump that cannot install, BEFORE any agent run.
+ *
+ * THE COST THIS SAVES. `hub#61` + `pr-agent-server#27` were a
+ * `@moonrepo/cli@2.6.3` bump whose platform binaries were never published. The
+ * agent's prompt says "Make the failing job pass. Do not work around it", and no
+ * edit to that branch can — so each run was guaranteed to burn its full
+ * `--max-turns`/1800s budget and then be pinned. This check is two registry
+ * reads on the FIRST tick instead.
+ *
+ * It returns true when the PR's turn is over. The PR is NOT closed: closing a
+ * Dependabot bump is a silent loss, so the evidence is commented and a human
+ * decides. The cached reason makes later ticks free.
+ *
+ * `deps.fetchRegistry` is optional: an install that does not wire it keeps the
+ * previous behaviour exactly (every bump passes), which is the safe default —
+ * this guard may only ever ADD a refusal on positive evidence.
+ */
+export async function stepBumpGuard(deps: WorkerDeps, c: Ctx): Promise<boolean> {
+	if (c.author !== "dependabot[bot]") return false
+	const cached = badBumpReason(c.fixState, c.repo, c.prNum, c.headSha)
+	if (cached) {
+		deps.report.push(`   ⛔ Unshippable bump (cached at this SHA): ${cached}`)
+		c.out.skipped = true
+		return true
+	}
+	if (!deps.fetchRegistry) return false
+
+	const bad = await findBadBump(c.title, deps.fetchRegistry)
+	if (!bad) return false
+
+	deps.report.push(`   ⛔ Unshippable bump: ${bad.reason}`)
+	markBadBump(c.fixState, c.repo, c.prNum, c.headSha, bad.reason)
+	persist(deps, c.fixState)
+	if (deps.dry) {
+		deps.report.push(`   🧪 dry run: would comment the evidence on #${c.prNum}`)
+		c.out.skipped = true
+		return true
+	}
+	const status = await commentBadBump(deps.api, c.token, c.repo, c.prNum, bad)
+	deps.report.push(
+		status >= 200 && status < 300
+			? "   💬 Evidence commented — left open for a human, AI fix skipped"
+			: `   ⚠️  Could not comment the evidence (HTTP ${status})`,
+	)
+	c.out.skipped = true
+	return true
+}
+
 // ── STEP B — AI fix (1951-2029) ─────────────────────────────────────────────
 
 /**
@@ -184,6 +246,24 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 
 	if (already) {
 		deps.report.push("   ⏭️  Already fixed at this SHA — skip AI fix")
+		return
+	}
+	// THE BUDGET CEILING. A run that ends by exhausting its own allowance (turn
+	// cap or wall clock) is retryable — see `isTransientInfra` — but it costs up
+	// to `AI_FIX_TIMEOUT` (1800s) of a paid model, so it cannot be retried
+	// without limit. Past `AI_FIX_BUDGET_CEILING` the agent is simply not
+	// offered, and the PR falls through to the ordinary CI gate.
+	//
+	// NOT a skip, deliberately: a `skip_reason` is enforced "until head SHA
+	// changes", which is a permanent stall for a blocker that lives outside the
+	// branch. The PR stays visible, stays counted, and stays mergeable the
+	// moment CI is green for any other reason (a base-branch fix, a maintainer
+	// bumping the dependency properly).
+	const budgetRuns = budgetRunCount(c.fixState, c.repo, c.prNum, c.headSha)
+	if (budgetRuns >= AI_FIX_BUDGET_CEILING) {
+		deps.report.push(
+			`   ⏭️  Agent budget spent ${budgetRuns}× at this SHA — leaving it to the CI gate (not a skip)`,
+		)
 		return
 	}
 	if (deps.dry) {
@@ -320,6 +400,21 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
  */
 async function reportAiFixFailure(deps: WorkerDeps, c: Ctx, summary: string): Promise<void> {
 	deps.report.push(`   ⏭️  AI fix skipped: ${summary}`)
+	// A run cut off by its own turn/time allowance is counted FIRST, because it
+	// is both retryable (never pinned — see `isTransientInfra`) and expensive
+	// (capped by `AI_FIX_BUDGET_CEILING`). The two arms below cannot express
+	// that: one pins, the other counts without a ceiling.
+	if (isBudgetExhaustion(summary)) {
+		const runs = bumpBudgetRun(c.fixState, c.repo, c.prNum, c.headSha)
+		persist(deps, c.fixState)
+		const left = AI_FIX_BUDGET_CEILING - runs
+		deps.report.push(
+			left > 0
+				? `   🔁 Agent exhausted its budget (${runs}/${AI_FIX_BUDGET_CEILING} at this SHA — retrying next tick)`
+				: `   ⏭️  Agent budget spent (${runs}/${AI_FIX_BUDGET_CEILING}) — leaving it to the CI gate, not a skip`,
+		)
+		return
+	}
 	if (isInfra(summary) && !isTransientInfra(summary)) {
 		// Infra-level failure (CLI missing / no credential): permanently skip at
 		// this SHA, or retrying every 5 min would just loop (2023-2025).

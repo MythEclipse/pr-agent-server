@@ -14,13 +14,15 @@
  * The stale-dependabot age arithmetic (Python 2051) is `ageDays` in `./context`.
  */
 
-import { alreadyFixed, bumpAttempt, markFixed, markSkip } from "../state.ts"
+import { alreadyFixed, bumpAttempt, bumpBudgetRun, markFixed, markSkip } from "../state.ts"
 import { checkPrStillValid, killOrphanedAgent, runAiFix } from "./autofix.ts"
 import { checkCiPassed, closeStaleCiPr, STALE_CI_CLOSE_DAYS } from "./ci.ts"
 import {
+	AI_FIX_BUDGET_CEILING,
 	AI_FIX_ENABLED,
 	ageDays,
 	type Ctx,
+	isBudgetExhaustion,
 	isInfra,
 	isTransientInfra,
 	movedSha,
@@ -99,7 +101,16 @@ export async function resolveConflict(
 			// Same transient/permanent split as `stepAiFix`, and for the same reason:
 			// a gateway 4xx/5xx here would otherwise be recorded in `skip_reason` and
 			// enforced "until head SHA changes", which no conflict-resolution run will
-			// ever move.
+			// ever move. A budget exhaustion is the same shape but counted separately,
+			// so an expensive timeout cannot repeat without limit.
+			if (isBudgetExhaustion(summary)) {
+				const runs = bumpBudgetRun(c.fixState, c.repo, c.prNum, c.headSha)
+				persist(deps, c.fixState)
+				deps.report.push(
+					`   🔁 Agent exhausted its budget (${runs}/${AI_FIX_BUDGET_CEILING} at this SHA — retrying next tick)`,
+				)
+				return
+			}
 			if (isTransientInfra(summary)) {
 				const attempts = bumpAttempt(c.fixState, c.repo, c.prNum, c.headSha)
 				persist(deps, c.fixState)

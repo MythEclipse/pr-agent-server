@@ -40,7 +40,7 @@ import { describe, expect, test } from "vitest"
 import type { PostResult } from "../src/claude-agent.ts"
 import type { GitResult, GitRunner } from "../src/git.ts"
 import { WorkerLock } from "../src/lock.ts"
-import { AI_FIX_RETRY_CEILING } from "../src/pr/context.ts"
+import { AI_FIX_BUDGET_CEILING, AI_FIX_RETRY_CEILING } from "../src/pr/context.ts"
 import type { ProcRunner, Workdirs } from "../src/pr/lockfix.ts"
 import { SWEEP_MIN_AGE_HOURS, sweepPromptAudits, sweepStaleWorkdirs } from "../src/pr/lockfix.ts"
 import { processPr, runTick, UNRESOLVABLE_CONFLICT, type WorkerDeps } from "../src/pr/pipeline.ts"
@@ -658,8 +658,19 @@ describe("case 3 — a permanent skip at this SHA skips without calling the agen
 	})
 })
 
-describe("case 4 — an [INFRA] agent failure skips permanently and never re-runs", () => {
-	test("two ticks on the same SHA: the agent is called exactly once", async () => {
+describe("case 4 — an agent run that exhausts its BUDGET is retried, then stops being offered", () => {
+	// This case used to assert the opposite: a 1800s timeout was pinned as a
+	// `skip_reason` and never retried. The cost it was protecting against is
+	// real (1800s of a paid model per attempt) but the remedy was wrong — a pin
+	// is enforced "until head SHA changes", and a timeout never moves a head.
+	// Measured on hub#61 + pr-agent-server#27, both a `@moonrepo/cli@2.6.3` bump
+	// whose platform binaries were never published: no edit could make CI green,
+	// so both were pinned `Permanently skipped` after one 1800s run.
+	//
+	// The contract now has two halves, and both are asserted here:
+	//   - the PR is NOT pinned (no `skip_reason`), so it stays releasable;
+	//   - the spend IS bounded, at `AI_FIX_BUDGET_CEILING` runs per head.
+	test("the timeout does not pin, and the agent stops being offered at the ceiling", async () => {
 		const h = harness({
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
@@ -669,31 +680,71 @@ describe("case 4 — an [INFRA] agent failure skips permanently and never re-run
 		const first = await runTick(h.deps)
 		expect(h.agentPosts).toHaveLength(1)
 		expect(first).toContain("   ⏭️  AI fix skipped: [INFRA] Claude Code timed out after 1800s")
-		expect(first).toContain("   🔔 Skip notified: Claude Code timed out after 1800s")
-		// The recorded reason is the [INFRA] text with the prefix stripped.
-		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBe(
-			"Claude Code timed out after 1800s",
+		// NOT a pin: the whole point of the change.
+		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
+		expect((h.fixState[REPO][String(PR_NUM)] as any).budget_runs).toBe(1)
+		expect(first).toContain(
+			`   🔁 Agent exhausted its budget (1/${AI_FIX_BUDGET_CEILING} at this SHA — retrying next tick)`,
 		)
-		// The skip notification, and ONLY it: the same tick goes on to approve and
-		// merge (the [INFRA] skip is recorded, not enforced, on a PR whose safety
-		// and CI are clean), which is its own "done" notice. Counting every
-		// notification here would assert a fact about the merge, not about the skip.
-		expect(skipNotices(h)).toHaveLength(1)
+		// No skip notification, because nothing was skipped permanently.
+		expect(skipNotices(h)).toHaveLength(0)
 
+		// Retryable: the next tick on the SAME head offers the agent again.
 		const second = await runTick(h.deps)
+		expect(h.agentPosts).toHaveLength(2)
+		expect(second).not.toContain("   ⏭️  Permanently skipped:")
+		expect((h.fixState[REPO][String(PR_NUM)] as any).budget_runs).toBe(2)
 
-		// The whole point: the agent is NOT asked again, the skip is not
-		// re-notified, and no second merge is attempted (the head did not change,
-		// so `already` is true and the merge is skipped). All three only show up by
-		// re-running the tick.
-		expect(h.agentPosts).toHaveLength(1)
-		expect(skipNotices(h)).toHaveLength(1)
-		expect(merges(h.calls)).toBe(1)
-		expect(second).toContain(
-			"   ⏭️  Permanently skipped: Claude Code timed out after 1800s (until head SHA changes)",
+		// Third run spends the budget, and the ceiling stops the fourth.
+		await runTick(h.deps)
+		expect(h.agentPosts).toHaveLength(3)
+		const fourth = await runTick(h.deps)
+		expect(h.agentPosts).toHaveLength(3)
+		expect(fourth).toContain(
+			`   ⏭️  Agent budget spent ${AI_FIX_BUDGET_CEILING}× at this SHA — leaving it to the CI gate (not a skip)`,
 		)
-		expect(second).not.toContain("   🤖 Running Claude Code AI fix (max 100 turns)...")
-		expect(second).toContain("   ⏭️  Skipped: 1")
+		// Still not a pin — the PR remains eligible the moment CI goes green.
+		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
+	})
+
+	test("a NEW head sha resets the budget tally", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			agent: [{ ok: false, snippet: "[INFRA] Claude Code timed out after 1800s" }],
+		})
+		await runTick(h.deps)
+		expect(h.agentPosts).toHaveLength(1)
+
+		// Same PR, new head — a new head is new work and must not inherit the
+		// previous head's spend.
+		h.deps.loadFixState = () => ({
+			...h.fixState,
+			[REPO]: {
+				[String(PR_NUM)]: {
+					budget_runs: AI_FIX_BUDGET_CEILING,
+					budget_sha: "b".repeat(40),
+				},
+			},
+		})
+		await runTick(h.deps)
+
+		expect(h.agentPosts).toHaveLength(2)
+	})
+
+	test("a genuinely permanent [INFRA] fault still pins", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			agent: [{ ok: false, snippet: "[INFRA] Claude Code binary not found" }],
+		})
+		const first = await runTick(h.deps)
+		expect(first).toContain("   🔔 Skip notified: Claude Code binary not found")
+		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBe(
+			"Claude Code binary not found",
+		)
+		// A missing binary is a property of the INSTALL: waiting changes nothing.
+		expect((h.fixState[REPO][String(PR_NUM)] as any).budget_runs).toBeUndefined()
 	})
 
 	test("a NEW head sha releases the skip and the agent runs again", async () => {
