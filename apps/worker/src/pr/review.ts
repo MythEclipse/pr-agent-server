@@ -76,7 +76,26 @@ export type TriggerResult = number | string
 const loginOf = (c: any): string => (typeof c?.user?.login === "string" ? c.user.login : "")
 const bodyOf = (c: any): string => (typeof c?.body === "string" ? c.body : "")
 
-/** The bot's review body for `pr`, or null. Python lines 320-330. */
+/**
+ * The bot's review body for `pr`, or null. Python lines 320-330.
+ *
+ * SCAN FORWARD, DO NOT STOP AT THE FIRST MATCHING AUTHOR. This used to return
+ * the first bot comment that contained the guide, and the worker runs every
+ * five minutes on the SAME PR, so that decision is made again and again while
+ * the PR moves. `publishPersistentComment` edits the one comment whose body
+ * STARTS WITH the header and then posts a small "**[Persistent review]** updated
+ * to latest commit" comment under bot authorship — so on every re-review the
+ * FIRST bot comment carrying the guide is the SUPERSEDED one, and the worker
+ * scored a review that had already been replaced. hub#61 lived this: its body
+ * said `🔒 Security concerns / Yes - TLS certificate trust issue` from an early
+ * run, a later run rewrote it to `No security concerns identified`, and the
+ * worker kept parsing the stale copy and blocking at 0/10 for ten ticks.
+ *
+ * The current review is the LAST bot-authored body carrying the guide, which is
+ * the comment the persistent write leaves behind at the highest position. The
+ * update marker is excluded only because it is not a review, not because the
+ * order guarantees it counts.
+ */
 export async function findReviewComment(
 	api: GhClient,
 	token: string,
@@ -87,6 +106,7 @@ export async function findReviewComment(
 		token,
 	})
 	if (!Array.isArray(comments)) return null // Python lines 322-323
+	let found: string | null = null
 	for (const c of comments) {
 		// SUBSTRING test, as Python line 326: GitHub's App login is
 		// `mytheclipsebotreview[bot]`, so equality against the bare login would
@@ -95,10 +115,10 @@ export async function findReviewComment(
 		// `in` is a substring test. `includes` is the equivalent.
 		if (loginOf(c).includes(BOT_LOGIN)) {
 			const body = bodyOf(c)
-			if (body.includes("PR Reviewer Guide")) return body
+			if (body.includes("PR Reviewer Guide")) found = body
 		}
 	}
-	return null
+	return found
 }
 
 /**

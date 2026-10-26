@@ -669,6 +669,35 @@ describe("findReviewComment", () => {
 		const { api } = recorder(() => ({ status: 200, data: [{}, { user: {} }] }))
 		expect(await findReviewComment(api, "tok", "o/r", 7)).toBeNull()
 	})
+
+	// THE SUPERSEDED REVIEW MUST NOT WIN.
+	//
+	// This is hub#61 in miniature, taken from the real comment pair: the first
+	// bot comment says a security issue was found, a later run rewrote the
+	// persistent comment to say none was, and an update marker sits in between.
+	// Returning the first match scored the STALE body and blocked the PR at
+	// 0/10 on ten consecutive ticks, each of them re-reading the same old copy.
+	test("returns the LATEST review, not the superseded one", async () => {
+		const stale =
+			"## PR Reviewer Guide 🔍\n\n<table><tr><td>🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nYes - TLS certificate trust issue\n\n</td></tr></table>"
+		const current =
+			"## PR Reviewer Guide 🔍\n\n#### (Review updated until commit 3187254e)\n\n<table><tr><td>🔒&nbsp;<strong>No security concerns identified</strong></td></tr></table>"
+		const marker =
+			"**[Persistent review](<https://x>)** updated to latest commit [3187254e](3187254e)"
+		const { api } = recorder(() => ({
+			status: 200,
+			data: [
+				{ user: { login: "dependabot[bot]" }, body: "bump" },
+				{ user: { login: "mytheclipsebotreview[bot]" }, body: stale },
+				{ user: { login: "mytheclipsebotreview[bot]" }, body: marker },
+				{ user: { login: "mytheclipsebotreview[bot]" }, body: current },
+			],
+		}))
+		const got = await findReviewComment(api, "tok", "o/r", 7)
+		expect(got).toBe(current)
+		// The marker alone is never a review.
+		expect(got).not.toBe(marker)
+	})
 })
 
 describe("findTrivialNoReviewMarker", () => {

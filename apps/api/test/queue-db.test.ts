@@ -6,6 +6,7 @@
 // same "a failing job does not kill the queue" — plus the one thing an
 // in-process queue cannot offer, surviving a restart.
 
+import { sql } from "drizzle-orm"
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
 import type { QueueRepository } from "../src/domain/review/queue-repository.ts"
 import {
@@ -151,6 +152,87 @@ describe("db queue — dedupe", () => {
 		// A re-armed row is old by definition, so `createdAt < now` must not be the
 		// dedupe test — it would read a retry as deduped and silently drop it.
 		await expect(queue.claimDue(1)).resolves.toHaveLength(0)
+	})
+
+	// THE DEDUPE VERDICT MUST NOT BE INFERRED FROM A CLOCK COMPARISON.
+	//
+	// `existed` used to be `createdAt < now`: `now` is the JS date that went into
+	// the INSERT, `created_at` comes back from the server, and on the production
+	// driver the two disagree by +0..5ms for a row that was just INSERTED
+	// (measured against node-postgres on this box: deltas 5,0,1,1). The old
+	// verdict then called a fresh insert a re-request, `db-review-queue` skipped
+	// `pump()`, and the review waited for something else to claim the row.
+	//
+	// PGlite makes that delta 0, so the bug cannot be reproduced by racing the
+	// clocks here — asserting on a fresh enqueue passes under sabotage. What CAN
+	// be pinned is the invariant the fix exists for: a first enqueue answers
+	// `deduped:false` AND its row is due immediately, which is the contract the
+	// pump depends on.
+	test("a first enqueue is claimable immediately, not deduped", async () => {
+		for (const pr of [21, 22, 23, 24, 25]) {
+			const { deduped, job } = await queue.enqueue({ owner: "o", repo: "r", pr })
+			expect(deduped).toBe(false)
+			expect(job.state).toBe("pending")
+			// If the verdict were wrong this deadline would be irrelevant — the
+			// row would sit unclaimed until an unrelated webhook arrived.
+			expect(job.runAfter.getTime()).toBeLessThanOrEqual(Date.now() + 1000)
+		}
+		await expect(queue.claimDue(5)).resolves.toHaveLength(5)
+	})
+
+	// ACCEPTING A DELIVERY AND THEN IGNORING IT IS THE WORST ANSWER.
+	//
+	// A `pending` row whose `run_after` is in the future (a re-arm, a probe, a
+	// provider backoff) used to keep that deadline on a re-request: the webhook
+	// answered `{triggered:true}` and the row did not move. The re-request is
+	// the newer fact, so it wins.
+	test("a re-request pulls a future run_after back to NOW", async () => {
+		const { job } = await queue.enqueue({ owner: "o", repo: "r", pr: 30 })
+		await store.db.execute(
+			sql`update review_queue_jobs set run_after = now() + interval '1 hour' where key = ${job.key}`,
+		)
+		await expect(queue.claimDue(1)).resolves.toHaveLength(0) // not due yet
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 30 })
+		expect(again.deduped).toBe(true)
+		expect(again.job.runAfter.getTime()).toBeLessThanOrEqual(Date.now() + 1000)
+		await expect(queue.claimDue(1)).resolves.toHaveLength(1)
+	})
+
+	// A REQUESTED RE-RUN THAT NEVER RUNS IS A SILENT DROP.
+	//
+	// The flag used to be cleared by every `complete()`, on every arm, including
+	// the failing one. A webhook that arrived before the row was claimed — the
+	// ordinary case, since a delivery usually precedes the next poll — was
+	// therefore erased by the completion of the FIRST run, and `triggered:true`
+	// bought nothing.
+	test("a re-request recorded while the job was still pending survives the run", async () => {
+		await queue.enqueue({ owner: "o", repo: "r", pr: 31 })
+		const mid = await queue.enqueue({ owner: "o", repo: "r", pr: 31 })
+		expect(mid.job.rerunRequested).toBe(true)
+
+		const [claimed] = await queue.claimDue(1)
+		const settled = await queue.complete(claimed?.key ?? "o/r#31")
+		expect(settled.rerun).toBe(true)
+		await expect(queue.stats()).resolves.toMatchObject({ pending: 1, done: 0 })
+	})
+
+	test("a re-request recorded before a FAILING run is kept, not erased with the error", async () => {
+		await queue.enqueue({ owner: "o", repo: "r", pr: 32 })
+		await queue.enqueue({ owner: "o", repo: "r", pr: 32 })
+		const [claimed] = await queue.claimDue(1)
+		const settled = await queue.complete(claimed?.key ?? "o/r#32", "boom")
+		expect(settled.rerun).toBe(false)
+		await expect(queue.stats()).resolves.toMatchObject({ failed: 1 })
+
+		// The flag is still SET, which is the whole point: every `complete()` used
+		// to clear it, so this request died with the error. The row is `failed`
+		// and the request rides it until `enqueue` re-arms it to `pending`, which
+		// is the recovery path for a thrown review.
+		const row = await store.db.execute(
+			sql`select state, rerun_requested from review_queue_jobs where key = ${"o/r#32"}`,
+		)
+		expect(row.rows[0]).toMatchObject({ state: "failed", rerun_requested: true })
 	})
 })
 

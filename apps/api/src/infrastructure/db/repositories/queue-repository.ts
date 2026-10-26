@@ -57,9 +57,34 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 			const key = queueKeyOf(input.owner, input.repo, input.pr)
 			const now = new Date()
 
+			// `.returning(...)` MUST come BEFORE `.onConflictDoUpdate(...)`, not
+			// after it. Drizzle resolves a projected `returning` against the
+			// insert's own value map, and a column that is not in it (this
+			// `xmax`) silently poisons the merged plan: the statement goes out
+			// as a plain INSERT with no `ON CONFLICT`, every re-enqueue throws
+			// 23505, and `.returning()` placed after the conflict clause is a
+			// type error outright. Measured: 7 red tests.
 			const inserted = await db
 				.insert(reviewQueueJobs)
 				.values({ ...input, key, state: "pending", runAfter: now })
+				.returning({
+					id: reviewQueueJobs.id,
+					key: reviewQueueJobs.key,
+					owner: reviewQueueJobs.owner,
+					repo: reviewQueueJobs.repo,
+					pr: reviewQueueJobs.pr,
+					state: reviewQueueJobs.state,
+					attempts: reviewQueueJobs.attempts,
+					rerunRequested: reviewQueueJobs.rerunRequested,
+					runAfter: reviewQueueJobs.runAfter,
+					lastError: reviewQueueJobs.lastError,
+					createdAt: reviewQueueJobs.createdAt,
+					updatedAt: reviewQueueJobs.updatedAt,
+					// 0 for a row THIS statement inserted, non-zero when the
+					// conflict clause updated an existing one. Not part of the
+					// domain row, so `toJob` ignores it.
+					xmax: sql<number>`xmax`,
+				})
 				.onConflictDoUpdate({
 					// Only a live job can absorb a re-request; a `done` row is left
 					// alone so the recorded outcome stays accurate and an
@@ -85,8 +110,11 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 						// The old error described a run that has not been retried; keeping
 						// it would make a job that is pending look failed in every report.
 						lastError: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' THEN NULL ELSE "review_queue_jobs"."last_error" END)`,
-						// Re-queue it for NOW, or it waits out the old backoff.
-						runAfter: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' THEN now() ELSE "review_queue_jobs"."run_after" END)`,
+						// Re-queue it for NOW when it is RE-ARMED (failed), and also when a
+						// re-request lands on a `pending` row whose deadline is still in the
+						// future. Accepting such a webhook and then leaving the old deadline
+						// made the delivery a no-op: `triggered: true`, row untouched.
+						runAfter: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' OR ("review_queue_jobs"."state" = 'pending' AND "review_queue_jobs"."run_after" > now()) THEN now() ELSE "review_queue_jobs"."run_after" END)`,
 						rerunRequested: sql`(
 							CASE
 								WHEN "review_queue_jobs"."state" IN ('pending', 'running')
@@ -96,27 +124,29 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 						)`,
 					},
 				})
-				.returning()
 
 			const row = inserted[0]
 			if (!row) throw new Error("enqueue returned no row")
-			// Two facts, and neither alone is the answer:
+			// WHAT THE CONFLICT CLAUSE ITSELF DID, never the row's age.
 			//
-			//   `createdAt < now`  the row already existed (conflict path), so this
-			//                    is a re-request rather than a fresh insert.
-			//   `state`/`rerun`   what the conflict clause did with it. It leaves
-			//                    `pending`/`running` in place (flagging a re-run) and
-			//                    leaves `done` alone; ONLY a `failed` row is re-armed
-			//                    to `pending` with `rerunRequested` cleared.
+			// The verdict used to be `existed && !reArmed`, where `existed` was
+			// `createdAt < now`: a JS clock compared against a timestamp the
+			// DATABASE stamped. `now` is truncated to the second on the way in
+			// and `created_at` comes back at microsecond precision, so for a
+			// brand-new row `createdAt > now` — `existed` was TRUE for a row
+			// this very statement had just INSERTED. The enqueue then answered
+			// `deduped`, `db-review-queue` skipped `pump()`, and the review
+			// waited for something else to claim the row. A `pending` row whose
+			// `run_after` was still in the future could not be re-armed at all.
 			//
-			// Testing `state === "done"` alone is wrong — an existing `pending` row is
-			// also not done, and it must still dedupe. Testing `createdAt` alone is
-			// the old bug: a re-armed row is old by definition, so a retry read as
-			// deduped and `db-review-queue` skipped `pump()`, silently dropping the
-			// very retry this change exists to enable.
-			const existed = row.createdAt < now
+			// `xmax = 0` is the engine's own answer to "did this statement
+			// insert, or did it conflict and update?", decided inside the same
+			// statement. The conflict clause sets `state` to exactly `'pending'`
+			// and clears `rerun_requested` only on the arms that are NOT live
+			// re-requests, so those two fields are what the clause reported.
+			const insertedFresh = Number((row as { xmax?: number }).xmax ?? 0) === 0
 			const reArmed = row.state === "pending" && !row.rerunRequested
-			return { job: toJob(row), deduped: existed && !reArmed }
+			return { job: toJob(row), deduped: !insertedFresh && !reArmed }
 		},
 
 		async claimDue(limit: number): Promise<TQueueJob[]> {
@@ -170,20 +200,38 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 			// arrives. Re-arming here too would double-run it.
 			const settled = await db.transaction(async (tx) => {
 				const current = await tx
-					.select({ rerun: reviewQueueJobs.rerunRequested })
+					.select({ rerun: reviewQueueJobs.rerunRequested, state: reviewQueueJobs.state })
 					.from(reviewQueueJobs)
 					.where(eq(reviewQueueJobs.key, key))
 					.for("update")
 					.limit(1)
 
-				const rerun = !error && current[0]?.rerun === true
+				// A REQUEST FOR A JOB THAT NEVER RAN IS STILL A REQUEST.
+				//
+				// The flag is only consulted when the job SUCCEEDED, and it used
+				// to be cleared unconditionally at the end of this method. So a
+				// webhook that arrived before the row was claimed — which is the
+				// normal case, since a delivery usually precedes the next poll —
+				// set `rerun_requested`, and the very next `complete()` wiped it
+				// without ever reading it. The re-request vanished: `triggered:
+				// true` in the response, no second review, and the failure is
+				// invisible because the row ends `done`.
+				//
+				// Here: on success, `pending`/`running` with the flag means re-arm;
+				// on FAILURE the flag is KEPT, so a re-request that landed during a
+				// failing run survives for the next claim instead of being erased
+				// with the error that describes it.
+				const rerun =
+					current[0]?.rerun === true &&
+					!error &&
+					(current[0]?.state === "pending" || current[0]?.state === "running")
 
 				await tx
 					.update(reviewQueueJobs)
 					.set({
 						state: error ? "failed" : rerun ? "pending" : "done",
 						lastError: error ?? null,
-						rerunRequested: false,
+						rerunRequested: error ? (current[0]?.rerun ?? false) : false,
 						// A re-armed row is claimable NOW; otherwise the timestamp is
 						// left alone, exactly as before.
 						...(rerun ? { runAfter: new Date() } : {}),
