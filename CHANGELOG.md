@@ -1,3 +1,11 @@
+## [1.5.7](https://github.com/asepharyana/pr-agent-server/compare/v1.5.6...v1.5.7) (2026-10-26)
+
+
+### Bug Fixes
+
+* auto-fix code quality ([fca53a2](https://github.com/asepharyana/pr-agent-server/commit/fca53a2ba75db1b13970f2e237f9c3a4277f4791))
+* **deps:** move @moonrepo/cli to 2.6.4 — 2.6.3 never shipped its platform binaries ([0727f91](https://github.com/asepharyana/pr-agent-server/commit/0727f913c5a5ca06aa1e6fd130da665f2c4e805b))
+
 ## [1.5.6](https://github.com/asepharyana/pr-agent-server/compare/v1.5.5...v1.5.6) (2026-10-26)
 
 ### Bug Fixes
