@@ -1,3 +1,16 @@
+# [1.6.0](https://github.com/asepharyana/pr-agent-server/compare/v1.5.11...v1.6.0) (2026-10-26)
+
+
+### Bug Fixes
+
+* auto-fix code quality ([39c1b06](https://github.com/asepharyana/pr-agent-server/commit/39c1b0618e29c791400ead54fd4731b6745a32ed))
+
+
+### Features
+
+* **worker:** cover the manager table and the lockfile dispatch with tests ([6efd455](https://github.com/asepharyana/pr-agent-server/commit/6efd455fde3a9a5ad010e979688f56c251dd2d4f))
+* **worker:** repair the lockfile of every package manager, not just bun and uv ([6c172b1](https://github.com/asepharyana/pr-agent-server/commit/6c172b17e4f58bf56da882a2a7b2a3db308dfe85))
+
 ## [1.5.11](https://github.com/asepharyana/pr-agent-server/compare/v1.5.10...v1.5.11) (2026-10-26)
 
 ## [1.5.10](https://github.com/asepharyana/pr-agent-server/compare/v1.5.9...v1.5.10) (2026-10-26)
