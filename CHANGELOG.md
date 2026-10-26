@@ -1,3 +1,10 @@
+## [1.5.10](https://github.com/asepharyana/pr-agent-server/compare/v1.5.9...v1.5.10) (2026-10-26)
+
+
+### Bug Fixes
+
+* **worker:** rebase and retry when the PR branch moves mid-run ([07747e3](https://github.com/asepharyana/pr-agent-server/commit/07747e350fc93286ab2b255422b4b7373b1ce305)), closes [GMW#125](https://github.com/GMW/issues/125)
+
 ## [1.5.9](https://github.com/asepharyana/pr-agent-server/compare/v1.5.8...v1.5.9) (2026-10-26)
 
 
