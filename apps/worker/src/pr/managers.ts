@@ -206,6 +206,37 @@ export const packageManagerById = (id: string): PackageManager | undefined =>
 	PACKAGE_MANAGERS.find((pm) => pm.id === id)
 
 /**
+ * The lockfile a report line names first.
+ *
+ * Every row declares at least one, and the table's own test asserts it, so this
+ * is the single place that decision lives rather than a `lockfiles[0]` in each
+ * caller (each of which would need its own `undefined` story).
+ */
+export const primaryLockfile = (pm: PackageManager): string => pm.lockfiles[0] ?? ""
+
+/**
+ * The single path `git add` stages for a row that does not stage everything.
+ *
+ * Falls back to the first `managed` entry, as the original per-flow `git add`
+ * did, for a hypothetical row that declares no `lockfiles` — the table's test
+ * rules that out today, but the fallback keeps the argv identical to what
+ * shipped rather than staging an empty path.
+ */
+export const stagedLockfile = (pm: PackageManager): string => pm.lockfiles[0] ?? pm.managed[0] ?? ""
+
+/**
+ * True when `message` already names this row's primary lockfile.
+ *
+ * Python 1973: a CI failure that names the lockfile means re-resolving it costs
+ * a clone and changes nothing, so the repair is skipped for that toolchain.
+ */
+export const mentionsLockfile = (message: string, pm: PackageManager): boolean =>
+	message.includes(primaryLockfile(pm))
+
+/** The last path segment — so a workspace lockfile still counts as itself. */
+export const pathBasename = (path: string): string => path.split("/").pop() ?? ""
+
+/**
  * True when `path` names one of `lockfiles`, anywhere in the tree.
  *
  * A SUFFIX MATCH ON THE PATH SEGMENT, not a substring of the whole string: the
@@ -213,11 +244,8 @@ export const packageManagerById = (id: string): PackageManager | undefined =>
  * `bun.lock.bak` and `docs/bun.lock.md`. A lockfile only counts when the last
  * segment matches exactly.
  */
-export const pathIsLockfile = (path: string, lockfiles: readonly string[]): boolean => {
-	const segments = path.split("/")
-	const name = segments[segments.length - 1] ?? ""
-	return lockfiles.includes(name)
-}
+export const pathIsLockfile = (path: string, lockfiles: readonly string[]): boolean =>
+	lockfiles.includes(pathBasename(path))
 
 /**
  * Every toolchain whose lockfile exists in the repo tree at `sha`.
@@ -234,9 +262,12 @@ export async function detectPackageManagers(
 	repo: string,
 	sha: string,
 ): Promise<PackageManager[]> {
-	const paths = await lockfilePaths(api, token, repo, sha)
+	const paths = await repoTreePaths(api, token, repo, sha)
 	return PACKAGE_MANAGERS.filter((pm) => paths.some((path) => pathIsLockfile(path, pm.lockfiles)))
 }
+
+/** One entry of GitHub's `git/trees` response, as far as this module reads it. */
+type TreeEntry = { path?: unknown }
 
 /**
  * Every path in the repo tree at `sha`, or `[]` when the tree cannot be read.
@@ -244,7 +275,7 @@ export async function detectPackageManagers(
  * One tree call answers every toolchain probe, so a repo with four lockfiles
  * costs one request rather than four.
  */
-async function lockfilePaths(
+async function repoTreePaths(
 	api: GhClient,
 	token: string,
 	repo: string,
@@ -257,7 +288,7 @@ async function lockfilePaths(
 			{ token },
 		)
 		if (status !== 200 || !Array.isArray(data?.tree)) return []
-		return (data.tree as { path?: unknown }[])
+		return (data.tree as TreeEntry[])
 			.map((item) => (typeof item?.path === "string" ? item.path : ""))
 			.filter((path) => path.length > 0)
 	} catch {

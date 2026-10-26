@@ -50,6 +50,7 @@ import {
 	waitForCiSettled,
 } from "./fix-loop.ts"
 import { detectPackageManagers, fixLockfile, isTrivialPr } from "./lockfix.ts"
+import { mentionsLockfile, primaryLockfile } from "./managers.ts"
 import { closeToolchainPr, TOOLCHAIN_PINS, toolchainPinViolation } from "./pins.ts"
 import { findReviewComment, findTrivialNoReviewMarker, triggerReview } from "./review.ts"
 
@@ -161,10 +162,14 @@ export async function stepLockPrefix(deps: WorkerDeps, c: Ctx): Promise<void> {
 	const early = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
 	if (early.ok) return
 
-	const managers = await detectPackageManagers(deps.api, c.token, c.repo, c.headSha)
-	const candidates = managers.filter((pm) => !early.msg.includes(pm.lockfiles[0] ?? ""))
+	// The message naming a toolchain's own lockfile skips only that toolchain
+	// (Python 1973): re-resolving the file CI just complained about costs a clone
+	// and changes nothing.
+	const candidates = (await detectPackageManagers(deps.api, c.token, c.repo, c.headSha)).filter(
+		(pm) => !mentionsLockfile(early.msg, pm),
+	)
 	for (const pm of candidates) {
-		deps.report.push(`   🔧 CI failing: ${pm.lockfiles[0]} stale — pre-fixing...`)
+		deps.report.push(`   🔧 CI failing: ${primaryLockfile(pm)} stale — pre-fixing...`)
 		if (deps.dry) {
 			deps.report.push("   🧪 dry run: would re-resolve and push the lockfile")
 			return

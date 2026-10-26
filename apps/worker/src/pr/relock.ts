@@ -21,7 +21,13 @@
 
 import { tail } from "../git.ts"
 import { clonePr, head, type LockfixDeps, reportable, TMP_BASE } from "./lockfix.ts"
-import { type PackageManager, packageManagerById } from "./managers.ts"
+import {
+	type PackageManager,
+	packageManagerById,
+	pathBasename,
+	primaryLockfile,
+	stagedLockfile,
+} from "./managers.ts"
 
 // ── Timeout budgets ─────────────────────────────────────────────────────────
 // One per Python `subprocess.run(..., timeout=N)`, each with its line cited.
@@ -51,8 +57,8 @@ function changedPaths(stdout: string): string[] {
 		.filter((f) => f.length > 0)
 }
 
-/** The last path segment, so a workspace lockfile still counts as itself. */
-const basename = (path: string): string => path.split("/").pop() ?? ""
+/** The outcome every branch of `fixLockfile` returns. */
+export type LockfixResult = { ok: boolean; summary: string }
 
 /** How one toolchain's clone is merged, staged and reported. */
 type FlowShape = {
@@ -134,8 +140,8 @@ const shapeOf = (pm: PackageManager): FlowShape => SHAPES[pm.id] ?? DEFAULT_SHAP
  */
 const workdirInfix = (pm: PackageManager): string => (pm.id === "uv" ? "lockfix" : `${pm.id}fix`)
 
-/** The merge-conflict and no-token summaries, which do not name a toolchain. */
-const CONFLICT_SUMMARY = (baseRef: string) => `merge conflict with ${baseRef}`
+/** The merge-conflict summary, which does not name a toolchain. */
+const conflictSummary = (baseRef: string): string => `merge conflict with ${baseRef}`
 
 /**
  * Re-resolve `pm`'s lockfile on the PR branch and push it, or report why not.
@@ -151,7 +157,7 @@ export async function fixLockfile(
 	pr: number,
 	headRef: string,
 	baseRef: string,
-): Promise<{ ok: boolean; summary: string }> {
+): Promise<LockfixResult> {
 	const { run, exec, workdirs, fetchGhToken } = deps
 	const shape = shapeOf(pm)
 	// One workdir namespace per toolchain, so two rows repairing the same PR
@@ -159,6 +165,14 @@ export async function fixLockfile(
 	// `_lockfix_` name (it predates the id suffix) because the ops channel and a
 	// human's `/tmp` both know that directory by that name.
 	const workdir = `${TMP_BASE}/${String(repo).replace(/\//g, "_")}_${workdirInfix(pm)}_${pr}`
+	/**
+	 * Every exit path tears the clone down (invariant 3), so the failure returns
+	 * go through here rather than each remembering its own `remove`.
+	 */
+	const fail = (summary: string): LockfixResult => {
+		workdirs.remove(workdir)
+		return { ok: false, summary }
+	}
 
 	if (workdirs.exists(workdir)) workdirs.remove(workdir) // Python 636-638, 725-727
 	workdirs.mkdir(workdir)
@@ -166,20 +180,16 @@ export async function fixLockfile(
 	// Python 641/729: "Use gh token for auth (reliable PAT)" — this path does NOT
 	// use the caller's own token for the clone, unlike the AI-fix one.
 	const ghToken = fetchGhToken()
-	if (!ghToken) {
-		workdirs.remove(workdir)
-		return { ok: false, summary: "no gh token" } // Python 644, 732
-	}
+	if (!ghToken) return fail("no gh token") // Python 644, 732
 
 	const cloned = clonePr(run, repo, headRef, ghToken, workdir, shape.depth)
 	if (cloned.code !== 0) {
-		workdirs.remove(workdir)
-		return {
-			ok: false,
-			summary: shape.cloneDetail
+		return fail(
+			// Python 653's bare string vs 741's quoted stderr.
+			shape.cloneDetail
 				? `clone failed: ${head(reportable(cloned.stderr), shape.cloneDetailWidth)}`
-				: "clone failed", // Python 653's bare string vs 741's quoted stderr
-		}
+				: "clone failed",
+		)
 	}
 
 	// Python 659-662 / 747-749: merge the base so the lockfile matches CI's state.
@@ -194,45 +204,34 @@ export async function fixLockfile(
 	const merge = run(["merge", `origin/${baseRef}`, ...shape.mergeFlags], workdir, MERGE_TIMEOUT_SEC)
 	if (merge.code !== 0) {
 		run(["merge", "--abort"], workdir, ABORT_TIMEOUT_SEC) // Python 665, 751
-		workdirs.remove(workdir)
-		return { ok: false, summary: CONFLICT_SUMMARY(baseRef) } // Python 667, 753
+		return fail(conflictSummary(baseRef)) // Python 667, 753
 	}
 
 	// The frozen install is the DIAGNOSIS where the shape asks for it: a pass means
 	// the lockfile was never the problem, so nothing is re-resolved or pushed.
 	if (shape.probeFirst) {
 		const frozen = exec(pm.frozenInstall.slice(), workdir, pm.frozenTimeoutSec)
-		if (frozen.code === 0) {
-			workdirs.remove(workdir)
-			return { ok: false, summary: alreadyConsistent(pm) } // Python 759
-		}
+		if (frozen.code === 0) return fail(alreadyConsistent(pm)) // Python 759
 	}
 
 	const sync = exec(pm.syncInstall.slice(), workdir, pm.syncTimeoutSec)
 	if (sync.code !== 0) {
-		const stderr = reportable(sync.stderr)
-		workdirs.remove(workdir)
 		// Python 764-766: tail 300, THEN head 100 of that tail.
-		return {
-			ok: false,
-			summary: `${syncFailedLabel(pm)}: ${head(tail(stderr, STDERR_TAIL), DETAIL)}`,
-		}
+		return fail(
+			`${syncFailedLabel(pm)}: ${head(tail(reportable(sync.stderr), STDERR_TAIL), DETAIL)}`,
+		)
 	}
 
 	const diff = run(["diff", "--name-only"], workdir, DIFF_TIMEOUT_SEC)
 	const changed = changedPaths(diff.stdout)
 
-	if (!changed.length) {
-		workdirs.remove(workdir)
-		return { ok: false, summary: noChangeSummary(pm) } // Python 683, 774
-	}
+	if (!changed.length) return fail(noChangeSummary(pm)) // Python 683, 774
 
 	// Python 686-689 / 771-774: commit only if the LOCKFILE is among the changes.
 	// A re-resolve that touched only project files means the diagnosis was wrong,
 	// and pushing it would smuggle an unrelated change onto the PR.
 	if (!changed.some((path) => touchesManaged(pm, path))) {
-		workdirs.remove(workdir)
-		return { ok: false, summary: unexpectedFilesSummary(pm, changed) }
+		return fail(unexpectedFilesSummary(pm, changed))
 	}
 
 	run(stagedPaths(shape, pm), workdir, ADD_TIMEOUT_SEC) // Python 691 / 776
@@ -242,8 +241,7 @@ export async function fixLockfile(
 	// commit, and for bun that is a benign no-op rather than a failure to report.
 	const benign = shape.tolerateNothingToCommit && commit.stderr.includes("nothing to commit")
 	if (commit.code !== 0 && !benign) {
-		workdirs.remove(workdir)
-		return { ok: false, summary: `commit failed: ${head(reportable(commit.stderr), DETAIL)}` }
+		return fail(`commit failed: ${head(reportable(commit.stderr), DETAIL)}`)
 	}
 
 	const pushed = run(["push", "origin", `HEAD:${headRef}`], workdir, PUSH_TIMEOUT_SEC)
@@ -262,30 +260,46 @@ export async function fixLockfile(
 // already consistent)" / "bun install ran but bun.lock unchanged"), and keeping
 // both wordings is the parity contract — not an oversight to be tidied.
 
+/**
+ * `bun`'s wording where it differs from the generic one, the generic one
+ * otherwise. Centralises the "is this the bun row?" branch that every summary
+ * below used to spell out, so adding a row never means editing five ternaries.
+ */
+const summaryFor = (pm: PackageManager, bun: string, generic: string): string =>
+	pm.id === "bun" ? bun : generic
+
 const alreadyConsistent = (pm: PackageManager): string =>
-	pm.id === "bun"
-		? "bun.lock already consistent with package.json (CI failure elsewhere)"
-		: `${pm.label} lockfile already consistent with the manifest (CI failure elsewhere)`
+	summaryFor(
+		pm,
+		"bun.lock already consistent with package.json (CI failure elsewhere)",
+		`${pm.label} lockfile already consistent with the manifest (CI failure elsewhere)`,
+	)
 
 const syncFailedLabel = (pm: PackageManager): string =>
-	pm.id === "bun" ? "bun install sync failed" : `${pm.label} install sync failed`
+	summaryFor(pm, "bun install sync failed", `${pm.label} install sync failed`)
 
 const noChangeSummary = (pm: PackageManager): string =>
-	pm.id === "bun"
-		? `bun install ran but bun.lock unchanged (unexpected files: ${JSON.stringify([])})`
-		: `no change (${pm.lockfiles[0]} already consistent)`
+	summaryFor(
+		pm,
+		`bun install ran but bun.lock unchanged (unexpected files: ${JSON.stringify([])})`,
+		`no change (${primaryLockfile(pm)} already consistent)`,
+	)
 
-const unexpectedFilesSummary = (pm: PackageManager, changed: string[]): string =>
-	pm.id === "bun"
-		? `bun install ran but bun.lock unchanged (unexpected files: ${JSON.stringify(changed.slice(0, FILE_CAP))})`
-		: `unexpected files changed: ${JSON.stringify(changed.slice(0, FILE_CAP))}`
+const unexpectedFilesSummary = (pm: PackageManager, changed: string[]): string => {
+	const files = JSON.stringify(changed.slice(0, FILE_CAP))
+	return summaryFor(
+		pm,
+		`bun install ran but bun.lock unchanged (unexpected files: ${files})`,
+		`unexpected files changed: ${files}`,
+	)
+}
 
 const pushedSummary = (pm: PackageManager): string =>
-	pm.id === "bun" ? "bun.lock regenerated and pushed" : `${pm.lockfiles[0]} regenerated and pushed`
+	summaryFor(pm, "bun.lock regenerated and pushed", `${primaryLockfile(pm)} regenerated and pushed`)
 
 /** True when `path` is one of the files this row is allowed to have modified. */
 const touchesManaged = (pm: PackageManager, path: string): boolean =>
-	pm.managed.includes(basename(path))
+	pm.managed.includes(pathBasename(path))
 
 /**
  * The `git add` argv: everything for a tool that may legitimately touch sibling
@@ -295,7 +309,7 @@ const touchesManaged = (pm: PackageManager, path: string): boolean =>
  * a path the repo does not have into argv and git fails on it.
  */
 const stagedPaths = (shape: FlowShape, pm: PackageManager): string[] =>
-	shape.stageAll ? ["add", "-A"] : ["add", pm.lockfiles[0] ?? pm.managed[0]]
+	shape.stageAll ? ["add", "-A"] : ["add", stagedLockfile(pm)]
 
 // ── The two named flows, kept for their existing callers and suites ──────────
 //
@@ -312,7 +326,7 @@ export function fixUvLock(
 	pr: number,
 	headRef: string,
 	baseRef: string,
-): Promise<{ ok: boolean; summary: string }> {
+): Promise<LockfixResult> {
 	return fixLockfile(deps, managerNamed("uv"), repo, pr, headRef, baseRef)
 }
 
@@ -330,7 +344,7 @@ export function fixBunLock(
 	pr: number,
 	headRef: string,
 	baseRef: string,
-): Promise<{ ok: boolean; summary: string }> {
+): Promise<LockfixResult> {
 	return fixLockfile(deps, managerNamed("bun"), repo, pr, headRef, baseRef)
 }
 
