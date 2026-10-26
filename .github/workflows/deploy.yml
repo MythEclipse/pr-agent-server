@@ -160,6 +160,37 @@ jobs:
       #
       # `sudo -n` throughout: a password prompt in a non-tty heredoc would hang
       # until the step timed out rather than failing fast.
+      # A full box turns the deploy into a single opaque line:
+      #
+      #   scp: write remote "/tmp/pkg-api.tar.gz": Failure
+      #
+      # That is ENOSPC, and it says nothing about which filesystem ran out or
+      # why. /tmp is a tmpfs here, so it is bounded by RAM and is filled by the
+      # worker's own PR clones (/tmp/pr-queue-work); / is what the extracted
+      # package lands on. Check BOTH before transferring, and name the shortfall.
+      - name: Check disk space on the box
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          # 200MB of slack on top of the ~70MB api tarball plus the worker one.
+          NEED_MB=300
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" "NEED_MB=$NEED_MB bash -s" <<'REMOTE'
+          set -euo pipefail
+          rc=0
+          for mount in /tmp /; do
+            avail_mb=$(df -Pm "$mount" | awk 'NR==2 {print $4}')
+            if [ "$avail_mb" -lt "$NEED_MB" ]; then
+              echo "::error::$mount has ${avail_mb}MB free, need ${NEED_MB}MB. The deploy would fail at scp with 'write remote ...: Failure' (ENOSPC). Free space first: /tmp is a tmpfs held by the worker's own clones in /tmp/pr-queue-work."
+              rc=1
+            else
+              echo "$mount: ${avail_mb}MB free (ok)"
+            fi
+          done
+          df -h /tmp / || true
+          exit $rc
+          REMOTE
+
       - name: Deploy
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
