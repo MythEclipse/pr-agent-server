@@ -142,10 +142,11 @@ type Options = {
 	checkRuns?: any[]
 	/** The repo `GET /repos/:r` reports (used by the sync fan-out). */
 	repoMeta?: Route
-	/** `repoHasBunLock` reads `GET /repos/:r/git/trees/:s?recursive=1` and looks for
-	 *  a `bun.lock` entry; the harness serves a Bun tree by default. Set false for
-	 *  a repo with no `bun.lock` (a uv repo) — see the `stepLockPrefix` matrix. */
-	hasBunLock?: boolean
+	/** Paths `GET /repos/:r/git/trees/:s?recursive=1` reports. The detection step
+	 *  reads the whole tree once and recognises EVERY lockfile in it, so this is
+	 *  the only knob that decides which toolchain repairs a PR. Defaults to a Bun
+	 *  repo — see the `stepLockPrefix` matrix for the other rows. */
+	tree?: string[]
 	/** `runAiFix`'s verdict, in call order; the last one repeats. */
 	agent?: PostResult[]
 	/** Fixed `now()`, in seconds; a tick reads it for elapsed + sync. */
@@ -233,10 +234,7 @@ function harness(opts: Options = {}): Harness {
 			if (/\/check-runs$/.test(path))
 				return checkRunsReply ?? { status: 200, data: { check_runs: checkRuns } }
 			if (/\/git\/trees\/.*recursive/.test(path)) {
-				const tree =
-					opts.hasBunLock === false
-						? [{ path: "package.json" }, { path: "uv.lock" }]
-						: [{ path: "package.json" }, { path: "bun.lock" }]
+				const tree = (opts.tree ?? ["package.json", "bun.lock"]).map((p) => ({ path: p }))
 				return { status: 200, data: { tree } }
 			}
 			if (/\/pulls\/\d+\/merge$/.test(path)) return merge
@@ -1310,23 +1308,21 @@ describe("--dry walks the same gates and suppresses every effect", () => {
  * left untouched. These four cases exist so that inversion cannot come back —
  * the last one fails if the negative guard is dropped again.
  */
-describe("the lockfile pre-fix guard (Python 1961-1973)", () => {
-	const typecheck = (names: string[]) => [
-		{ name: "typecheck", status: "completed", conclusion: "failure" },
-		...names.map((name) => ({ name, status: "completed", conclusion: "failure" })),
-	]
-	const run = async (opts: { hasBunLock: boolean; extraCheck: string }) => {
+describe("the lockfile pre-fix dispatch", () => {
+	const failing = (names: string[]) =>
+		names.map((name) => ({ name, status: "completed", conclusion: "failure" }))
+	const run = async (opts: { tree: string[]; checks: string[]; dry?: boolean }) => {
 		const h = harness({
 			prs: [makePr({ ...LOCKFILE_BUMP })],
 			comments: [reviewComment(SAFE_REVIEW)],
-			checkRuns: typecheck([opts.extraCheck]),
-			hasBunLock: opts.hasBunLock,
-			dry: true,
+			checkRuns: failing(opts.checks),
+			tree: opts.tree,
+			dry: opts.dry ?? true,
 		})
 		// `processPr` takes the OPEN PR, not the harness queue — the pre-fix only
 		// runs for a trivial title (Python 1953: `is_trivial_pr(title, author)`),
 		// so passing the default non-trivial fixture would silently skip the step
-		// and make all four cases pass for the wrong reason.
+		// and make every case here pass for the wrong reason.
 		await processPr(h.deps, {
 			token: "install-token",
 			repo: REPO,
@@ -1335,30 +1331,55 @@ describe("the lockfile pre-fix guard (Python 1961-1973)", () => {
 		return h
 	}
 
-	test("a Bun repo takes the bun arm regardless of what CI names", async () => {
-		const h = await run({ hasBunLock: true, extraCheck: "uv.lock" })
+	test("a Bun repo takes the bun arm", async () => {
+		const h = await run({ tree: ["package.json", "bun.lock"], checks: ["typecheck", "lint"] })
 		expect(h.lines).toContain("   🔧 CI failing: bun.lock stale — pre-fixing...")
 	})
 
-	test("a non-Bun repo whose CI does NOT name uv.lock takes the uv arm", async () => {
-		const h = await run({ hasBunLock: false, extraCheck: "lint" })
-		expect(h.lines).toContain("   🔧 CI failing: uv.lock stale — pre-fixing...")
-	})
-
-	test("a non-Bun repo whose CI ALREADY names uv.lock is left alone", async () => {
-		// Python 1973's comment: re-resolving the file uv just complained about
-		// costs a clone and changes nothing.
-		const h = await run({ hasBunLock: false, extraCheck: "uv.lock" })
-		expect(h.lines).not.toContain("   🔧 CI failing: bun.lock stale — pre-fixing...")
-		expect(h.lines).not.toContain("   🔧 CI failing: uv.lock stale — pre-fixing...")
-		// And the decisive one: neither toolchain was run.
+	test("a repo with no bun.lock and no uv.lock is no longer assumed to be uv", async () => {
+		// The old code fell through to the uv arm for EVERY non-Bun repo, so an
+		// npm/pnpm/yarn repo had `uv lock` run in it. Nothing detected must mean
+		// nothing is repaired rather than a wrong toolchain's guess.
+		const h = await run({ tree: ["package.json"], checks: ["lint"] })
+		expect(h.lines.some((l) => l.includes("pre-fixing"))).toBe(false)
 		expect(h.execCalls).toEqual([])
 	})
 
-	test("a Bun repo that already names uv.lock still pre-fixes bun.lock", async () => {
-		// The guard lives on the uv arm only, so a Bun repo is unaffected.
-		const h = await run({ hasBunLock: true, extraCheck: "uv.lock" })
+	test("a PNPM repo is repaired — the case the bun/uv pair could not express", async () => {
+		// The regression this whole change exists for: a Dependabot pnpm bump whose
+		// CI died at `pnpm install --frozen-lockfile` used to fall through to the AI
+		// agent, which cannot regenerate a lockfile.
+		const h = await run({ tree: ["package.json", "pnpm-lock.yaml"], checks: ["lint"] })
+		expect(h.lines).toContain("   🔧 CI failing: pnpm-lock.yaml stale — pre-fixing...")
+	})
+
+	test("a red check that is NOT called `typecheck` still triggers the repair", async () => {
+		// The gate used to be `msg.includes("typecheck")`, which never matched this
+		// repo's `Lint and format` / `Test` / `Build` / `Drizzle drift` jobs — so
+		// the deterministic repair was dead code for the fleet's real failures.
+		const h = await run({ tree: ["package.json", "bun.lock"], checks: ["Lint and format"] })
 		expect(h.lines).toContain("   🔧 CI failing: bun.lock stale — pre-fixing...")
+	})
+
+	test("a toolchain whose lockfile CI already names is skipped, and a UV repo is left alone", async () => {
+		// Python 1973: re-resolving the file uv just complained about costs a clone
+		// and changes nothing.
+		const h = await run({ tree: ["package.json", "uv.lock"], checks: ["typecheck", "uv.lock"] })
+		expect(h.lines.some((l) => l.includes("pre-fixing"))).toBe(false)
+		expect(h.execCalls).toEqual([])
+	})
+
+	test("a Bun repo is unaffected by CI naming uv.lock", async () => {
+		// The guard is per toolchain, so the message naming a file this repo does
+		// not use cannot suppress the repair of the one it does.
+		const h = await run({ tree: ["package.json", "bun.lock"], checks: ["typecheck", "uv.lock"] })
+		expect(h.lines).toContain("   🔧 CI failing: bun.lock stale — pre-fixing...")
+	})
+
+	test("green CI runs nothing", async () => {
+		const h = await run({ tree: ["package.json", "pnpm-lock.yaml"], checks: [] })
+		expect(h.lines.some((l) => l.includes("pre-fixing"))).toBe(false)
+		expect(h.execCalls).toEqual([])
 	})
 })
 
