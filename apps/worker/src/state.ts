@@ -67,6 +67,46 @@ export interface PrEntry {
 	 * to tell that apart from "the agent's fix landed and still did not help".
 	 */
 	fix_commits?: number
+	/**
+	 * Agent runs at `budget_sha` that ENDED BY RUNNING OUT OF THEIR OWN BUDGET —
+	 * `--max-turns` reached, or `AI_FIX_TIMEOUT` elapsed. Distinct from
+	 * `attempts`, and the distinction is the whole point:
+	 *
+	 *   - `attempts` counts FAILURES of every kind and has no ceiling (see its
+	 *     doc comment): a PR that cannot be fixed keeps being retried.
+	 *   - this counts a specific, expensive EVENT — a run that burned its full
+	 *     turn/time allowance without reaching a verdict. Each one costs up to
+	 *     `AI_FIX_TIMEOUT` (1800s) of a paid model.
+	 *
+	 * WHY IT NEEDS ITS OWN CEILING. A timeout is not evidence that retrying is
+	 * wrong (the model may just have been slow), so it must not be pinned — but
+	 * it is also not free, and unbounded it becomes "1800s every five minutes,
+	 * forever" on a PR whose blocker no agent can reach. Measured on
+	 * hub#61 + pr-agent-server#27, both a `@moonrepo/cli@2.6.3` bump whose
+	 * platform binaries were never published: there is no code change that makes
+	 * those CI runs green, so every run was guaranteed to exhaust its budget.
+	 *
+	 * Past `AI_FIX_BUDGET_CEILING` the agent simply stops being offered at this
+	 * head and the PR falls through to the ordinary CI gate — NOT a `skip_reason`,
+	 * so the report stays truthful ("we spent the budget, it did not help") and a
+	 * head that moves still releases everything.
+	 */
+	budget_runs?: number
+	/** The head the `budget_runs` tally belongs to — separate from `sha` for the
+	 *  same reason as `attempt_sha`. */
+	budget_sha?: string
+	/**
+	 * The reason this bump was judged UNSHIPPABLE (see `pr/bump-guard.ts`), and
+	 * the head it was judged at.
+	 *
+	 * Cached for cost, not for correctness: deciding it costs a registry read per
+	 * platform binary the package declares (up to eight for `@moonrepo/cli`), and
+	 * a five-minute tick would repeat that sweep forever on a PR nobody is going
+	 * to fix. Keyed on `bad_bump_sha` so a new head re-opens the question — a
+	 * force-push that moves the bump to a published version must be re-examined.
+	 */
+	bad_bump?: string
+	bad_bump_sha?: string
 	[key: string]: unknown
 }
 
@@ -118,6 +158,71 @@ export function attemptCount(
 	if (entry.attempt_sha !== headSha) return 0
 	const n = Number(entry.attempts ?? 0)
 	return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * Record an agent run at `headSha` that exhausted its OWN budget (turn cap or
+ * wall-clock timeout) and return the running count.
+ *
+ * Separate from `bumpAttempt` on purpose — see the `budget_runs` field. This one
+ * has a ceiling and `attempts` deliberately does not.
+ */
+export function bumpBudgetRun(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): number {
+	const entry = prEntry(state, repo, pr)
+	const prior = entry.budget_sha === headSha ? Number(entry.budget_runs ?? 0) : 0
+	const next = (Number.isFinite(prior) ? prior : 0) + 1
+	entry.budget_sha = headSha
+	entry.budget_runs = next
+	return next
+}
+
+/** How many budget-exhausting runs this head has already paid for. */
+export function budgetRunCount(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): number {
+	const entry = prEntry(state, repo, pr)
+	if (entry.budget_sha !== headSha) return 0
+	const n = Number(entry.budget_runs ?? 0)
+	return Number.isFinite(n) ? n : 0
+}
+
+/** The cached "unshippable bump" reason for this head, or undefined. */
+export function badBumpReason(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): string | undefined {
+	const entry = prEntry(state, repo, pr)
+	if (entry.bad_bump_sha !== headSha) return undefined
+	return typeof entry.bad_bump === "string" ? entry.bad_bump : undefined
+}
+
+/**
+ * Remember that this head's bump is unshippable, so later ticks skip the
+ * registry sweep. Pass `file` to persist, like every other mutator here.
+ */
+export function markBadBump(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+	reason: string,
+	file?: string,
+): PrEntry {
+	const entry = prEntry(state, repo, pr)
+	entry.bad_bump = reason
+	entry.bad_bump_sha = headSha
+	if (file !== undefined) saveFixState(file, state)
+	return entry
 }
 
 /** `{ "owner/repo": { "<pr>": PrEntry } }` */
@@ -325,6 +430,12 @@ export function markFixed(
 	// succeeds, then fails again would skip straight to escalation.
 	delete entry.attempts
 	delete entry.attempt_sha
+	// The budget tally goes with it, for the same reason: a fix that landed is
+	// not evidence about how many timeouts this head can still afford, and
+	// carrying the count forward would make a later, unrelated timeout look like
+	// the last one in a spent budget.
+	delete entry.budget_runs
+	delete entry.budget_sha
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }

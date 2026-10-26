@@ -31,6 +31,7 @@ import { GitHubApi } from "./github.ts"
 import { LOCK_FILE, WorkerLock } from "./lock.ts"
 import { runSyncHooks } from "./ops/syncHooks.ts"
 import { nodeProcessDeps } from "./pr/autofix.ts"
+import { registryFetchFrom } from "./pr/bump-guard.ts"
 import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix.ts"
 import { runTick, type WorkerDeps } from "./pr/pipeline.ts"
 import { Report } from "./report.ts"
@@ -57,6 +58,17 @@ const WEBHOOK_URL =
  * the Dependabot files to be synced on their own.
  */
 const OPS_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || ""
+
+/**
+ * How long the bump guard may wait on the npm registry, per package.
+ *
+ * SHORT ON PURPOSE. This runs inside a tick that also holds the worker lock, and
+ * the guard is an optimisation: a registry that is slow is a registry we treat
+ * as "could not tell", which passes the bump and falls back to the previous
+ * behaviour. There is no version of this where waiting longer is better than
+ * letting the PR through.
+ */
+const REGISTRY_TIMEOUT_MS = 5000
 
 /**
  * Whether the daily fork-config sync runs. OPT-IN, and it stays that way until
@@ -160,6 +172,16 @@ function buildDeps(opts: { dry: boolean; report: Report }): WorkerDeps {
 		repoOverrides: {},
 		now: () => Date.now() / 1000,
 		fetchImpl: (input, init) => fetch(input, init as RequestInit),
+		// The unshippable-bump guard's registry read. Wired here, in the one module
+		// allowed to touch the network stack directly, so `pr/bump-guard.ts` stays
+		// injectable and testable without a socket.
+		fetchRegistry: registryFetchFrom(async (url) => {
+			const res = await fetch(url, {
+				headers: { accept: "application/json" },
+				signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+			})
+			return { status: res.status, text: () => res.text() }
+		}),
 		lock: { acquire: (path) => WorkerLock.acquire(path) },
 		webhookSecret: WEBHOOK_SECRET,
 		webhookUrl: WEBHOOK_URL,

@@ -60,7 +60,7 @@ import {
 } from "./context.ts"
 import { resolveConflict, stepMerge, stepSafetyAndCi } from "./gates.ts"
 import { gatherOpenPrs, type OpenPr } from "./scan.ts"
-import { stepAiFix, stepPinGuard, stepReview } from "./steps.ts"
+import { stepAiFix, stepBumpGuard, stepPinGuard, stepReview } from "./steps.ts"
 
 export {
 	ctime,
@@ -117,6 +117,11 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 		return c.out
 	}
 	if (await stepPinGuard(deps, c)) return c.out
+	// BEFORE the review: a bump that cannot install does not need a review, an AI
+	// fix, or a CI wait — and paying for any of the three on it is the bug this
+	// guard exists for. Placed here rather than after `stepReview` because a
+	// triggered review would otherwise end the tick and defer the verdict.
+	if (await stepBumpGuard(deps, c)) return c.out
 
 	const review = await stepReview(deps, c)
 	if (review === null) return c.out // Triggered review: NOT a skip (line 1934).

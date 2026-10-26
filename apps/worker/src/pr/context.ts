@@ -23,6 +23,7 @@ import { bumpAttempt, markSkipNotified, wasSkipNotified } from "../state.ts"
 import type { RepoOverrides, SyncState } from "../sync/config.ts"
 import type { PostDiscord } from "../sync/run.ts"
 import type { AgentPort, ProcessDeps, ReportPort } from "./autofix.ts"
+import type { RegistryFetch } from "./bump-guard.ts"
 import type { ProcRunner, Workdirs } from "./lockfix.ts"
 import type { FetchLike } from "./review.ts"
 import type { GhAppClient } from "./scan.ts"
@@ -49,6 +50,37 @@ export const AI_FIX_ENABLED = true
  * why writing a `skip_reason` for something retryable is a permanent stall.
  */
 export const AI_FIX_RETRY_CEILING = 3
+
+/**
+ * How many agent runs at ONE head SHA may end by exhausting their own budget
+ * (`--max-turns`, or the `AI_FIX_TIMEOUT` wall clock) before the agent stops
+ * being offered there.
+ *
+ * A THIRD bound, distinct from the two above, and it exists because they do not
+ * cover this case:
+ *
+ *   - `isTransientInfra` decides whether a failure may be PINNED. A timeout must
+ *     never be pinned: the model may simply have been slow, and a `skip_reason`
+ *     is enforced "until head SHA changes" — a SHA nobody will move for a
+ *     problem that lives in the registry, not in the branch.
+ *   - `AI_FIX_RETRY_CEILING` bounds RE-OFFERS after a run that produced no
+ *     commit, which is a different event (that run finished; this one was cut
+ *     off).
+ *
+ * So a timeout is retryable but expensive, and only a separate count can say
+ * "retryable, but we have paid for this three times already". Measured on
+ * hub#61 + pr-agent-server#27: `@moonrepo/cli@2.6.3` shipped with
+ * `optionalDependencies` pointing at `@moonrepo/core-*@2.6.3`, which was never
+ * published (the registry goes 2.6.2 → 2.6.4), so `pnpm exec moon` dies with
+ * `Cannot find module '@moonrepo/core-linux-x64-gnu/package.json'`. No edit to
+ * that branch can make CI green, so every agent run was guaranteed to exhaust
+ * its budget — at 1800s each, every five minutes, indefinitely.
+ *
+ * Past the ceiling the PR is NOT skipped: it falls through to the ordinary CI
+ * gate, which is where a PR the agent cannot help belongs. The report says the
+ * budget was spent, so the operator can see why the agent stopped.
+ */
+export const AI_FIX_BUDGET_CEILING = 3
 /** Python line 1866, `pr.get("title", "untitled")[:60]`. */
 const TITLE_CAP = 60
 /** Python line 2051, the `86400` in the dependabot age arithmetic. */
@@ -69,6 +101,28 @@ export const UNRESOLVABLE_CONFLICT = "Unresolvable merge conflict (Claude Code m
 export const stripInfra = (s: string): string => s.split("[INFRA] ").join("")
 /** Python line 2022, `summary.startswith("[INFRA]")`. */
 export const isInfra = (s: string): boolean => s.startsWith("[INFRA]")
+
+/**
+ * Did this `[INFRA]` failure happen because the run used up its OWN allowance —
+ * `--max-turns` reached, or `AI_FIX_TIMEOUT` elapsed — rather than because
+ * something outside it broke?
+ *
+ * These are the two strings `claude-agent.ts` itself produces (the `--max-turns`
+ * error is the CLI's own wording, surfaced through the `exited N:` arm). They are
+ * checked by SHAPE, not by a stored flag, because the snippet is the only thing
+ * that survives into the report and the state file.
+ *
+ * A budget exhaustion is RETRYABLE (so it is never pinned) but EXPENSIVE (so it
+ * is counted against `AI_FIX_BUDGET_CEILING`). Keeping it a separate predicate
+ * from `isTransientInfra` is what lets the two decisions differ: `steps.ts`
+ * retries on either, but only this one increments the budget tally.
+ */
+export const isBudgetExhaustion = (s: string): boolean =>
+	isInfra(s) &&
+	// `claude-agent.ts`: `[INFRA] Claude Code timed out after ${timeout}s`.
+	// The CLI's own wording when `--max-turns` runs out, surfaced through the
+	// `[INFRA] Claude Code exited 1: Error: Reached max turns (100)` arm.
+	(/timed out after \d+s/i.test(s) || /Reached max turns|max turns \(\d+\)/i.test(s))
 
 /**
  * Is this `[INFRA]` failure TRANSIENT — one that must be retried — rather than
@@ -113,6 +167,23 @@ export const isTransientInfra = (s: string): boolean => {
 	) {
 		return false
 	}
+
+	// A RUN THAT USED UP ITS OWN ALLOWANCE IS RETRYABLE. This used to be the
+	// opposite — `AI_FIX_TIMEOUT` was pinned permanently, and the test suite
+	// asserted that as a contract — on the reasoning that retrying costs another
+	// 30 minutes. The reasoning about the COST was right; the remedy was wrong.
+	//
+	// A pin is enforced "until head SHA changes", and nothing about a timeout
+	// moves a head: the timeout is a property of one run, not of the install or
+	// of the branch. So pinning it converts "this attempt was slow" into "this PR
+	// is dead", which is the exact permanent stall `state.ts` warns about — and
+	// it is how hub#61 and pr-agent-server#27 became `Permanently skipped` on a
+	// `@moonrepo/cli@2.6.3` bump that no edit could fix.
+	//
+	// The COST is bounded where it belongs: `AI_FIX_BUDGET_CEILING` counts these
+	// runs and stops OFFERING the agent past the ceiling. Retry, then stop
+	// spending — rather than never retry at all.
+	if (isBudgetExhaustion(s)) return true
 
 	return (
 		// An HTTP status from the API. `40[0-9]` covers rate limits (429) and
@@ -205,6 +276,15 @@ export type WorkerDeps = {
 	 * double stays valid; `stepAiFix` falls back to a real timer.
 	 */
 	sleep?: (ms: number) => Promise<void>
+	/**
+	 * Registry read for the unshippable-bump guard (`pr/bump-guard.ts`).
+	 *
+	 * Optional: an install that does not wire it keeps the previous behaviour —
+	 * every bump passes — which is the safe default, because this guard may only
+	 * ever add a refusal on positive evidence (a confirmed 404 on a platform
+	 * binary the bumped package declares).
+	 */
+	fetchRegistry?: RegistryFetch
 }
 
 /** The brief's per-PR result: one flag per counter, `true` when it fired. */
