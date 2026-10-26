@@ -1,3 +1,10 @@
+## [1.5.9](https://github.com/asepharyana/pr-agent-server/compare/v1.5.8...v1.5.9) (2026-10-26)
+
+
+### Bug Fixes
+
+* **ci:** keep the generated CHANGELOG out of biome's scope ([1760ced](https://github.com/asepharyana/pr-agent-server/commit/1760cedc4c3b9c1e82e642563a1e4fadf279b438))
+
 ## [1.5.8](https://github.com/asepharyana/pr-agent-server/compare/v1.5.7...v1.5.8) (2026-10-26)
 
 
