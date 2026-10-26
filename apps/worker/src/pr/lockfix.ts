@@ -35,6 +35,7 @@
  */
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { type GitResult, type GitRunner, redactCredentials, setBotIdentity } from "../git.ts"
+import { detectPackageManagers } from "./managers.ts"
 import type { GhClient } from "./scan.ts"
 
 /** Python `TMP_BASE` (line 67). The parent of all three workdirs. */
@@ -186,25 +187,30 @@ export function nodeWorkdirs(): Workdirs {
  * The name→PR-key mapping for a workdir under `TMP_BASE`, or `null` when the name
  * is not one of ours.
  *
- * THE INFIX IS LOAD-BEARING. Three flows create workdirs and only one has no
+ * THE INFIX IS LOAD-BEARING. Two flows create workdirs and only one has no
  * infix:
  *
  *   autofix.ts   `${repo}_${pr}`                 -> asepharyana_hub_47
- *   relock.ts    `${repo}_lockfix_${pr}`         -> asepharyana_hub_lockfix_47
- *   relock.ts    `${repo}_bunfix_${pr}`          -> asepharyana_hub_bunfix_47
+ *   relock.ts    `${repo}_<id>fix_${pr}`         -> asepharyana_hub_pnpmfix_47
+ *
+ * The `<id>` is the `PackageManager.id` that owns the repair — `bunfix`,
+ * `lockfix` (uv, before the row table), `npmfix`, `pnpmfix`, … — so the set is
+ * open-ended and matched by SHAPE rather than by a list of known names. A hard
+ * list here is what would silently start sweeping a live pnpm repair the day a
+ * seventh toolchain was added.
  *
  * `repo` is the full `owner/name` with slashes replaced by underscores, so the
  * FIRST underscore separates owner from name and everything after the name is
  * either the PR or an infix + the PR. Stripping the infix is not cosmetic: the
- * naive `owner/name_<infix>/pr` key never matches the open set, so a LIVE PR's
- * lockfix workdir would be swept mid-use — an agent run losing its clone, or a
- * relock deleting the tree it is about to `bun install` into. Caught by writing
- * the test against the real function instead of a copy of its logic.
+ * naive `owner/name_<infix>_pr` key never matches the open set, so a LIVE PR's
+ * relock workdir would be swept mid-use — a relock deleting the tree it is about
+ * to run `npm ci` in. Caught by writing the test against the real function
+ * instead of a copy of its logic.
  */
 export function workdirPrKey(name: string): string | null {
 	const m = /^(.+)_(\d+)$/.exec(name)
 	if (!m) return null
-	const repoPart = m[1].replace(/_(?:lockfix|bunfix)$/, "")
+	const repoPart = m[1].replace(/_[a-z0-9]+fix$/, "")
 	const us = repoPart.indexOf("_")
 	if (us < 0) return null
 	return `${repoPart.slice(0, us)}/${repoPart.slice(us + 1)}/${m[2]}`
@@ -397,22 +403,23 @@ export function isTrivialPr(title: string, _author: string): boolean {
 	return false // Python line 597
 }
 
-// ── _repo_has_bun_lock ──────────────────────────────────────────────────────
+// ── The per-toolchain probes and dispatch ───────────────────────────────────
+//
+// `repoHasBunLock` used to live here: Python's `_repo_has_bun_lock` (608-624),
+// which asked a binary "is this a Bun repo" question and answered it by
+// substring-matching `bun.lock` anywhere in the tree. That question cannot
+// express the fleet's reality — one repo can hold a pnpm workspace AND a
+// `uv.lock` — so detection moved to `./managers`, which returns EVERY toolchain
+// the tree proves. The name is kept as a thin wrapper because the Python-parity
+// suite pins it, and because a caller that genuinely wants the bun answer should
+// not have to know the shape of the wider table.
 
 /**
- * Python `_repo_has_bun_lock(token, repo_full, sha)` (lines 608-624): "True if
- * the repo's tree at `sha` contains a bun.lock (root or any workspace)".
+ * True when the repo tree at `sha` holds a `bun.lock` or `bun.lockb`.
  *
- * Read-only, and EVERY failure means "no": a non-200, a malformed body, or a
- * thrown request all fall into the single `except Exception: pass` at lines
- * 622-623. The port keeps that — this predicate only chooses WHICH lockfix to
- * try, so a false negative costs one extra uv attempt, whereas a throw would
- * abort the whole tick.
- *
- * The TREE endpoint, not the contents endpoint (line 614): it is the only way to
- * see a workspace's bun.lock, and the recursive form returns every path at once.
- * The match is a SUBSTRING on the path (line 620), so a workspace lockfile
- * counts — and so would a file merely named `bun.lock.bak`.
+ * Delegates to `detectPackageManagers`, so its failure mode and its notion of
+ * "is a lockfile" cannot drift from the dispatcher's. Still "EVERY failure means
+ * no": an unreadable tree yields no toolchains, hence `false`.
  */
 export async function repoHasBunLock(
 	api: GhClient,
@@ -420,31 +427,18 @@ export async function repoHasBunLock(
 	repo: string,
 	sha: string,
 ): Promise<boolean> {
-	try {
-		const { status, data } = await api.request(
-			"GET",
-			`/repos/${repo}/git/trees/${sha}?recursive=1`,
-			{
-				token,
-			},
-		)
-		if (status === 200 && Array.isArray(data?.tree)) {
-			for (const item of data.tree as any[]) {
-				const path = typeof item?.path === "string" ? item.path : ""
-				if (path.includes("bun.lock")) return true // Python line 620
-			}
-		}
-	} catch {
-		/* Python lines 622-623: `except Exception: pass` */
-	}
-	return false // Python line 624
+	const found = await detectPackageManagers(api, token, repo, sha)
+	return found.some((pm) => pm.id === "bun")
 }
 
-import { fixBunLock, fixUvLock } from "./relock.ts"
+export { detectPackageManagers } from "./managers.ts"
+
+import { fixBunLock, fixLockfile, fixUvLock } from "./relock.ts"
 
 // Re-exported so `pipeline.ts` and the test suite keep importing the two
-// flows from `./lockfix`. This is a live re-export and `./relock` imports
-// `clonePr`/`head`/`reportable` back, so the two modules form an ESM cycle;
-// it is safe because nothing either module reads is touched at
-// module-evaluation time.
-export { fixBunLock, fixUvLock }
+// flows from `./lockfix`, and so `steps.ts` can dispatch any row of the manager
+// table without knowing which module owns the flow. This is a live re-export
+// and `./relock` imports `clonePr`/`head`/`reportable` back, so the two modules
+// form an ESM cycle; it is safe because nothing either module reads is touched
+// at module-evaluation time.
+export { fixBunLock, fixLockfile, fixUvLock }
