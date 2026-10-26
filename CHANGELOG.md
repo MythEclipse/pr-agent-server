@@ -1,3 +1,10 @@
+## [1.5.8](https://github.com/asepharyana/pr-agent-server/compare/v1.5.7...v1.5.8) (2026-10-26)
+
+
+### Bug Fixes
+
+* **queue:** score the CURRENT review, and stop losing re-requests ([3d8ece9](https://github.com/asepharyana/pr-agent-server/commit/3d8ece920dd20697551976d42c622c93965a38da)), closes [hub#61](https://github.com/hub/issues/61)
+
 ## [1.5.7](https://github.com/asepharyana/pr-agent-server/compare/v1.5.6...v1.5.7) (2026-10-26)
 
 
