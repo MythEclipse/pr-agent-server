@@ -1,3 +1,10 @@
+## [1.6.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.7...v1.6.8) (2026-11-05)
+
+
+### Bug Fixes
+
+* **model:** default every PR-agent model to claude-sonnet-5-5 ([e7188ec](https://github.com/MythEclipse/pr-agent-server/commit/e7188ec36808e951c980b7cf1136f641f11940fb))
+
 ## [1.6.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.6...v1.6.7) (2026-11-05)
 
 
