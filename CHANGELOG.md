@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.9...v1.7.0) (2026-11-05)
+
+
+### Features
+
+* merge Dependabot PRs with passing CI without AI review ([f453d26](https://github.com/MythEclipse/pr-agent-server/commit/f453d267a045db43a663c2b9e2ca67d98b7c8609))
+
 ## [1.6.9](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.8...v1.6.9) (2026-11-05)
 
 
