@@ -1,3 +1,10 @@
+## [1.6.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.5...v1.6.6) (2026-11-05)
+
+
+### Bug Fixes
+
+* **sync-hooks:** stop the CI gate reading its own check run ([253c897](https://github.com/MythEclipse/pr-agent-server/commit/253c897f23d54222f4b1cb9cd4ddc17ad8e66cab))
+
 ## [1.6.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.4...v1.6.5) (2026-11-05)
 
 
