@@ -38,14 +38,10 @@
  */
 
 import { LOCK_FILE } from "../lock.ts"
-import {
-	alreadyFixed,
-	getSkipReason,
-	pruneClosedFixState,
-} from "../state.ts"
+import { alreadyFixed, getSkipReason, pruneClosedFixState } from "../state.ts"
 import { runUpstreamSync } from "../sync/run.ts"
-import type { ReportPort } from "./autofix.ts"
 import { checkCiPassed } from "./ci.ts"
+import type { ReportPort } from "./autofix.ts"
 import {
 	AI_FIX_ENABLED,
 	type Ctx,
@@ -74,6 +70,19 @@ export type PrCounts = { merged: number; triggered: number; fixed: number; skipp
 
 /** The four counter keys, for the tick's accumulate loop. */
 const COUNTERS: (keyof PrCounts)[] = ["merged", "triggered", "fixed", "skipped"]
+
+type DependabotCiStatus = {
+	state: "not-dependabot" | "green" | "red" | "unknown"
+	message?: string
+}
+
+async function dependabotCiStatus(deps: WorkerDeps, c: Ctx): Promise<DependabotCiStatus> {
+	if (c.author !== "dependabot[bot]") return { state: "not-dependabot" }
+
+	const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+	if (ci.ok) return { state: "green", message: ci.msg }
+	return { state: ci.unknown ? "unknown" : "red", message: ci.msg }
+}
 
 // ── process_pr ──────────────────────────────────────────────────────────────
 
@@ -121,32 +130,22 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 	// triggered review would otherwise end the tick and defer the verdict.
 	if (await stepBumpGuard(deps, c)) return c.out
 
-	// Dependabot PRs with green CI are already validated by the repository's
-	// checks. Merge them before triggering PR-Agent or Claude so dependency
-	// maintenance does not spend an AI run when no fix is needed. Passing
-	// `already=true` also makes a mergeability conflict a wait, not an excuse
-	// to invoke Claude; the next tick can retry after GitHub updates the state.
-	let dependabotCiRed = false
-	if (c.author === "dependabot[bot]") {
-		const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
-		dependabotCiRed = !ci.ok && !ci.unknown
-		if (ci.ok) {
-			deps.report.push(`   🤖 Dependabot CI green (${ci.msg}) — merging without AI review`)
-			c.score = "N/A"
-			c.out.merged = await stepMerge(deps, c, true)
-			if (!c.out.merged) c.out.skipped = true
-			return c.out
-		}
+	const dependabotStatus = await dependabotCiStatus(deps, c)
+	if (dependabotStatus.state === "green") {
+		deps.report.push(
+			`   🤖 Dependabot CI green (${dependabotStatus.message}) — merging without AI review`,
+		)
+		c.score = "N/A"
+		c.out.merged = await stepMerge(deps, c, true)
+		if (!c.out.merged) c.out.skipped = true
+		return c.out
 	}
 
 	const review = await stepReview(deps, c)
 	if (review === null) return c.out // Triggered review: NOT a skip (line 1934).
 
 	let already = alreadyFixed(c.fixState, repo, c.prNum, c.headSha)
-	if (dependabotCiRed) {
-		// A prior fix record must not suppress recovery when the exact head is
-		// still red. The CI failure is new evidence and is precisely what Claude
-		// Code must be given a chance to repair.
+	if (dependabotStatus.state === "red") {
 		already = false
 		deps.report.push("   🔧 Dependabot CI is red — offering Claude Code a fix")
 	}
