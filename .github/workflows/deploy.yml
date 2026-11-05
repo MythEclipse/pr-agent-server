@@ -331,6 +331,25 @@ jobs:
           rm -rf /tmp/pkg-worker.new /tmp/pkg-worker.tar.gz
           rm -f /tmp/pkg-pr-agent-server.service
 
+          # Restarting the TIMER is not a restart. `pr-agent-worker.service` is
+          # `Type=oneshot` driven by a timer, and a tick that is mid-run keeps
+          # the OLD code in memory for its entire lifetime — a tick can hold the
+          # worker for 30+ minutes of agent work. So `restart <timer>` returned
+          # success while every in-flight job kept running the previous build,
+          # and the next tick would not start until the current one finished.
+          # Observed exactly that after shipping the model change: the dist on
+          # disk said `claude-sonnet-5-5` while the running agent still spawned
+          # `--model claude-opus-5-5`, and the old process kept picking up new
+          # jobs.
+          #
+          # Stopping the SERVICE is safe: `running` queue rows are reset to
+          # `pending` on boot (at-least-once), so an interrupted job is retried
+          # by the next tick rather than lost. The timer is restarted after, so
+          # the next tick starts from a clean process on the new code.
+          if sudo -n systemctl cat pr-agent-worker.service >/dev/null 2>&1; then
+            sudo -n systemctl stop pr-agent-worker.timer
+            sudo -n systemctl stop pr-agent-worker.service || true
+          fi
           sudo -n systemctl restart pr-agent-worker.timer
           sudo -n systemctl restart pr-agent-sync-hooks.timer
           REMOTE
