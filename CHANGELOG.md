@@ -1,3 +1,10 @@
+## [1.6.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.6...v1.6.7) (2026-11-05)
+
+
+### Bug Fixes
+
+* **deps:** stop the auto-merge gate reading its own check run ([8f25b8b](https://github.com/MythEclipse/pr-agent-server/commit/8f25b8b8e784197aeea8140b77d1b1599e1e3889))
+
 ## [1.6.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.5...v1.6.6) (2026-11-05)
 
 
