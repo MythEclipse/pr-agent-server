@@ -1,3 +1,10 @@
+## [1.6.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.4...v1.6.5) (2026-11-05)
+
+
+### Bug Fixes
+
+* **sync-hooks:** write to the primary account, not the mirror destination ([376beba](https://github.com/MythEclipse/pr-agent-server/commit/376beba95b551c8aea9b5153161aaec779c2fd3c))
+
 ## [1.6.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.3...v1.6.4) (2026-11-05)
 
 
