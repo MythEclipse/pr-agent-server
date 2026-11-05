@@ -333,6 +333,26 @@ describe("runSyncHooks > dependabot templates", () => {
 		expect(res.lines.some((l) => l.includes("already absent"))).toBe(true)
 	})
 
+	// THE WORKFLOW MUST NOT READ ITS OWN CHECK RUN AS CI.
+	//
+	// `GET /commits/{sha}/check-runs` returns every app's check runs, this
+	// workflow's own included. Left in, the gate deadlocks two ways, both seen
+	// on the first live run (MythEclipse/9router#2):
+	//   - the running job reports `in_progress`, so `pending` never hits 0 and
+	//     the step burns the whole 1800s deadline;
+	//   - `cancel-in-progress` settles a superseded run as `cancelled`, which is
+	//     a RED conclusion, so every later run declares "CI is red" forever.
+	// The template must filter its own name out, and the name it filters on must
+	// match the job's own `name:` — a typo there silently re-arms the deadlock.
+	test("excludes its own check run from the CI gate", () => {
+		const wf = template("dependabot-auto-merge.yml")
+		expect(wf).toContain("SELF_CHECK_NAME")
+		expect(wf).toContain("select(.name != ")
+		// The job's display name is the check-run name GitHub reports for it.
+		expect(wf).toMatch(/name: Auto-merge dependency PR\n/)
+		expect(wf).toContain("SELF_CHECK_NAME: Auto-merge dependency PR")
+	})
+
 	// The body has to be the real file, base64-encoded as the contents API
 	// requires — not a re-serialised approximation of it.
 	test("writes the template bytes, not a paraphrase", async () => {
