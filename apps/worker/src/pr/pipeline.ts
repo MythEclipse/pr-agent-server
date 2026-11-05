@@ -47,6 +47,7 @@ import {
 } from "../state.ts"
 import { runUpstreamSync } from "../sync/run.ts"
 import type { ReportPort } from "./autofix.ts"
+import { checkCiPassed } from "./ci.ts"
 import {
 	AI_FIX_ENABLED,
 	AI_FIX_RETRY_CEILING,
@@ -122,6 +123,22 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 	// guard exists for. Placed here rather than after `stepReview` because a
 	// triggered review would otherwise end the tick and defer the verdict.
 	if (await stepBumpGuard(deps, c)) return c.out
+
+	// Dependabot PRs with green CI are already validated by the repository's
+	// checks. Merge them before triggering PR-Agent or Claude so dependency
+	// maintenance does not spend an AI run when no fix is needed. Passing
+	// `already=true` also makes a mergeability conflict a wait, not an excuse
+	// to invoke Claude; the next tick can retry after GitHub updates the state.
+	if (c.author === "dependabot[bot]") {
+		const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+		if (ci.ok) {
+			deps.report.push(`   🤖 Dependabot CI green (${ci.msg}) — merging without AI review`)
+			c.score = "N/A"
+			c.out.merged = await stepMerge(deps, c, true)
+			if (!c.out.merged) c.out.skipped = true
+			return c.out
+		}
+	}
 
 	const review = await stepReview(deps, c)
 	if (review === null) return c.out // Triggered review: NOT a skip (line 1934).

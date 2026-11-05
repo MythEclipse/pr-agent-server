@@ -568,6 +568,28 @@ describe("attempt tally — failures are recorded, never written off", () => {
 })
 
 describe("case 2 — review + clean safety + green CI + mergeable merges once", () => {
+	test("a green Dependabot PR merges before review and never calls the agent", async () => {
+		const h = harness({
+			prs: [makePr({ user: { login: "dependabot[bot]" } })],
+		})
+
+		const out = await processPr(h.deps, {
+			token: "install-token",
+			repo: REPO,
+			pr: makePr({ user: { login: "dependabot[bot]" } }),
+		})
+
+		expect(out).toEqual({ merged: true, triggered: false, fixed: false, skipped: false })
+		expect(h.agentPosts).toEqual([])
+		expect(approves(h.calls)).toBe(1)
+		expect(merges(h.calls)).toBe(1)
+		expect(h.lines).toContain(
+			"   🤖 Dependabot CI green (✅ 1 checks green) — merging without AI review",
+		)
+		expect(h.lines).not.toContain("   📡 No review → triggering PR-Agent...")
+		expect(h.notifies.map((n) => n.status)).toEqual(["done"])
+	})
+
 	test("merged, with exactly one approve and one merge", async () => {
 		// `already` short-circuits the AI-fix block: this case is about the merge
 		// decision, and the line proves why the agent was not called.
@@ -978,7 +1000,7 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 		// `NO_CODE_MARKER` puts this PR on the no_code_review path, so the AI fix is
 		// skipped and the ONE agent call below is the conflict resolve itself.
 		const h = harness({
-			prs: [makePr({ ...LOCKFILE_BUMP, mergeable: false })],
+			prs: [makePr({ ...LOCKFILE_BUMP, user: { login: "alice" }, mergeable: false })],
 			comments: [NO_CODE_MARKER],
 			agent: [{ ok: false, snippet: "conflict with main, gave up" }],
 		})
@@ -986,7 +1008,7 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 		const out = await processPr(h.deps, {
 			token: "install-token",
 			repo: REPO,
-			pr: makePr({ ...LOCKFILE_BUMP, mergeable: false }),
+			pr: makePr({ ...LOCKFILE_BUMP, user: { login: "alice" }, mergeable: false }),
 		})
 
 		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
@@ -1045,7 +1067,7 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 		// advances `c.headSha` to the pushed tip itself, and BOTH readings
 		// agree — the assertion then passes whatever the resolver records.
 		const PUSHED = "c".repeat(40)
-		const conflicted = makePr({ ...LOCKFILE_BUMP, mergeable: false })
+		const conflicted = makePr({ ...LOCKFILE_BUMP, user: { login: "alice" }, mergeable: false })
 		const h = harness({
 			prs: [conflicted],
 			comments: [NO_CODE_MARKER],
@@ -1108,7 +1130,7 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 describe("the merge 409 arm re-runs the resolve exactly once too", () => {
 	test("the 409 arm", async () => {
 		const h = harness({
-			prs: [makePr({ ...LOCKFILE_BUMP })],
+			prs: [makePr({ ...LOCKFILE_BUMP, user: { login: "alice" } })],
 			comments: [NO_CODE_MARKER],
 			agent: [{ ok: false, snippet: "still conflicted" }],
 			merge: { status: 409, data: { message: "Merge conflict" } },
@@ -1117,7 +1139,7 @@ describe("the merge 409 arm re-runs the resolve exactly once too", () => {
 		const out = await processPr(h.deps, {
 			token: "install-token",
 			repo: REPO,
-			pr: makePr(LOCKFILE_BUMP),
+			pr: makePr({ ...LOCKFILE_BUMP, user: { login: "alice" } }),
 		})
 
 		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
