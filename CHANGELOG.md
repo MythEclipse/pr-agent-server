@@ -1,3 +1,10 @@
+## [1.8.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.0...v1.8.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **lint:** sort imports in pipeline.ts to unblock CI ([3073aae](https://github.com/MythEclipse/pr-agent-server/commit/3073aae4b37aeafbb2af449a8307cb519971c255))
+
 # [1.8.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.7.1...v1.8.0) (2026-11-05)
 
 
