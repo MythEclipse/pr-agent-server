@@ -58,8 +58,12 @@ export const DEFAULT_ANTHROPIC_BASE_URL = "https://9router.asepharyana.my.id"
 /**
  * The model. Overridable with `PR_AGENT_CLAUDE_MODEL` so a different install
  * (or a cheaper fix pass) does not need a rebuild.
+ *
+ * `claude-sonnet-5-5`, matching the review path's default. The two used to
+ * disagree — reviews on opus-5, the fix agent on opus-5-5 — and opus-5 is no
+ * longer served by the gateway at all, so the review default was a dead name.
  */
-export const DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
 
 /** Python `AI_FIX_MAX_TURNS` (line 75) — the gateway's turn cap, now ours. */
 export const AI_FIX_MAX_TURNS = 100

@@ -83,8 +83,17 @@ function envInt(name: string, def: number): number {
 }
 
 export function loadConfig(): Config {
-	const model = env.PR_AGENT_MODEL || "claude-opus-5"
-	let fallbackModels: string[] = ["claude-sonnet-5", "claude-haiku-4-5-20251001"]
+	// `claude-sonnet-5-5`, NOT `claude-opus-5`. The gateway retired the old
+	// names outright: `claude-opus-5` and `claude-sonnet-5` are absent from
+	// `GET /v1/models` (649 entries) and answer HTTP 400 on
+	// `/v1/chat/completions`, so a default naming either one makes every review
+	// fail on the first call and fall through to a fallback. Verified live
+	// against the gateway the config points at.
+	const model = env.PR_AGENT_MODEL || "claude-sonnet-5-5"
+	// The fallbacks must be names the gateway still serves, or the whole chain
+	// 400s and the error the operator sees is "All models failed" with no hint
+	// that the names were the problem.
+	let fallbackModels: string[] = ["claude-opus-5-5", "claude-haiku-4-5-20251001"]
 	if (env.PR_AGENT_FALLBACK_MODELS) {
 		try {
 			fallbackModels = JSON.parse(env.PR_AGENT_FALLBACK_MODELS)
@@ -110,9 +119,9 @@ export function loadConfig(): Config {
 
 	return {
 		model,
-		modelReview: env.PR_AGENT_MODEL_REVIEW || env.PR_AGENT_MODEL || "claude-opus-5",
-		modelDescribe: env.PR_AGENT_MODEL_DESCRIBE || env.PR_AGENT_MODEL || "claude-opus-5",
-		modelImprove: env.PR_AGENT_MODEL_IMPROVE || env.PR_AGENT_MODEL || "claude-opus-5",
+		modelReview: env.PR_AGENT_MODEL_REVIEW || env.PR_AGENT_MODEL || "claude-sonnet-5-5",
+		modelDescribe: env.PR_AGENT_MODEL_DESCRIBE || env.PR_AGENT_MODEL || "claude-sonnet-5-5",
+		modelImprove: env.PR_AGENT_MODEL_IMPROVE || env.PR_AGENT_MODEL || "claude-sonnet-5-5",
 		fallbackModels,
 		// 0 = no extra cap: use each model's real window from the table below.
 		// This was 128000, which silently clamped the 1M-token models to 128k and
@@ -184,6 +193,14 @@ export function loadConfig(): Config {
 export function getModelTokenLimit(model: string, cfg?: Config): number {
 	const c = cfg ?? loadConfig()
 	const table: Record<string, number> = {
+		// The 5.5 names are what the gateway serves today; the older
+		// `claude-opus-5` / `claude-sonnet-5` keys are kept so an operator who
+		// pins one via env still gets the right window instead of silently
+		// falling back to 128k and compressing every diff early.
+		"claude-sonnet-5-5": 1000000,
+		"anthropic/claude-sonnet-5-5": 1000000,
+		"claude-opus-5-5": 1000000,
+		"anthropic/claude-opus-5-5": 1000000,
 		"claude-opus-5": 1000000,
 		"anthropic/claude-opus-5": 1000000,
 		"claude-sonnet-5": 1000000,
