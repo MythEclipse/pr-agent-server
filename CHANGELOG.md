@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.7.1...v1.8.0) (2026-11-05)
+
+
+### Features
+
+* enhance Dependabot PR handling with CI status checks for merging ([3fdc4ad](https://github.com/MythEclipse/pr-agent-server/commit/3fdc4add452e9b34b12543634dab1b916e4c491a))
+
 ## [1.7.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.7.0...v1.7.1) (2026-11-05)
 
 
