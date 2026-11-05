@@ -279,7 +279,9 @@ describe("runSyncHooks > dependabot templates", () => {
 		const { api, calls } = fakeApi(["asepharyana/GMW"])
 		await runSyncHooks({ api, ghToken: "pat" })
 
-		expect(contentPuts(calls).filter((c) => c.path.endsWith(LEGACY_AUTO_MERGE_PATH))).toHaveLength(0)
+		expect(contentPuts(calls).filter((c) => c.path.endsWith(LEGACY_AUTO_MERGE_PATH))).toHaveLength(
+			0,
+		)
 	})
 
 	// The workflow's escape hatch is a label. A label that does not exist cannot
