@@ -40,8 +40,8 @@
 import { LOCK_FILE } from "../lock.ts"
 import { alreadyFixed, getSkipReason, pruneClosedFixState } from "../state.ts"
 import { runUpstreamSync } from "../sync/run.ts"
-import { checkCiPassed } from "./ci.ts"
 import type { ReportPort } from "./autofix.ts"
+import { checkCiPassed } from "./ci.ts"
 import {
 	AI_FIX_ENABLED,
 	type Ctx,
