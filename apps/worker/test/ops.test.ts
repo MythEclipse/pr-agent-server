@@ -18,6 +18,7 @@ import { join } from "node:path"
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import {
 	AUTO_MERGE_OPTOUT_LABEL,
+	OWNER,
 	runSyncHooks,
 	type SyncHooksDeps,
 } from "../src/ops/syncHooks.ts"
@@ -73,7 +74,10 @@ function fakeApi(repos: string[], fixtures: Record<string, Fixture> = {}): Fake 
 	) => {
 		calls.push({ method, path, token: opts.token, json: opts.json })
 
-		if (method === "GET" && path === "/users/asepharyana/repos?per_page=100") {
+		// `/user/repos?affiliation=owner`, not `/users/{owner}/repos`: the public
+		// listing silently omits private repos, so a private repo with a
+		// Dependabot config would never be synced and never look missing.
+		if (method === "GET" && path === "/user/repos?affiliation=owner&per_page=100") {
 			return { status: 200, data: repos.map((full_name) => ({ full_name })) }
 		}
 		const hooks = /^GET \/repos\/([^/]+\/[^/]+)\/hooks$/.exec(`${method} ${path}`)
@@ -343,6 +347,29 @@ describe("runSyncHooks > dependabot templates", () => {
 	})
 })
 
+/**
+ * WHICH ACCOUNT THIS WRITES TO.
+ *
+ * The sync used to list `asepharyana` — the MIRROR DESTINATION — so every
+ * workflow and Dependabot config it wrote landed on a repo that
+ * `git push --mirror` overwrites from `MythEclipse` every 30 minutes. Every
+ * write still returned 201, so the module reported success for work that was
+ * erased before the next run. Dependabot opens its PRs on `MythEclipse`, which
+ * is also the only account the token has push access to.
+ *
+ * A wrong owner here is invisible in every other assertion in this file: the
+ * fake happily accepts any repo name. So it is pinned by name.
+ */
+describe("runSyncHooks > the target account", () => {
+	test("defaults to the primary, MythEclipse", () => {
+		expect(OWNER).toBe("MythEclipse")
+	})
+
+	test("never targets the mirror destination by default", () => {
+		expect(OWNER).not.toBe("asepharyana")
+	})
+})
+
 // ── Group 4 ──────────────────────────────────────────────────────────────────
 
 describe("runSyncHooks > no webhook secret", () => {
@@ -521,10 +548,12 @@ describe("runSyncHooks > the summary", () => {
 	})
 
 	// The deps object is OPTIONAL, so the module resolves the repo list itself.
-	test("lists asepharyana's repos when no list is injected", async () => {
+	test("lists the caller's own repos when no list is injected", async () => {
 		const { api, calls } = fakeApi(["asepharyana/GMW"])
 		const res = await runSyncHooks({ api, ghToken: "pat" })
-		expect(of(calls, "GET", "/users/asepharyana/repos?per_page=100")).toHaveLength(1)
+		// `/user/repos?affiliation=owner`, so private repos are included. The
+		// public `/users/{owner}/repos` listing answered 62 of 69 on this fleet.
+		expect(of(calls, "GET", "/user/repos?affiliation=owner&per_page=100")).toHaveLength(1)
 		// Dependabot config + auto-merge workflow + opt-out label.
 		expect(res.ok).toBe(3)
 	})

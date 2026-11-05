@@ -63,9 +63,20 @@ pnpm -C apps/worker exec tsx src/index.ts --sync-hooks                     # ref
 ### `--sync-hooks` is gated, and stays that way
 
 `--sync-hooks` writes the pr-agent webhook and three Dependabot files to **every
-repo the GitHub token can see**. It refuses to run unless
-`PR_AGENT_SYNC_HOOKS=1` is set — any other value, including `true` or `yes`, is
-rejected, and the check happens before a key file is read or a request is made.
+repo the token owns**. It refuses to run unless `PR_AGENT_SYNC_HOOKS=1` is set —
+any other value, including `true` or `yes`, is rejected, and the check happens
+before a key file is read or a request is made.
+
+**It writes to `MythEclipse` (the primary), not `asepharyana`.** That is not a
+detail: `asepharyana` is a `git push --mirror` destination, refreshed from
+`MythEclipse` every 30 minutes, so a config written there is erased before the
+next run can read it back — while still returning HTTP 201 and reporting success.
+Override with `PR_AGENT_SYNC_OWNER` if the primary ever moves again.
+
+The repo list comes from `GET /user/repos?affiliation=owner`, which includes
+private repos. `GET /users/{owner}/repos` is public-only and answered 62 for an
+account owning 69, so five private repos with a Dependabot config would silently
+never be synced.
 
 That gate is not a placeholder. The Dependabot templates in
 `apps/worker/src/ops/templates/` were written from scratch during the TypeScript
