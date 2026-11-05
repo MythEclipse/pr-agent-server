@@ -1,3 +1,10 @@
+## [1.6.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.3...v1.6.4) (2026-11-05)
+
+
+### Bug Fixes
+
+* **sync-hooks:** install the auto-merge workflow where GitHub runs it ([1e93c9d](https://github.com/MythEclipse/pr-agent-server/commit/1e93c9d2ebe2dab633a087aa7f8267de01b2ee52))
+
 ## [1.6.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.2...v1.6.3) (2026-11-01)
 
 ## [1.6.2](https://github.com/asepharyana/pr-agent-server/compare/v1.6.1...v1.6.2) (2026-10-30)
