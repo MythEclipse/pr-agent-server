@@ -183,6 +183,12 @@ export async function callWithFallback(opts: {
 const NO_SUPPORT_TEMPERATURE_MODELS = new Set([
 	"claude-opus-4-7",
 	"claude-opus-4-8",
+	// The 5.5 generation keeps the same no-temperature contract as 5.0; the
+	// older names stay listed so a pinned override behaves identically.
+	"claude-sonnet-5-5",
+	"anthropic/claude-sonnet-5-5",
+	"claude-opus-5-5",
+	"anthropic/claude-opus-5-5",
 	"claude-opus-5",
 	"anthropic/claude-opus-5",
 	"claude-sonnet-4-6",
