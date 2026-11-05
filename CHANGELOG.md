@@ -1,3 +1,10 @@
+## [1.7.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.7.0...v1.7.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* update handling of Dependabot PRs to offer fixes when CI is red ([0de94b3](https://github.com/MythEclipse/pr-agent-server/commit/0de94b3928bc90097d6876dc3c533290070a91d4))
+
 # [1.7.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.6.9...v1.7.0) (2026-11-05)
 
 
