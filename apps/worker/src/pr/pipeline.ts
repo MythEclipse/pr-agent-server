@@ -40,17 +40,14 @@
 import { LOCK_FILE } from "../lock.ts"
 import {
 	alreadyFixed,
-	attemptCount,
 	getSkipReason,
 	pruneClosedFixState,
-	shouldRetryAiFix,
 } from "../state.ts"
 import { runUpstreamSync } from "../sync/run.ts"
 import type { ReportPort } from "./autofix.ts"
 import { checkCiPassed } from "./ci.ts"
 import {
 	AI_FIX_ENABLED,
-	AI_FIX_RETRY_CEILING,
 	type Ctx,
 	ctime,
 	notifySkipOnce,
@@ -129,8 +126,10 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 	// maintenance does not spend an AI run when no fix is needed. Passing
 	// `already=true` also makes a mergeability conflict a wait, not an excuse
 	// to invoke Claude; the next tick can retry after GitHub updates the state.
+	let dependabotCiRed = false
 	if (c.author === "dependabot[bot]") {
 		const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+		dependabotCiRed = !ci.ok && !ci.unknown
 		if (ci.ok) {
 			deps.report.push(`   🤖 Dependabot CI green (${ci.msg}) — merging without AI review`)
 			c.score = "N/A"
@@ -144,28 +143,12 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 	if (review === null) return c.out // Triggered review: NOT a skip (line 1934).
 
 	let already = alreadyFixed(c.fixState, repo, c.prNum, c.headSha)
-	// The recorded "fixed" may have been "the agent found nothing to improve",
-	// which says nothing about whether the PR can merge. mcpedia#28 sat on
-	// `⏭️  Already fixed at this SHA` for 97 ticks while CI was red, because a
-	// vitest dev-dep bump has nothing for the agent to improve — and the blocker
-	// was CI config, which it never looks at. Re-offer the agent when, and only
-	// when, the recorded run produced no commit on a dependabot bump.
-	if (shouldRetryAiFix(c.fixState, repo, c.prNum, c.headSha, c.author)) {
-		// Re-offering is only safe with a bound, because the agent costs up to
-		// 1800s per run. `AI_FIX_RETRY_CEILING` is deliberately NOT a skip: past
-		// it the PR goes back to being counted as an ordinary red-CI wait, which
-		// is honest ("we tried, it did not help") and still lets the stale-close
-		// arm retire a dependabot bump that never turns green.
-		if (attemptCount(c.fixState, repo, c.prNum, c.headSha) >= AI_FIX_RETRY_CEILING) {
-			deps.report.push(
-				`   ⏭️  AI fix already re-offered ${AI_FIX_RETRY_CEILING}× at this SHA with no commit — leaving it to the CI gate`,
-			)
-		} else {
-			already = false
-			deps.report.push(
-				"   ♻️  Previous run produced no commit — offering the AI fix again (recorded 'fixed' did not unblock this PR)",
-			)
-		}
+	if (dependabotCiRed) {
+		// A prior fix record must not suppress recovery when the exact head is
+		// still red. The CI failure is new evidence and is precisely what Claude
+		// Code must be given a chance to repair.
+		already = false
+		deps.report.push("   🔧 Dependabot CI is red — offering Claude Code a fix")
 	}
 	const skipReason = getSkipReason(c.fixState, repo, c.prNum, c.headSha)
 	if (skipReason) {

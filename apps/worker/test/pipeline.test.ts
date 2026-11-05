@@ -924,15 +924,15 @@ describe("case 6 — red CI closes a stale dependabot PR and skips everyone else
 
 		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr: makePr(STALE) })
 
-		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
+		expect(out).toEqual({ merged: false, triggered: false, fixed: true, skipped: true })
 		expect(closes(h.calls)).toHaveLength(0)
-		expect(h.lines).toContain("   ⏭️  Already fixed at this SHA — skip AI fix")
+		expect(h.lines).toContain("   🔧 Dependabot CI is red — offering Claude Code a fix")
 		expect(h.lines).toContain("   🧪 CI: CI FAILED: typecheck")
 		expect(h.lines).toContain(
 			"   ⏳ CI failing 3.0d on a dependency bump — NOT closing it, the agent will keep fixing it",
 		)
 		expect(merges(h.calls)).toBe(0)
-		expect(h.agentPosts).toEqual([])
+		expect(h.agentPosts).not.toEqual([])
 	})
 
 	test("a HUMAN PR older than STALE_CI_CLOSE_DAYS is closed", async () => {
@@ -971,9 +971,10 @@ describe("case 6 — red CI closes a stale dependabot PR and skips everyone else
 			pr: makePr(LOCKFILE_BUMP),
 		})
 
-		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
+		expect(out).toEqual({ merged: false, triggered: false, fixed: true, skipped: true })
 		expect(closes(h.calls)).toHaveLength(0)
-		expect(h.lines).toContain("   ⏳ Waiting for green CI")
+		expect(h.lines).toContain("   🔧 Dependabot CI is red — offering Claude Code a fix")
+		expect(h.agentPosts).not.toEqual([])
 	})
 
 	test("a non-dependabot red-CI PR is skipped, never closed", async () => {
@@ -1589,7 +1590,10 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 			prs: [DEPENDABOT],
 			comments: [reviewComment(SAFE_REVIEW)],
 			fixState: noCommitFixState(0),
-			checkRunsReply: { status: 500, data: {} }, // red CI
+			checkRunsReply: {
+				status: 200,
+				data: { check_runs: [{ name: "typecheck", status: "completed", conclusion: "failure" }] },
+			},
 		})
 
 		await processPr(h.deps, {
@@ -1598,17 +1602,19 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 			pr: DEPENDABOT,
 		})
 
-		expect(h.lines.some((l) => l.includes("produced no commit"))).toBe(true)
 		// The whole point: the agent is actually asked, not merely announced.
 		expect(h.lines.some((l) => l.includes("Running Claude Code AI fix"))).toBe(true)
 	})
 
-	test("a fix that DID commit is not re-offered — that needs a human", async () => {
+	test("a fix that DID commit is re-offered while CI remains red", async () => {
 		const h = harness({
 			prs: [DEPENDABOT],
 			comments: [reviewComment(SAFE_REVIEW)],
 			fixState: noCommitFixState(2),
-			checkRunsReply: { status: 500, data: {} },
+			checkRunsReply: {
+				status: 200,
+				data: { check_runs: [{ name: "typecheck", status: "completed", conclusion: "failure" }] },
+			},
 		})
 
 		await processPr(h.deps, {
@@ -1617,8 +1623,8 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 			pr: DEPENDABOT,
 		})
 
-		expect(h.lines.some((l) => l.includes("produced no commit"))).toBe(false)
-		expect(h.lines).toContain("   ⏭️  Already fixed at this SHA — skip AI fix")
+		expect(h.lines).toContain("   🔧 Dependabot CI is red — offering Claude Code a fix")
+		expect(h.lines.some((l) => l.includes("Running Claude Code AI fix"))).toBe(true)
 	})
 
 	test("a HUMAN PR with a no-commit fix is not re-offered (author may be pushing)", async () => {
@@ -1626,7 +1632,10 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 			prs: [makePr()], // alice
 			comments: [reviewComment(SAFE_REVIEW)],
 			fixState: noCommitFixState(0),
-			checkRunsReply: { status: 500, data: {} },
+			checkRunsReply: {
+				status: 200,
+				data: { check_runs: [{ name: "typecheck", status: "completed", conclusion: "failure" }] },
+			},
 		})
 
 		await processPr(h.deps, ctx)
@@ -1634,10 +1643,7 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 		expect(h.lines.some((l) => l.includes("produced no commit"))).toBe(false)
 	})
 
-	test("the re-offer is bounded — it cannot become a 30-minute loop", async () => {
-		// One agent run is up to 1800s. Three re-offers is the ceiling, and past
-		// it the PR falls back to the ordinary red-CI wait (NOT a skip: a pin here
-		// would be a permanent stall, the exact bug fixed on 2026-10-15).
+	test("a red Dependabot PR is offered Claude even after prior retry attempts", async () => {
 		const h = harness({
 			prs: [DEPENDABOT],
 			comments: [reviewComment(SAFE_REVIEW)],
@@ -1651,7 +1657,10 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 					},
 				},
 			},
-			checkRunsReply: { status: 500, data: {} },
+			checkRunsReply: {
+				status: 200,
+				data: { check_runs: [{ name: "typecheck", status: "completed", conclusion: "failure" }] },
+			},
 		})
 
 		await processPr(h.deps, {
@@ -1660,10 +1669,8 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 			pr: DEPENDABOT,
 		})
 
-		expect(h.lines.some((l) => l.includes("already re-offered"))).toBe(true)
-		expect(h.lines.some((l) => l.includes("Running Claude Code AI fix"))).toBe(false)
-		// Bounded, not abandoned.
-		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
+		expect(h.lines).toContain("   🔧 Dependabot CI is red — offering Claude Code a fix")
+		expect(h.lines.some((l) => l.includes("Running Claude Code AI fix"))).toBe(true)
 	})
 })
 
