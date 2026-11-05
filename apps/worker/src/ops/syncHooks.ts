@@ -49,8 +49,25 @@ import { join } from "node:path"
 import { GitHubApi } from "../github.ts"
 import type { GhClient } from "../pr/scan.ts"
 
-/** The owner whose forks are synced — the brief's `GET /users/asepharyana/repos`. */
-export const OWNER = "asepharyana"
+/**
+ * The owner whose repos are synced.
+ *
+ * THIS IS THE PRIMARY ACCOUNT, AND IT USED TO BE THE BACKUP. It was
+ * `asepharyana` — the mirror destination — so every Dependabot config and
+ * workflow this module wrote landed on a repo that `push --mirror` overwrites
+ * from `MythEclipse` every 30 minutes. The writes appeared to succeed and were
+ * gone before the next run could read them back.
+ *
+ * `MythEclipse` is where Dependabot actually opens PRs (34 repos carry a
+ * Dependabot config there and had none of them the auto-merge workflow), and
+ * where the token this module uses has push access. `asepharyana` is a mirror
+ * of it: writes there are not just useless, they are erased.
+ *
+ * Overridable so a future cutover does not need a code change, but the default
+ * must name the primary — a wrong default here is invisible, because every
+ * write still returns 201.
+ */
+export const OWNER = process.env.PR_AGENT_SYNC_OWNER || "MythEclipse"
 
 /**
  * The webhook target, byte-exact from the brief. Also the DEFAULT for
@@ -110,8 +127,21 @@ const LEGACY_AUTO_MERGE_PATH = `${GITHUB_DIR}/${AUTO_MERGE_FILE}`
  */
 export const AUTO_MERGE_OPTOUT_LABEL = "dependabot-no-auto-merge"
 
-/** Python's `per_page=100` on the owner listing. */
-const REPO_LIST_PATH = `/users/${OWNER}/repos?per_page=100`
+/**
+ * The repo listing.
+ *
+ * `GET /user/repos?affiliation=owner`, NOT `GET /users/{owner}/repos`. The
+ * public listing returns only public repos: on this fleet it answers 62 for an
+ * account that owns 69, so five private repos that carry a Dependabot config
+ * would never be synced and would never show up as missing — the failure is an
+ * absence, exactly like the workflow at the wrong path.
+ *
+ * `/user/repos` is authenticated and returns the caller's own repos including
+ * private ones. `affiliation=owner` keeps it to repos this account owns rather
+ * than everything it can merely see (org membership, collaborator access),
+ * because the sync writes to each of them.
+ */
+const REPO_LIST_PATH = "/user/repos?affiliation=owner&per_page=100"
 
 /**
  * `GhClient`, plus the one optional method this module uses to self-resolve a
