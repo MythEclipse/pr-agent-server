@@ -16,7 +16,11 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest"
-import { runSyncHooks, type SyncHooksDeps } from "../src/ops/syncHooks.ts"
+import {
+	AUTO_MERGE_OPTOUT_LABEL,
+	runSyncHooks,
+	type SyncHooksDeps,
+} from "../src/ops/syncHooks.ts"
 
 const TEMPLATE_DIR = join(import.meta.dirname, "..", "src", "ops", "templates")
 
@@ -32,7 +36,15 @@ const EVENTS = [
 
 const DEPENDABOT_PATH = ".github/dependabot.yml"
 const GMW_DEPENDABOT_PATH = ".github/dependabot-gmw.yml"
-const AUTO_MERGE_PATH = ".github/dependabot-auto-merge.yml"
+/**
+ * `.github/workflows`, NOT `.github`. GitHub executes a workflow file only from
+ * this directory, and the auto-merge template was installed one level up — so
+ * for as long as it has existed it was never scheduled once. Pinning the
+ * executable path here is what stops that regression coming back.
+ */
+const AUTO_MERGE_PATH = ".github/workflows/dependabot-auto-merge.yml"
+/** The old, non-executable home. The sync deletes it; nothing may install it. */
+const LEGACY_AUTO_MERGE_PATH = ".github/dependabot-auto-merge.yml"
 
 const template = (name: string) => readFileSync(join(TEMPLATE_DIR, name), "utf8")
 const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64")
@@ -43,7 +55,7 @@ const unb64 = (text: string) => Buffer.from(text, "base64").toString("utf8")
 type Recorded = { method: string; path: string; token?: string; json?: any }
 
 /** Per-repo world: which hooks exist, and which files exist with what content. */
-type Fixture = { hooks?: any[]; files?: Record<string, string> }
+type Fixture = { hooks?: any[]; files?: Record<string, string>; labels?: string[] }
 
 type Fake = { api: NonNullable<SyncHooksDeps["api"]>; calls: Recorded[] }
 
@@ -71,7 +83,28 @@ function fakeApi(repos: string[], fixtures: Record<string, Fixture> = {}): Fake 
 		if (method === "POST" && /\/repos\/([^/]+\/[^/]+)\/hooks$/.test(path)) {
 			return { status: 201, data: { id: 1 } }
 		}
-		const content = /^(GET|PUT) \/repos\/([^/]+\/[^/]+)\/contents\/(.+)$/.exec(`${method} ${path}`)
+		// Labels: 404 when absent, 201 when created, 422 when it already exists.
+		// The repo capture is `owner/repo` in ONE group — capturing only `[^/]+`
+		// silently keys the fixture lookup by owner, so every per-repo fixture
+		// misses and the fake answers as if nothing existed.
+		const label = /^(GET|POST) \/repos\/([^/]+\/[^/]+)\/labels(?:\/(.+))?$/.exec(
+			`${method} ${path}`,
+		)
+		if (label) {
+			const held = fixtures[label[2]]?.labels ?? []
+			if (method === "GET") {
+				return held.includes(label[3] ?? "")
+					? { status: 200, data: { name: label[3] } }
+					: { status: 404, data: { message: "Not Found" } }
+			}
+			const name = String((opts.json as { name?: string } | undefined)?.name ?? "")
+			return held.includes(name)
+				? { status: 422, data: { message: "already_exists" } }
+				: { status: 201, data: { name } }
+		}
+		const content = /^(GET|PUT|DELETE) \/repos\/([^/]+\/[^/]+)\/contents\/(.+)$/.exec(
+			`${method} ${path}`,
+		)
 		if (content) {
 			const files = fixtures[content[2]]?.files ?? {}
 			if (method === "GET") {
@@ -81,6 +114,12 @@ function fakeApi(repos: string[], fixtures: Record<string, Fixture> = {}): Fake 
 					status: 200,
 					data: { sha: `sha-of-${content[3]}`, encoding: "base64", content: b64(held) },
 				}
+			}
+			// DELETE answers 204 with no body on a real delete, and 404 when the
+			// file is already gone — which is the converged state for the sync.
+			if (method === "DELETE") {
+				if (files[content[3]] === undefined) return { status: 404, data: {} }
+				return { status: 204, data: undefined }
 			}
 			return { status: 200, data: { content: { sha: "new-sha" } } }
 		}
@@ -126,8 +165,10 @@ describe("runSyncHooks > the pr-agent webhook", () => {
 			events: EVENTS,
 			config: { url: PR_AGENT_URL, content_type: "json", secret: "s3cr3t-value" },
 		})
-		expect(res.ok).toBe(3)
-		expect(res.skip).toBe(0)
+		// hook + Dependabot config + auto-merge workflow + opt-out label = 4
+		// writes; the legacy-path sweep finds nothing to delete (1 skip).
+		expect(res.ok).toBe(4)
+		expect(res.skip).toBe(1)
 	})
 
 	// Group 1 again: the events list is an ordered set, and an order or spelling
@@ -170,9 +211,10 @@ describe("runSyncHooks > an existing hook", () => {
 
 		expect(hookPosts(calls)).toHaveLength(0)
 		expect(of(calls, "GET", "/repos/asepharyana/GMW/hooks")).toHaveLength(1)
-		// The hook is the only skip; the two files were absent, so they were written.
-		expect(res.ok).toBe(2)
-		expect(res.skip).toBe(1)
+		// The hook and the legacy sweep are the only skips; both files were
+		// absent and the label did not exist, so those three were written.
+		expect(res.ok).toBe(3)
+		expect(res.skip).toBe(2)
 	})
 
 	// A hook pointing somewhere else is NOT the pr-agent hook. Skipping on a
@@ -212,16 +254,79 @@ describe("runSyncHooks > dependabot templates", () => {
 		).toHaveLength(0)
 	})
 
-	// Group 3: the auto-merge file is installed on EVERY repo, GMW included.
-	test("installs the auto-merge template on every repo", async () => {
+	// Group 3: the auto-merge WORKFLOW is installed on EVERY repo, GMW included,
+	// at the one path GitHub executes.
+	test("installs the auto-merge workflow on every repo, under .github/workflows", async () => {
 		const { api, calls } = fakeApi(["asepharyana/GMW", "asepharyana/Other"])
 		await runSyncHooks({ api, ghToken: "pat" })
 
 		const auto = contentPuts(calls).filter((c) => c.path.endsWith(AUTO_MERGE_PATH))
 		expect(auto.map((c) => c.path).sort()).toEqual([
-			"/repos/asepharyana/GMW/contents/.github/dependabot-auto-merge.yml",
-			"/repos/asepharyana/Other/contents/.github/dependabot-auto-merge.yml",
+			"/repos/asepharyana/GMW/contents/.github/workflows/dependabot-auto-merge.yml",
+			"/repos/asepharyana/Other/contents/.github/workflows/dependabot-auto-merge.yml",
 		])
+	})
+
+	// The regression this exists for: the template used to be installed at
+	// `.github/dependabot-auto-merge.yml`, which GitHub never executes. A file
+	// there looked configured and was inert — `GET /repos/{r}/actions/workflows`
+	// on a repo holding it listed only ci.yml, deploy.yml and release.yml.
+	test("never installs the workflow at the non-executable .github/ path", async () => {
+		const { api, calls } = fakeApi(["asepharyana/GMW"])
+		await runSyncHooks({ api, ghToken: "pat" })
+
+		expect(contentPuts(calls).filter((c) => c.path.endsWith(LEGACY_AUTO_MERGE_PATH))).toHaveLength(0)
+	})
+
+	// The workflow's escape hatch is a label. A label that does not exist cannot
+	// be applied, so a repo without it has no way to hold a bump back.
+	test("creates the auto-merge opt-out label on every repo", async () => {
+		const { api, calls } = fakeApi(["asepharyana/GMW", "asepharyana/Other"])
+		await runSyncHooks({ api, ghToken: "pat" })
+
+		const posts = calls.filter((c) => c.method === "POST" && c.path.endsWith("/labels"))
+		expect(posts.map((c) => c.path).sort()).toEqual([
+			"/repos/asepharyana/GMW/labels",
+			"/repos/asepharyana/Other/labels",
+		])
+		expect(posts[0].json.name).toBe(AUTO_MERGE_OPTOUT_LABEL)
+	})
+
+	test("does not re-create a label that already exists", async () => {
+		const { api, calls } = fakeApi(["asepharyana/Other"], {
+			"asepharyana/Other": { labels: [AUTO_MERGE_OPTOUT_LABEL] },
+		})
+		const res = await runSyncHooks({ api, ghToken: "pat" })
+
+		expect(calls.filter((c) => c.method === "POST" && c.path.endsWith("/labels"))).toHaveLength(0)
+		expect(res.lines.some((l) => l.includes("label already present"))).toBe(true)
+	})
+
+	// The stale copy is retired, not left behind next to the working one.
+	test("deletes the legacy .github/dependabot-auto-merge.yml copy", async () => {
+		const { api, calls } = fakeApi(["asepharyana/Other"], {
+			"asepharyana/Other": { files: { [LEGACY_AUTO_MERGE_PATH]: "name: stale\n" } },
+		})
+		const res = await runSyncHooks({ api, ghToken: "pat" })
+
+		const deletes = calls.filter(
+			(c) => c.method === "DELETE" && c.path.endsWith(`/contents/${LEGACY_AUTO_MERGE_PATH}`),
+		)
+		expect(deletes).toHaveLength(1)
+		// The sha is mandatory: without it GitHub refuses, and without reading it
+		// first this could delete a file it never inspected.
+		expect(deletes[0].json.sha).toBe(`sha-of-${LEGACY_AUTO_MERGE_PATH}`)
+		expect(res.lines.some((l) => l.includes("removed (stale path)"))).toBe(true)
+	})
+
+	// Idempotent: once removed, a second run issues no DELETE and reports it as
+	// already absent, so the daily sync does not churn a 404 into a failure.
+	test("does not DELETE when the legacy copy is already gone", async () => {
+		const { api, calls } = fakeApi(["asepharyana/Other"])
+		const res = await runSyncHooks({ api, ghToken: "pat" })
+
+		expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0)
+		expect(res.lines.some((l) => l.includes("already absent"))).toBe(true)
 	})
 
 	// The body has to be the real file, base64-encoded as the contents API
@@ -250,9 +355,12 @@ describe("runSyncHooks > no webhook secret", () => {
 		expect(hookPosts(calls)).toHaveLength(0)
 		// Not even the read: the step is not entered, not merely not written.
 		expect(calls.filter((c) => c.path.endsWith("/hooks"))).toHaveLength(0)
-		// The file half of the work still runs.
+		// The file half of the work still runs: per repo that is the Dependabot
+		// config, the auto-merge workflow and the opt-out label (3 writes each),
+		// plus the legacy-path sweep, which finds nothing to delete (1 skip each).
 		expect(contentPuts(calls).length).toBe(4)
-		expect(res.ok).toBe(4)
+		expect(res.ok).toBe(6)
+		expect(res.skip).toBe(2)
 	})
 
 	test("treats an empty string the same as an absent secret", async () => {
@@ -294,12 +402,14 @@ describe("runSyncHooks > the summary", () => {
 		})
 		const res = await runSyncHooks({ api, ghToken: "pat", webhookSecret: "s" })
 
-		// GMW: 1 hook + 2 files = 3 writes. Other: 3 no-ops.
-		expect(res.ok).toBe(3)
-		expect(res.skip).toBe(3)
-		expect(res.lines).toHaveLength(6)
-		expect(res.lines.filter((l) => l.includes("asepharyana/GMW"))).toHaveLength(3)
-		expect(res.lines.filter((l) => l.includes("asepharyana/Other"))).toHaveLength(3)
+		// GMW: 1 hook + 2 files + 1 label = 4 writes, and the legacy sweep finds
+		// nothing (1 skip) — 5 lines. Other: 3 no-ops (hook and both files) plus
+		// the same sweep skip, and its label is a write — 5 lines.
+		expect(res.ok).toBe(5)
+		expect(res.skip).toBe(5)
+		expect(res.lines).toHaveLength(10)
+		expect(res.lines.filter((l) => l.includes("asepharyana/GMW"))).toHaveLength(5)
+		expect(res.lines.filter((l) => l.includes("asepharyana/Other"))).toHaveLength(5)
 	})
 
 	// The conditional write: a file that already matches is a skip, not a write.
@@ -317,8 +427,10 @@ describe("runSyncHooks > the summary", () => {
 
 		expect(contentPuts(calls)).toHaveLength(0)
 		expect(of(calls, "GET", `/repos/asepharyana/Other/contents/${DEPENDABOT_PATH}`)).toHaveLength(1)
-		expect(res.ok).toBe(0)
-		expect(res.skip).toBe(2)
+		// The only write is the opt-out label, which no fixture provides.
+		expect(res.ok).toBe(1)
+		// 2 converged files + the legacy sweep finding nothing.
+		expect(res.skip).toBe(3)
 	})
 
 	// A differing file is written WITH the sha — GitHub rejects a content PUT
@@ -333,7 +445,8 @@ describe("runSyncHooks > the summary", () => {
 		expect(put).toBeDefined()
 		expect(put?.json.sha).toBe(`sha-of-${DEPENDABOT_PATH}`)
 		expect(unb64(put?.json.content)).toBe(template("dependabot.yml"))
-		expect(res.ok).toBe(2) // the dependabot rewrite + the auto-merge create
+		// the dependabot rewrite + the auto-merge create + the label create
+		expect(res.ok).toBe(3)
 	})
 
 	// A file that does not exist yet is a CREATE: no sha exists to send.
@@ -357,8 +470,11 @@ describe("runSyncHooks > the summary", () => {
 		}
 		const res = await runSyncHooks({ api: failing, ghToken: "pat" })
 
-		expect(res.ok).toBe(0)
-		expect(res.skip).toBe(2)
+		// The label POST is not a PUT, so it still succeeds; the two file writes
+		// are the ones rejected.
+		expect(res.ok).toBe(1)
+		// 2 rejected writes + the legacy sweep finding nothing to delete.
+		expect(res.skip).toBe(3)
 		expect(res.lines.join("\n")).toContain("asepharyana/Other")
 		expect(res.lines.join("\n")).toContain("405")
 	})
@@ -376,8 +492,11 @@ describe("runSyncHooks > the summary", () => {
 		const res = await runSyncHooks({ api: unreadable, ghToken: "pat" })
 
 		expect(contentPuts(calls)).toHaveLength(0)
-		expect(res.ok).toBe(0)
-		expect(res.skip).toBe(2)
+		// The label GET is a /labels/ path, not /contents/, so it is unaffected
+		// and the label is still created.
+		expect(res.ok).toBe(1)
+		// 2 unreadable files + the legacy sweep, also unreadable.
+		expect(res.skip).toBe(3)
 		expect(res.lines.join("\n")).toContain("403")
 	})
 
@@ -406,7 +525,8 @@ describe("runSyncHooks > the summary", () => {
 		const { api, calls } = fakeApi(["asepharyana/GMW"])
 		const res = await runSyncHooks({ api, ghToken: "pat" })
 		expect(of(calls, "GET", "/users/asepharyana/repos?per_page=100")).toHaveLength(1)
-		expect(res.ok).toBe(2)
+		// Dependabot config + auto-merge workflow + opt-out label.
+		expect(res.ok).toBe(3)
 	})
 })
 

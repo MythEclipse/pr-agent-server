@@ -4,9 +4,11 @@
  * job, replacing `~/.hermes/scripts/pr-ops-notifier.py`.
  *
  * WHAT IT DOES, per fork under `asepharyana`: make sure the pr-agent webhook
- * exists, and make sure the two Dependabot config files match the templates
- * this module ships. Every action is reported, so the operator-facing summary
- * says exactly what changed and what was already correct.
+ * exists, make sure the Dependabot config file matches the template this module
+ * ships, make sure the Dependabot auto-merge workflow is installed at the ONE
+ * path GitHub executes, and make sure the label that workflow gates on exists.
+ * Every action is reported, so the operator-facing summary says exactly what
+ * changed and what was already correct.
  *
  * FOUR INVARIANTS, each of which has already cost this repo a bug:
  *
@@ -79,9 +81,34 @@ const DEPENDABOT_FILE = "dependabot.yml"
 const GMW_DEPENDABOT_FILE = "dependabot-gmw.yml"
 const AUTO_MERGE_FILE = "dependabot-auto-merge.yml"
 const GITHUB_DIR = ".github"
+/**
+ * `.github/workflows`, NOT `.github`. GitHub executes workflow files from this
+ * directory only, and the auto-merge template was installed one level up for
+ * as long as it has existed — so it was never scheduled once. The evidence is
+ * an absence: `GET /repos/{repo}/actions/workflows` on a repo carrying the old
+ * copy lists ci.yml, deploy.yml and release.yml, and nothing else. The file was
+ * there, in sync, and inert.
+ *
+ * The Dependabot CONFIG files below stay directly in `.github/`, because that
+ * is where Dependabot reads them from. Only the workflow moves.
+ */
+const WORKFLOWS_DIR = `${GITHUB_DIR}/workflows`
 const DEPENDABOT_PATH = `${GITHUB_DIR}/${DEPENDABOT_FILE}`
 const GMW_DEPENDABOT_PATH = `${GITHUB_DIR}/${GMW_DEPENDABOT_FILE}`
-const AUTO_MERGE_PATH = `${GITHUB_DIR}/${AUTO_MERGE_FILE}`
+const AUTO_MERGE_PATH = `${WORKFLOWS_DIR}/${AUTO_MERGE_FILE}`
+/**
+ * Where the auto-merge workflow used to be installed, and where nothing executes
+ * it. Kept only so the sync can delete it — see `removeStaleFile`.
+ */
+const LEGACY_AUTO_MERGE_PATH = `${GITHUB_DIR}/${AUTO_MERGE_FILE}`
+
+/**
+ * The one label the auto-merge workflow gates on, and the reason the sync
+ * creates it: a label that does not exist cannot be applied, so the escape
+ * hatch would be documented and unreachable. Must match the `if:` in
+ * `templates/dependabot-auto-merge.yml` — the pair is the feature.
+ */
+export const AUTO_MERGE_OPTOUT_LABEL = "dependabot-no-auto-merge"
 
 /** Python's `per_page=100` on the owner listing. */
 const REPO_LIST_PATH = `/users/${OWNER}/repos?per_page=100`
@@ -244,7 +271,53 @@ async function syncHook(api: GhClient, repo: string, token: string, secret: stri
 }
 
 /**
- * Step 2/3 — make sure one repo file matches its template.
+ * Step 2/4 — make sure the auto-merge opt-out label exists.
+ *
+ * WHY A LABEL IS PART OF THIS SYNC. The workflow's escape hatch is "apply
+ * `dependabot-no-auto-merge` and the bump stays open". A label that does not
+ * exist cannot be applied from the UI, so on a fresh repo the escape hatch is
+ * unreachable and every bump merges — the gate would be documented and
+ * unusable, which is the same class of failure as the workflow installed at a
+ * path nothing executes.
+ *
+ * IDEMPOTENT: `GET /repos/{repo}/labels/{name}` answering 200 means it is
+ * already there. Any other status is treated as "unknown" and the POST is
+ * attempted, because a label that already exists answers 422 and that is a
+ * harmless outcome — whereas skipping on a failed read would leave the label
+ * missing while the report said it was fine.
+ */
+async function syncOptOutLabel(api: GhClient, repo: string, token: string): Promise<Step> {
+	const existing = await api.request("GET", `/repos/${repo}/labels/${AUTO_MERGE_OPTOUT_LABEL}`, {
+		token,
+	})
+	if (existing.status === 200) {
+		return { ok: false, line: `⏭️  ${repo}: \`${AUTO_MERGE_OPTOUT_LABEL}\` label already present` }
+	}
+
+	const created = await api.request("POST", `/repos/${repo}/labels`, {
+		token,
+		json: {
+			name: AUTO_MERGE_OPTOUT_LABEL,
+			color: "fbca04",
+			description: "Keep this Dependabot PR open — do not auto-merge it",
+		},
+	})
+	// 422 is "already exists" (a race with another run, or a label created by
+	// hand between the GET and the POST). That is the desired end state.
+	if (created.status === 200 || created.status === 201) {
+		return { ok: true, line: `✅ ${repo}: \`${AUTO_MERGE_OPTOUT_LABEL}\` label created` }
+	}
+	if (created.status === 422) {
+		return { ok: false, line: `⏭️  ${repo}: \`${AUTO_MERGE_OPTOUT_LABEL}\` label already exists` }
+	}
+	return {
+		ok: false,
+		line: `⏭️  ${repo}: \`${AUTO_MERGE_OPTOUT_LABEL}\` label not created (HTTP ${created.status})`,
+	}
+}
+
+/**
+ * Step 3/4 — make sure one repo file matches its template.
  *
  * `GET` the current file, compare decoded bytes, and `PUT` only on a
  * difference:
@@ -309,6 +382,64 @@ async function syncFile(
 	return {
 		ok: false,
 		line: `⏭️  ${repo}: \`${path}\` unreadable (HTTP ${current.status}) — left alone`,
+	}
+}
+
+/**
+ * Retire a file that the sync used to install at a path nothing reads.
+ *
+ * WHY A DELETE BELONGS IN A SYNC. `AUTO_MERGE_PATH` moved from `.github/` to
+ * `.github/workflows/`, and a conditional write can only ever create or update —
+ * so without this step every repo would keep the old inert copy forever, next to
+ * the working one. Two files with the same name, one of them silently dead, is
+ * worse than either alone: the next person to debug auto-merge reads the wrong
+ * one.
+ *
+ * IDEMPOTENT BY CONSTRUCTION. A 404 means the file is already gone, which is the
+ * desired state, so it reports a skip rather than an error. Every other
+ * non-2xx is reported as a failure and changes nothing.
+ *
+ * The `sha` is required by the DELETE API and is read from the same GET, so this
+ * can never remove a file it did not just inspect.
+ */
+async function removeStaleFile(
+	api: GhClient,
+	repo: string,
+	path: string,
+	token: string,
+): Promise<Step> {
+	const apiPath = `/repos/${repo}/contents/${path}`
+	const current = await api.request("GET", apiPath, { token })
+
+	// 404 is the converged state, not a failure: nothing to remove.
+	if (current.status === 404) {
+		return { ok: false, line: `⏭️  ${repo}: \`${path}\` already absent` }
+	}
+	if (current.status !== 200) {
+		return {
+			ok: false,
+			line: `⏭️  ${repo}: \`${path}\` unreadable (HTTP ${current.status}) — left alone`,
+		}
+	}
+
+	const sha = str(asObject(current.data)?.sha)
+	if (!sha) {
+		return {
+			ok: false,
+			line: `⏭️  ${repo}: \`${path}\` has no sha — cannot delete safely`,
+		}
+	}
+
+	const removed = await api.request("DELETE", apiPath, {
+		token,
+		json: { message: `chore(deps): remove \`${path}\` — it lives in .github/workflows/`, sha },
+	})
+	if (removed.status === 200 || removed.status === 204) {
+		return { ok: true, line: `✅ ${repo}: \`${path}\` removed (stale path)` }
+	}
+	return {
+		ok: false,
+		line: `⏭️  ${repo}: \`${path}\` not removed (HTTP ${removed.status})`,
 	}
 }
 
@@ -386,9 +517,17 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 					token,
 				),
 			)
-			// The auto-merge config goes to EVERY repo, GMW included. Read that twice:
-			// the gmw Dependabot variant is GMW-only, the auto-merge file is not.
+			// The auto-merge WORKFLOW goes to EVERY repo, GMW included. Read that
+			// twice: the gmw Dependabot variant is GMW-only, the workflow is not.
 			record(await syncFile(api, repo, AUTO_MERGE_PATH, templateBody(AUTO_MERGE_FILE), token))
+			// The workflow's escape hatch is a label, so the label has to exist on
+			// every repo or the gate is documented and unusable.
+			record(await syncOptOutLabel(api, repo, token))
+			// And the copy at the old, non-executable path is retired. Without
+			// this the fleet keeps an inert duplicate forever, because a
+			// conditional write can only create or update — it never cleans up a
+			// path that stopped being used.
+			record(await removeStaleFile(api, repo, LEGACY_AUTO_MERGE_PATH, token))
 		}
 
 		return { ok, skip, lines }
