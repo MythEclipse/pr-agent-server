@@ -12,7 +12,7 @@ import { Card, CardContent } from "#/components/ui/card.tsx"
 import { Input } from "#/components/ui/input.tsx"
 import { formatWhen } from "#/libs/format-when.ts"
 import { orpc } from "#/libs/orpc/client.ts"
-import { reviewKeys } from "./_apis/review-keys.ts"
+import { reviewKeys } from "./-apis/review-keys.ts"
 
 export const Route = createFileRoute("/_authenticated/reviews/")({
 	validateSearch: (search: Record<string, unknown>): { status?: string } => ({

@@ -135,29 +135,21 @@ export async function startApp(options: StartOptions = {}) {
 	const runJob = async (job: { owner: string; repo: string; pr: number }): Promise<void> => {
 		const reviewId = await history.start({ owner: job.owner, repo: job.repo, pr: job.pr })
 		try {
-			const result = await useCases.legacy.runReview(job.owner, job.repo, job.pr)
-			// `runReview` is typed `unknown` through the use-case port (it keeps the
-			// legacy signature), so the fields this needs are narrowed here rather
-			// than widening the port for one caller.
-			const r = result as {
-				model?: string
-				servedModel?: string
-				markdown?: string
-				data?: Record<string, unknown> | null
-				headSha?: string
-			} | null
+			// The port returns a real `ReviewResult`, so the fields below are typed
+			// rather than hand-cast from `unknown`.
+			const r = await useCases.legacy.runReview(job.owner, job.repo, job.pr)
 			await history.finish(reviewId, {
 				owner: job.owner,
 				repo: job.repo,
 				pr: job.pr,
 				status: "success",
-				model: r?.model,
+				model: r.model,
 				// The honest attribution. The gateway rewrites `claude-sonnet-5`
 				// to a free-tier model and only this field reveals it.
-				servedModel: r?.servedModel,
-				markdown: r?.markdown,
-				score: extractReviewScore(r?.data ?? null),
-				headSha: r?.headSha,
+				servedModel: r.servedModel,
+				markdown: r.markdown,
+				score: extractReviewScore(r.data ?? null),
+				headSha: r.headSha,
 			})
 		} catch (err) {
 			// Rethrown, not logged-and-swallowed. `db-review-queue` records a

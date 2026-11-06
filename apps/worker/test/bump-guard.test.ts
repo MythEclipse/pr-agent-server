@@ -128,7 +128,8 @@ describe("findBadBump — the @moonrepo/cli@2.6.3 shape", () => {
 			TITLE_263,
 			registry({ "@moonrepo/cli@2.6.3": MOON_CLI_263 }, absent),
 		)
-		const body = badBumpComment(bad!)
+		if (!bad) throw new Error("the 2.6.3 bump must be detected as a bad bump")
+		const body = badBumpComment(bad)
 
 		expect(body).toContain("unshippable dependency bump")
 		expect(body).toContain("npm view @moonrepo/cli@2.6.3 optionalDependencies")

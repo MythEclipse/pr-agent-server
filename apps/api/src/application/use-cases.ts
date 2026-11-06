@@ -4,6 +4,7 @@
 
 import type { TReview } from "../domain/review/review.ts"
 import type { ReviewRepository } from "../domain/review/review-repository.ts"
+import type { ReviewResult } from "../legacy/tools/review.ts"
 import { makeGetReview } from "./review/get-review.ts"
 import { makeListReviews } from "./review/list-reviews.ts"
 
@@ -16,7 +17,7 @@ export interface UseCaseDeps {
 	 * that are already covered by 48 passing tests.
 	 */
 	legacy: {
-		runReview: (owner: string, repo: string, pr: number) => Promise<unknown>
+		runReview: (owner: string, repo: string, pr: number) => Promise<ReviewResult>
 		runDescribe: (owner: string, repo: string, pr: number) => Promise<unknown>
 		runImprove: (owner: string, repo: string, pr: number) => Promise<unknown>
 	}

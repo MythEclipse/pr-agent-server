@@ -43,6 +43,13 @@ function fakeSpawn(
 	return Object.assign(spawn, { seen })
 }
 
+/** The one recorded spawn. Fails the test by name instead of a bare `!`. */
+function only(seen: { argv: string[]; cwd: string; env: NodeJS.ProcessEnv }[]) {
+	const first = seen[0]
+	if (!first) throw new Error(`expected exactly one spawn, saw none`)
+	return first
+}
+
 function client(spawn: Spawner, opts: Record<string, unknown> = {}) {
 	process.env.ANTHROPIC_AUTH_TOKEN = KEY
 	return new AgentClient({
@@ -56,11 +63,16 @@ function client(spawn: Spawner, opts: Record<string, unknown> = {}) {
 describe("AgentClient — Claude Code CLI", () => {
 	test("invokes the CLI non-interactively with skip-permissions in the worktree", async () => {
 		const spawn = fakeSpawn()
-		const r = await client(spawn).post("do the thing", { workdir: "/tmp/wd", timeoutSec: 60 })
+		// The gateway is passed explicitly: this asserts that the client hands the
+		// CONFIGURED base URL to the CLI, not that the host environment is clean.
+		const r = await client(spawn, { baseUrl: DEFAULT_ANTHROPIC_BASE_URL }).post("do the thing", {
+			workdir: "/tmp/wd",
+			timeoutSec: 60,
+		})
 
 		expect(r.ok).toBe(true)
 		expect(spawn.seen).toHaveLength(1)
-		const { argv, cwd, env } = spawn.seen[0]!
+		const { argv, cwd, env } = only(spawn.seen)
 
 		// Non-interactive: -p reads the prompt from argv and exits. Without it the
 		// CLI opens an interactive TUI and the tick hangs forever.
@@ -104,8 +116,9 @@ describe("AgentClient — Claude Code CLI", () => {
 		const spawn = fakeSpawn()
 		await client(spawn).post("x", { workdir: "/tmp/wd" })
 
-		expect(spawn.seen[0]!.env.ANTHROPIC_API_KEY).toBe("")
-		expect(spawn.seen[0]!.env.ANTHROPIC_AUTH_TOKEN).toBe(KEY)
+		const { env } = only(spawn.seen)
+		expect(env.ANTHROPIC_API_KEY).toBe("")
+		expect(env.ANTHROPIC_AUTH_TOKEN).toBe(KEY)
 		delete process.env.ANTHROPIC_API_KEY
 	})
 
@@ -117,7 +130,7 @@ describe("AgentClient — Claude Code CLI", () => {
 		const spawn = fakeSpawn()
 		await client(spawn).post("x", { workdir: "/tmp/wd" })
 
-		const env = spawn.seen[0]!.env
+		const env = only(spawn.seen).env
 		expect(env.SHELL).toBe("/bin/sh")
 		expect(env.PATH).toContain("/usr/local/bin")
 		expect(env.PATH).toContain("/usr/bin")
@@ -137,7 +150,7 @@ describe("AgentClient — Claude Code CLI", () => {
 		const spawn = fakeSpawn()
 		try {
 			await client(spawn).post("x", { workdir: "/tmp/wd" })
-			expect(spawn.seen[0]!.env[name]).toBeUndefined()
+			expect(only(spawn.seen).env[name]).toBeUndefined()
 		} finally {
 			delete process.env[name]
 		}
@@ -152,7 +165,7 @@ describe("AgentClient — Claude Code CLI", () => {
 		const spawn = fakeSpawn()
 		try {
 			await client(spawn).post("x", { workdir: "/tmp/wd" })
-			const env = spawn.seen[0]!.env
+			const env = only(spawn.seen).env
 			expect(env.GITHUB_WEBHOOK_SECRET).toBe("sig")
 			expect(env.PR_AGENT_MODEL).toBe("m")
 		} finally {
@@ -311,8 +324,9 @@ describe("AgentClient — Claude Code CLI", () => {
 			fork: "o/repo",
 		})
 		expect(r.ok).toBe(true)
-		expect(spawn.seen[0]!.cwd).toBe("/tmp/sync")
-		expect(spawn.seen[0]!.argv[spawn.seen[0]!.argv.length - 1]).toBe("reconcile")
+		expect(only(spawn.seen).cwd).toBe("/tmp/sync")
+		const argv = only(spawn.seen).argv
+		expect(argv[argv.length - 1]).toBe("reconcile")
 	})
 
 	// Byte-exact: this string is what tells the agent not to push, so it is

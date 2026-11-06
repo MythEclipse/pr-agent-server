@@ -6,7 +6,7 @@
 
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router"
 import { authClient } from "#/libs/auth/client.ts"
-import { SignOutButton } from "./_authenticated/_components/sign-out-button.tsx"
+import { SignOutButton } from "./_authenticated/-components/sign-out-button.tsx"
 
 export const Route = createFileRoute("/_authenticated")({
 	beforeLoad: async () => {

@@ -69,9 +69,12 @@ function resolveLimit() {
  * @returns {string} markdown release body, guaranteed not to exceed the cap
  *   by more than the elision marker's own length
  */
+// `options` is unused ON PURPOSE: semantic-release calls this with (context,
+// options), and dropping the parameter would change the arity it documents.
+// biome-ignore lint/correctness/noUnusedFunctionParameters: signature parity
 function writeReleaseNotes(context, options) {
 	const limit = resolveLimit()
-	const notes = context && context.nextRelease ? context.nextRelease.notes : undefined
+	const notes = context?.nextRelease?.notes
 
 	if (!notes) return ""
 

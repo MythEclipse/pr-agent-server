@@ -32,7 +32,7 @@ const VALID = `code_suggestions:
 
 describe("improve suggestions parsing", () => {
 	test("parses a fenced YAML body into suggestions", () => {
-		const out = parseSuggestionsYaml("```yaml\n" + VALID + "```")
+		const out = parseSuggestionsYaml(`\`\`\`yaml\n${VALID}\`\`\``)
 		expect(out).not.toBeNull()
 		expect(out).toHaveLength(1)
 		expect(out?.[0]?.relevant_file).toBe("src/app.ts")

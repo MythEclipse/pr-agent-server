@@ -757,7 +757,7 @@ const expectedPrompt = (title: string, baseRef: string, files: string[]) => {
 	)
 }
 
-describe("runAiFix", () => {
+describe("runAiFix — worktree, prompt and push", () => {
 	const DIFF = { "diff --name-only": { code: 0, stdout: "src/a.ts\nsrc/b.ts\n" } }
 
 	test("the workdir comes from the shared TMP_BASE, and the three flows cannot collide", async () => {

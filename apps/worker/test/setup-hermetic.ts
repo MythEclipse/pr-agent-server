@@ -37,12 +37,30 @@ const LIVE_ENV_VARS = [
 ] as const
 
 /**
+ * Agent/gateway variables the host may already export.
+ *
+ * Unlike LIVE_ENV_VARS these do not notify anyone, but they silently change what
+ * a test observes: `AgentClient` resolves its base URL as
+ * `opts.baseUrl ?? $ANTHROPIC_BASE_URL ?? DEFAULT`, so a developer running the
+ * suite from a shell that points at a local gateway failed the "env is handed to
+ * the CLI" test for a reason that had nothing to do with the code. A test that
+ * cares about these sets them explicitly; everything else sees the defaults.
+ */
+const AGENT_ENV_VARS = [
+	"ANTHROPIC_BASE_URL",
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"PR_AGENT_CLAUDE_MODEL",
+] as const
+
+/**
  * Captured so a later re-set is detectable, and cleared again in `beforeEach`:
  * one test file setting a value must not make the next file leak, and the whole
  * point of this file is that the default is "no live URL anywhere".
  */
 function stripLiveEnv(): void {
 	for (const key of LIVE_ENV_VARS) delete process.env[key]
+	for (const key of AGENT_ENV_VARS) delete process.env[key]
 }
 
 stripLiveEnv()

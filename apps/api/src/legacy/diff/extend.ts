@@ -27,8 +27,7 @@ export function extendPatch(
 
 	const allowDynamicContext = cfg?.allowDynamicContext ?? true
 	const maxDynamicBefore = cfg?.maxExtraLinesBeforeDynamicContext ?? 10
-	const patchExtraBeforeDynamic =
-		maxDynamicBefore > MAX_EXTRA_LINES ? MAX_EXTRA_LINES : maxDynamicBefore
+	const patchExtraBeforeDynamic = Math.min(maxDynamicBefore, MAX_EXTRA_LINES)
 
 	const fileOriginalLines = originalFileStr.split("\n")
 	const fileNewLines = newFileStr ? newFileStr.split("\n") : []

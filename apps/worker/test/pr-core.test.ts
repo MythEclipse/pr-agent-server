@@ -332,8 +332,8 @@ describe("safety — detail beyond the brief table", () => {
 		// BOTH clean renderings of the security verdict score identically — the
 		// degenerate one is the GMW#109 shape and used to score 0 (a hard block).
 		// 5 +2 (security clean) −1 (issues `⚡ ?`) +1 (effort 1) = 7.
-		expect(analyzeReviewSafety(SEC.clear + "\n⚡ ?\n⏱️ effort: 1").score).toBe(7)
-		expect(analyzeReviewSafety(SEC.degenerate + "\n⚡ ?\n⏱️ effort: 1").score).toBe(7)
+		expect(analyzeReviewSafety(`${SEC.clear}\n⚡ ?\n⏱️ effort: 1`).score).toBe(7)
+		expect(analyzeReviewSafety(`${SEC.degenerate}\n⚡ ?\n⏱️ effort: 1`).score).toBe(7)
 
 		// The ceiling: 5 +2 (security clean) +2 (issues clear) +1 (small effort).
 		expect(

@@ -9,7 +9,7 @@ import { Button } from "#/components/ui/button.tsx"
 import { Card, CardContent, CardHeader, CardTitle } from "#/components/ui/card.tsx"
 import { formatWhen } from "#/libs/format-when.ts"
 import { orpc } from "#/libs/orpc/client.ts"
-import { reviewKeys } from "./_apis/review-keys.ts"
+import { reviewKeys } from "./-apis/review-keys.ts"
 
 export const Route = createFileRoute("/_authenticated/reviews/$reviewId")({
 	component: ReviewDetail,

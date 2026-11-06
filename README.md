@@ -17,6 +17,69 @@ The server listens on `$PORT` (code default `4023`). The only inbound webhook pa
 (`POST`, HMAC-verified); `POST /setup/callback` completes the GitHub App
 manifest flow using `templates/manifest.json`.
 
+## End-to-end flow
+
+Two processes cooperate. The **API** answers GitHub and the dashboard; the
+**worker** is a 5-minute tick that decides what to do with each open PR. They
+share the database, not a message bus — the worker acts on GitHub directly.
+
+### 1. Webhook → queued review (apps/api)
+
+```
+POST /api/v1/github_webhooks            presentation/http/legacy-routes.ts
+  → handleWebhook                       application/webhook/handle-webhook.ts
+      · verify HMAC, keep only pull_request events
+      · enqueue (dedupe per PR)          application/queue/review-queue.ts
+  → runJob                              main.ts
+      · reviews.start()   → a `queued` history row (visible while it runs)
+      · legacy.runReview  → diff → token budget → prompt → LLM → publish
+      · reviews.finish()  → success/failed, model + servedModel + headSha
+```
+
+`QUEUE_BACKEND=db` swaps the in-process queue for the Postgres-backed one
+(`infrastructure/queue/db-review-queue.ts`) so a restart does not lose work.
+A failing review **rethrows**: the queue must record `failed`, not `done`.
+
+### 2. PR tick → merge (apps/worker)
+
+`src/index.ts` builds the deps and calls `runTick` (`src/pr/pipeline.ts`). Every
+PR walks exactly one path, and each gate ends that PR's turn:
+
+```
+pin guard → review/trigger → permanent skip → AI fix → safety → CI
+          → mergeable → approve + merge
+```
+
+Step bodies live in `pr/steps.ts`, the gates in `pr/gates.ts`, and the
+orchestrator only decides the order. Upstream sync for forks is a separate flow
+(`src/sync/run.ts`), driven by `syncHooks`.
+
+### 3. Dashboard (apps/web)
+
+Reads review history over oRPC at `/rpc/*`, authenticated with a better-auth
+session cookie. The router's types are exported from `apps/api/src/index.ts`
+(type-only), so the browser never depends on `@orpc/server`.
+
+### HTTP surface
+
+Mounted in `main.ts`, **in this order** (later entries must not shadow earlier):
+
+| Path                             | Purpose                                                    |
+| -------------------------------- | ---------------------------------------------------------- |
+| `/api/auth/*`                    | better-auth (sign-in, callback, session)                   |
+| `/health`                        | liveness; reports the configured review model              |
+| `/setup/callback`                | GitHub App manifest exchange                               |
+| `/api/v1/github_webhooks`        | the HMAC-verified GitHub webhook (`/` is the legacy alias) |
+| `/api/v1/notify_review`          | worker ops notice relayed to Discord (`POST`, loopback)    |
+| `/api/metrics`, `/api/analytics` | JSONL analytics read-back                                  |
+| `/rpc/*`                         | oRPC procedures (dashboard)                                |
+| `/api/docs`, `/api/docs/spec`    | OpenAPI UI and spec                                        |
+| `/*`                             | SPA fallback, only when `WEB_DIST_PATH` is set             |
+
+Routes are registered with `app.all` where the handler needs to answer any
+method (`/health`, `/setup/callback`, the analytics paths); the webhook is
+`POST` on both of its paths.
+
 ## Project Layout
 
 ```
