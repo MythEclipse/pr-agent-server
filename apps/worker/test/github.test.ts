@@ -55,13 +55,18 @@ const json = (body: unknown, status = 200) =>
 // anything above a second can only be scheduling starvation, never a real wait.
 const TEST_TIMEOUT_MS = 5_000
 
-const api = (baseUrl: string, spawn?: Spawner) =>
+const api = (baseUrl: string, spawn?: Spawner, env?: Record<string, string | undefined>) =>
 	new GitHubApi({
 		appId: APP_ID,
 		privateKeyPem: PRIVATE_KEY_PEM,
 		baseUrl,
 		spawn,
 		timeoutMs: TEST_TIMEOUT_MS,
+		// Pinned to an EMPTY environment by default. Without this the tests read
+		// the real `process.env`, so a developer or CI runner that exports
+		// GH_TOKEN would make the "runs gh auth token" assertions take the
+		// env-token path instead and silently stop testing the CLI fallback.
+		env: env ?? {},
 	})
 
 const b64json = (segment: string) =>
@@ -357,5 +362,33 @@ describe("GitHubApi.fetchGhToken", () => {
 			throw new Error("ENOENT")
 		})
 		expect(a.fetchGhToken()).toBe("")
+	})
+
+	// THE PATH PRODUCTION ACTUALLY TAKES. The worker runs as `pr-agent` with
+	// HOME=/var/lib/pr-agent-server, which has no ~/.config/gh/hosts.yml, so
+	// `gh auth token` answers "no oauth token found" and the CLI path returns "".
+	// The PAT is provisioned in Bitwarden as GH_TOKEN instead — and before this
+	// it was never read, so every merge fell back to the App token, whose push
+	// does NOT trigger workflows.
+	test("prefers GH_TOKEN from the environment over the gh CLI", () => {
+		let spawned = 0
+		const a = api(
+			"http://unused.invalid",
+			() => {
+				spawned++
+				return { exitCode: 0, stdout: "ghp_fromcli\n" }
+			},
+			{ GH_TOKEN: "  ghp_fromenv  " },
+		)
+		expect(a.fetchGhToken()).toBe("ghp_fromenv")
+		// The CLI must not even be consulted when the env token is present.
+		expect(spawned).toBe(0)
+	})
+
+	test("falls back to the gh CLI when GH_TOKEN is empty or blank", () => {
+		for (const env of [{}, { GH_TOKEN: "" }, { GH_TOKEN: "   " }]) {
+			const a = api("http://unused.invalid", () => ({ exitCode: 0, stdout: "ghp_fromcli\n" }), env)
+			expect(a.fetchGhToken()).toBe("ghp_fromcli")
+		}
 	})
 })
