@@ -2,16 +2,24 @@
 // imports this type only, never a runtime symbol.
 
 import { z } from "zod"
-import type { UseCases } from "../../application/use-cases.ts"
-import { adminProcedure, protectedProcedure, publicProcedure } from "../orpc/middleware.ts"
+import { adminProcedure, protectedProcedure } from "../orpc/middleware.ts"
 
-export function buildRouter(useCases: UseCases) {
-	void useCases
+// There is deliberately NO `health.check` procedure here.
+//
+// It used to be one — `publicProcedure.handler(() => ({ status: "ok", model:
+// "configured" }))` — and it was wrong in three ways at once. It answered
+// `model: "configured"`, a literal that never reflected the configured model; a
+// probe reading it would conclude the API was healthy no matter what
+// PR_AGENT_MODEL_REVIEW said. It was a SECOND liveness answer next to the real
+// one at `GET /health`, which reports the actual `cfg.modelReview` and is what
+// the systemd watchdog and deploy.yml's "Wait for health" step poll. And nothing
+// consumed it: not the SPA, not any test, not any ops script.
+//
+// Two health endpoints that can disagree is worse than one, so the duplicate is
+// gone rather than kept in sync. `GET /health` is the single liveness surface.
+
+export function buildRouter() {
 	return {
-		health: {
-			check: publicProcedure.handler(() => ({ status: "ok" as const, model: "configured" })),
-		},
-
 		me: {
 			get: protectedProcedure.handler(({ context }) => ({
 				userId: context.session?.userId ?? null,

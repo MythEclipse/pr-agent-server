@@ -194,7 +194,10 @@ Secrets required in GitHub Actions:
 
 - **Health watchdog**: cron `pr-agent-health-watchdog` (every 10 min) → `~/.hermes/scripts/pr-agent-health-check.sh` → curl `http://127.0.0.1:4023/health`
 - **Secrets**: systemd `ExecStart=/usr/local/bin/bws-exec pr-agent env PORT=4023 /opt/node/bin/node /opt/pr-agent-server/dist/main.js`
-- **Prometheus**: `GET /api/metrics` → `pr_agent_requests_total`, `pr_agent_model_failures`
+- **Prometheus**: `GET /api/metrics` → `pr_agent_requests_total`, `pr_agent_model_failures`.
+  Counters come from `PR_AGENT_ANALYTICS_DIR` (default `/var/lib/pr-agent-server/analytics`),
+  written by every finished review in `runJob` — the directory must be writable by the
+  service user or the counters stay at 0
 - **Analytics**: `GET /api/analytics` → JSON summary (legacy `pr-agent.*.log` + `pr-agent.bun.jsonl`)
 - **Discord**: `POST /api/v1/notify_review` → pr-agent-ops webhook
 - **API docs**: `GET /api/docs` for the oRPC surface, `/api/docs/spec` for the OpenAPI document

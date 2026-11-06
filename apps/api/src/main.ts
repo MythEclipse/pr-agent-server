@@ -21,6 +21,7 @@ import { cors } from "hono/cors"
 import { logger } from "hono/logger"
 import { requestId } from "hono/request-id"
 import { ReviewQueue } from "./application/queue/review-queue.ts"
+import { recordReviewAnalytics } from "./application/review/record-analytics.ts"
 import { extractReviewScore, makeRecordReview } from "./application/review/record-review.ts"
 import { buildUseCases } from "./application/use-cases.ts"
 import { describeAdminLockout, listAdminEmails } from "./infrastructure/auth/admin-lockout.ts"
@@ -110,7 +111,10 @@ export async function startApp(options: StartOptions = {}) {
 	})
 
 	// 3. router
-	const router = buildRouter(useCases)
+	// No argument: the router reaches its dependencies through the oRPC context
+	// (`context.useCases`, `context.queueStore`), so passing them here as well
+	// was a second, unused route to the same objects.
+	const router = buildRouter()
 
 	// 4. app
 	const app = new Hono()
@@ -134,6 +138,11 @@ export async function startApp(options: StartOptions = {}) {
 
 	const runJob = async (job: { owner: string; repo: string; pr: number }): Promise<void> => {
 		const reviewId = await history.start({ owner: job.owner, repo: job.repo, pr: job.pr })
+		// `/api/metrics` and `/api/analytics` read files under PR_AGENT_ANALYTICS_DIR.
+		// Nothing wrote them from this path, so the Prometheus counter stayed at 0
+		// while reviews ran (see record-analytics.ts). Same env var, same default,
+		// as `legacy-routes.ts` — one directory, two readers.
+		const analyticsDir = process.env.PR_AGENT_ANALYTICS_DIR || "/var/lib/pr-agent-server/analytics"
 		try {
 			// The port returns a real `ReviewResult`, so the fields below are typed
 			// rather than hand-cast from `unknown`.
@@ -151,6 +160,18 @@ export async function startApp(options: StartOptions = {}) {
 				score: extractReviewScore(r.data ?? null),
 				headSha: r.headSha,
 			})
+			await recordReviewAnalytics(
+				{ analyticsDir },
+				{ owner: job.owner, repo: job.repo, pr: job.pr },
+				{
+					status: "success",
+					model: r.model,
+					promptTokens: r.promptTokens,
+					completionTokens: r.completionTokens,
+					cachedTokens: r.cachedTokens,
+					markdownLength: r.markdown.length,
+				},
+			)
 		} catch (err) {
 			// Rethrown, not logged-and-swallowed. `db-review-queue` records a
 			// rejection as `failed` with the error, while a resolved promise is
@@ -166,6 +187,13 @@ export async function startApp(options: StartOptions = {}) {
 				error: err instanceof Error ? err.message : String(err),
 			})
 			console.error(`[queue] review FAILED for ${job.owner}/${job.repo}#${job.pr}: ${String(err)}`)
+			// Before the rethrow, so a failed review is counted too — a counter that
+			// only sees successes makes a broken deploy look healthy.
+			await recordReviewAnalytics(
+				{ analyticsDir },
+				{ owner: job.owner, repo: job.repo, pr: job.pr },
+				{ status: "failed", error: err instanceof Error ? err.message : String(err) },
+			)
 			throw err
 		}
 	}

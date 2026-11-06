@@ -64,6 +64,32 @@ describe("composition root wiring", () => {
 		)
 	})
 
+	// Only ONE liveness surface. `GET /health` reports the real configured model
+	// and is what the systemd watchdog and deploy.yml poll; the oRPC
+	// `health.check` that used to sit beside it answered a hardcoded
+	// `model: "configured"` that could never disagree with anything.
+	test("liveness has a single surface, and it reports the real model", () => {
+		// Assert on CODE, not prose: the router file explains in a comment why the
+		// duplicate was removed, and that comment mentions the word "health".
+		const router = src("src/presentation/routers/index.ts")
+		const codeOnly = router
+			.split("\n")
+			.filter((line) => !line.trim().startsWith("//"))
+			.join("\n")
+		expect(codeOnly).not.toMatch(/\bhealth\b/)
+		// The surviving surface reports the real model, not a literal.
+		expect(src("src/presentation/http/legacy-routes.ts")).toContain("cfg.modelReview")
+	})
+
+	// The legacy port must say what it does. describe/improve are bound to
+	// functions that THROW on the server; `Promise<unknown>` advertised a usable
+	// value and would have let a caller read a field off a throw.
+	test("describe/improve are typed as never-returning, not unknown", () => {
+		const useCases = src("src/application/use-cases.ts")
+		expect(useCases).toMatch(/runDescribe: \(.*\) => Promise<never>/)
+		expect(useCases).toMatch(/runImprove: \(.*\) => Promise<never>/)
+	})
+
 	// `/api/docs` inlines a <script> in a TS template literal, so every quote the
 	// browser will see must be escaped by hand — a quote that is not breaks the
 	// whole module, and the page sits on "loading…" with nothing in the log.

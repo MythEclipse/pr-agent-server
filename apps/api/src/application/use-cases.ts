@@ -18,8 +18,20 @@ export interface UseCaseDeps {
 	 */
 	legacy: {
 		runReview: (owner: string, repo: string, pr: number) => Promise<ReviewResult>
-		runDescribe: (owner: string, repo: string, pr: number) => Promise<unknown>
-		runImprove: (owner: string, repo: string, pr: number) => Promise<unknown>
+		/**
+		 * `Promise<never>` — not `Promise<unknown>`. On the server these are
+		 * bound to functions that throw: describe and improve live only behind the
+		 * CLI (`cli.ts` calls them with their own config and key). The old
+		 * `Promise<unknown>` said "this returns something", so a future caller
+		 * could `await` it, then read a field off what looked like a result — and
+		 * only find out at runtime, after the throw.
+		 *
+		 * `Promise<never>` makes that a compile error instead: there is no value to
+		 * read on the other side. Nothing is lost by being precise — the CLI does
+		 * not go through this port, it imports the tools directly.
+		 */
+		runDescribe: (owner: string, repo: string, pr: number) => Promise<never>
+		runImprove: (owner: string, repo: string, pr: number) => Promise<never>
 	}
 }
 
