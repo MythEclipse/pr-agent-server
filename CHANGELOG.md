@@ -1,3 +1,10 @@
+## [1.8.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.3...v1.8.4) (2026-11-06)
+
+
+### Bug Fixes
+
+* stop enqueueing reviews for closed PRs, and repair the /api/docs script ([7638a91](https://github.com/MythEclipse/pr-agent-server/commit/7638a917291c41c086b13e6a9fbc7920617ba0ad))
+
 ## [1.8.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.2...v1.8.3) (2026-11-06)
 
 
