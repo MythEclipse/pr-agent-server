@@ -230,7 +230,34 @@ describe("fixBunLock", () => {
 })
 
 describe("mergePr", () => {
-	test("a 403 retries as the owner PAT and returns THAT result", async () => {
+	test("the PAT is used FIRST, so the merge fires `push` and the deploy runs", async () => {
+		// A merge with an App installation token does not fire the resulting
+		// `push` event, so every `on: push` deploy workflow silently never runs —
+		// a green merge that ships nothing. The PAT must therefore be the first
+		// attempt, not merely the 403 fallback.
+		const { api, calls } = fakeApi(() => ({ status: 200, data: { merged: true } }))
+		let asked = 0
+		const r = await mergePr(
+			{ fetchGhToken: () => (asked++, "ghPAT") },
+			api,
+			"appTok",
+			REPO,
+			PR,
+			"sha123",
+		)
+		expect(asked).toBe(1)
+		expect(r).toEqual({ status: 200, data: { merged: true } })
+		expect(calls).toEqual([
+			{
+				method: "PUT",
+				path: "/repos/owner/repo/pulls/7/merge",
+				token: "ghPAT",
+				json: { commit_title: "Auto-merge PR #7", merge_method: "merge", sha: "sha123" },
+			},
+		])
+	})
+
+	test("a PAT that is refused falls back to the App token", async () => {
 		const { api, calls } = fakeApi((_c, n) =>
 			n === 1
 				? { status: 403, data: { message: "needs workflows" } }
@@ -247,20 +274,7 @@ describe("mergePr", () => {
 		)
 		expect(asked).toBe(1)
 		expect(r).toEqual({ status: 200, data: { merged: true } })
-		expect(calls).toEqual([
-			{
-				method: "PUT",
-				path: "/repos/owner/repo/pulls/7/merge",
-				token: "appTok",
-				json: { commit_title: "Auto-merge PR #7", merge_method: "merge", sha: "sha123" },
-			},
-			{
-				method: "PUT",
-				path: "/repos/owner/repo/pulls/7/merge",
-				token: "ghPAT",
-				json: { commit_title: "Auto-merge PR #7", merge_method: "merge", sha: "sha123" },
-			},
-		])
+		expect(calls.map((c) => c.token)).toEqual(["ghPAT", "appTok"])
 	})
 })
 
@@ -1373,7 +1387,7 @@ describe("approvePr", () => {
 })
 
 describe("mergePr — the non-403 paths", () => {
-	test("a 200 is returned as-is, with no PAT lookup", async () => {
+	test("a 200 is returned as-is, after exactly one PAT lookup", async () => {
 		const { api, calls } = fakeApi(() => ({ status: 200, data: { merged: true } }))
 		let asked = 0
 		const r = await mergePr(
@@ -1385,8 +1399,10 @@ describe("mergePr — the non-403 paths", () => {
 			"sha",
 		)
 		expect(r).toEqual({ status: 200, data: { merged: true } })
-		expect(asked).toBe(0)
+		// The PAT is consulted once and used — the App token is not touched.
+		expect(asked).toBe(1)
 		expect(calls).toHaveLength(1)
+		expect(calls[0].token).toBe("ghPAT")
 	})
 
 	test("a 403 with no PAT returns the original 403", async () => {
@@ -1415,11 +1431,13 @@ describe("mergePr — the non-403 paths", () => {
 	})
 
 	test("a 405 is never retried", async () => {
+		// 405 is a definitive answer — the App token would receive it identically,
+		// so a second call buys nothing. One request, whatever token made it.
 		const { api, calls } = fakeApi(() => ({ status: 405, data: { message: "not mergeable" } }))
 		let asked = 0
 		await mergePr({ fetchGhToken: () => (asked++, "ghPAT") }, api, "appTok", REPO, PR, "sha")
-		expect(asked).toBe(0)
 		expect(calls).toHaveLength(1)
+		expect(calls[0].token).toBe("ghPAT")
 	})
 
 	test("a PAT retry that also 403 reports the SECOND result", async () => {

@@ -76,20 +76,47 @@ export async function mergePr(
 	// Key order is the Python dict's (line 461).
 	const json = { commit_title: `Auto-merge PR #${pr}`, merge_method: "merge", sha }
 
+	// THE PAT IS PREFERRED, NOT JUST A 403 FALLBACK.
+	//
+	// A merge performed with an App installation token does NOT fire the
+	// resulting `push` event. GitHub suppresses workflow runs for pushes made by
+	// the App's own token, to stop an App from re-triggering itself in a loop.
+	// The commit lands on main, and every `on: push` workflow — which in this
+	// fleet is every deploy.yml — simply never runs. The merge reports success
+	// and nothing ships.
+	//
+	// Merging with a user PAT does fire `push`, so the deploy runs. That is why
+	// the PAT is tried first rather than only after a 403.
+	//
+	// The App token is still needed as a fallback: a PAT may be absent, or may
+	// not have write access to a repo the App can reach.
+	const pat = deps.fetchGhToken()
+	let patTried = false
+	if (pat) {
+		patTried = true
+		const viaPat = await api.request("PUT", path, { token: pat, json })
+		// A PAT that is merely unauthorised (401/403) falls through to the App;
+		// anything else is a real answer and is returned as-is.
+		if (viaPat.status !== 401 && viaPat.status !== 403) return viaPat
+		console.error(
+			`[merge] ${repo}#${pr}: PAT merge returned HTTP ${viaPat.status} — falling back to the App token, whose push will NOT trigger workflows`,
+		)
+	}
+
 	const first = await api.request("PUT", path, { token, json })
-	if (first.status === 403) {
+	if (first.status === 403 && pat && !patTried) {
 		// Python lines 463-469.
-		const pat = deps.fetchGhToken()
-		if (pat) {
-			// The RETRY's result is what the caller gets — a successful PAT merge must
-			// not be reported as the App's 403.
-			return api.request("PUT", path, { token: pat, json })
-		}
+		//
+		// The RETRY's result is what the caller gets — a successful PAT merge must
+		// not be reported as the App's 403.
+		return api.request("PUT", path, { token: pat, json })
+	}
+	if (!pat) {
 		// No PAT means the returned 403 is the App's refusal alone, and the caller
 		// cannot tell that from a 403 the owner token also received — which is how
 		// a missing `gh auth token` reads as a GitHub policy block.
 		console.error(
-			`[merge] ${repo}#${pr}: HTTP 403 and \`gh auth token\` returned nothing — the owner retry did not run, so this is the App's refusal alone`,
+			`[merge] ${repo}#${pr}: HTTP ${first.status} and \`gh auth token\` returned nothing — the owner retry did not run, so this is the App's refusal alone`,
 		)
 	}
 	return { status: first.status, data: first.data }
