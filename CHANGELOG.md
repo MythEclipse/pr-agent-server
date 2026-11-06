@@ -1,3 +1,10 @@
+## [1.8.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.4...v1.8.5) (2026-11-06)
+
+
+### Bug Fixes
+
+* make /api/metrics actually move, and drop the duplicate health procedure ([5eef30e](https://github.com/MythEclipse/pr-agent-server/commit/5eef30ed32d96084bf70bab2966c94fb454c3b24))
+
 ## [1.8.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.3...v1.8.4) (2026-11-06)
 
 
