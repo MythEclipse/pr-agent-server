@@ -1,3 +1,10 @@
+## [1.8.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.2...v1.8.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **github:** read GH_TOKEN from the environment before shelling out to gh ([71f1180](https://github.com/MythEclipse/pr-agent-server/commit/71f11806fdf99fcae81acca85a1b945bb35d1e58))
+
 ## [1.8.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.1...v1.8.2) (2026-11-06)
 
 
