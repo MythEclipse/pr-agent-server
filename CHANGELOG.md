@@ -1,3 +1,10 @@
+## [1.8.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.1...v1.8.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **merge:** merge with the PAT first, so the merge actually deploys ([abe9d50](https://github.com/MythEclipse/pr-agent-server/commit/abe9d50c3d573486ef3c153b0572a3e030ca2295))
+
 ## [1.8.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.0...v1.8.1) (2026-11-05)
 
 
