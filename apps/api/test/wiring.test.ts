@@ -19,6 +19,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
+import { renderDocsPage } from "../src/main.ts"
 
 const src = (rel: string) => readFileSync(join(import.meta.dirname, "..", rel), "utf8")
 
@@ -61,6 +62,26 @@ describe("composition root wiring", () => {
 		expect(src("src/presentation/http/legacy-routes.ts")).toContain(
 			'from "../../infrastructure/config/private-key.ts"',
 		)
+	})
+
+	// `/api/docs` inlines a <script> in a TS template literal, so every quote the
+	// browser will see must be escaped by hand — a quote that is not breaks the
+	// whole module, and the page sits on "loading…" with nothing in the log.
+	//
+	// The render is checked through the REAL Vite/build definition of the module
+	// (imported below), not by re-evaluating the source text: main.ts is TS, and a
+	// `new Function` over its raw text is a different program from the one the
+	// server runs. `renderDocsPage` is exported for exactly this.
+	test("the /api/docs inline script is valid JavaScript", () => {
+		const html = renderDocsPage("/api/docs/spec")
+
+		const open = '<script type="module">'
+		const script = html.slice(html.indexOf(open) + open.length, html.indexOf("</script>"))
+		expect(script).toContain("no procedures exposed")
+
+		// `await` is legal only in module scope; the tag is type="module", so it is
+		// stripped to leave a body this parser accepts. Everything else must parse.
+		expect(() => new Function(script.replaceAll("await ", ""))).not.toThrow()
 	})
 
 	// Guard the regression directly: the resolver must actually read the file the

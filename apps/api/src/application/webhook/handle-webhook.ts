@@ -75,7 +75,15 @@ export async function handleWebhook(
 	}
 
 	const pr = payload.pull_request
-	if (!pr?.number || pr.state !== "open" || pr.draft) {
+	// `action` is the ONLY signal that a PR closed. `state` cannot carry it: on a
+	// `closed` delivery GitHub sends the pull_request as it was last seen, so
+	// `state` still reads "open". Guarding on state alone therefore enqueued a
+	// full, billable LLM review for every PR that was merged or closed, on a PR
+	// nobody could act on any more — and `publishPersistentComment` then edited
+	// the comment there and announced "updated to latest commit" on a finished PR.
+	// Probed before this fix: a closed payload reached the queue with
+	// `{ ok: true, triggered: true }`.
+	if (!pr?.number || payload.action === "closed" || pr.state !== "open" || pr.draft) {
 		return { status: 200, body: { ok: true, ignored: true } }
 	}
 

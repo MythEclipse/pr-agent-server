@@ -48,6 +48,26 @@ describe("webhook", () => {
 		const r = await handleWebhook(env, body, sign(body), "pull_request", fakeQueue())
 		expect(r.body).toEqual({ ok: true, ignored: true })
 	})
+	test("ignores a closed/merged PR, whose payload still says state: open", async () => {
+		// GitHub sends the pull_request as it was LAST SEEN on a `closed`
+		// delivery, so `state` reads "open" and the state guard cannot see it.
+		// `action` is the only signal. Without this guard every merged PR bought a
+		// full LLM review that could not be acted on, and its comment was edited
+		// and announced as "updated to latest commit" after the PR was finished.
+		const jobs: ReviewJob[] = []
+		const body = JSON.stringify({
+			action: "closed",
+			pull_request: {
+				number: 9,
+				state: "open",
+				draft: false,
+				url: "https://api.github.com/repos/o/r/pulls/9",
+			},
+		})
+		const r = await handleWebhook(env, body, sign(body), "pull_request", fakeQueue(jobs))
+		expect(r.body).toEqual({ ok: true, ignored: true })
+		expect(jobs).toEqual([])
+	})
 	test("enqueues an open non-draft PR and answers fast", async () => {
 		const jobs: ReviewJob[] = []
 		const body = JSON.stringify({

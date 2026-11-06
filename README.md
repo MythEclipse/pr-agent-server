@@ -73,7 +73,7 @@ Mounted in `main.ts`, **in this order** (later entries must not shadow earlier):
 | `/api/v1/notify_review`          | worker ops notice relayed to Discord (`POST`, loopback)    |
 | `/api/metrics`, `/api/analytics` | JSONL analytics read-back                                  |
 | `/rpc/*`                         | oRPC procedures (dashboard)                                |
-| `/api/docs`, `/api/docs/spec`    | OpenAPI UI and spec                                        |
+| `/api/docs`, `/api/docs/spec`    | procedure index page (HTML) + the OpenAPI document         |
 | `/*`                             | SPA fallback, only when `WEB_DIST_PATH` is set             |
 
 Routes are registered with `app.all` where the handler needs to answer any

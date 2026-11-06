@@ -253,7 +253,7 @@ export async function startApp(options: StartOptions = {}) {
 			}),
 		})
 		if (result.matched) return result.response
-		return c.html(docsPage("/api/docs/spec"))
+		return c.html(renderDocsPage("/api/docs/spec"))
 	}
 	app.all("/api/docs", mountDocs)
 	app.all("/api/docs/*", mountDocs)
@@ -277,12 +277,17 @@ export async function startApp(options: StartOptions = {}) {
 }
 
 /**
- * A dependency-free docs page. It reads the spec with fetch and renders the
- * procedure list itself rather than pulling Swagger UI from a CDN: the API
- * host is often the only reachable host on the box, and an operator debugging
- * the webhook should not need egress to read the spec.
+ * Render the `/api/docs` page — a dependency-free docs UI. It reads the spec
+ * with fetch and renders the procedure list itself rather than pulling Swagger
+ * UI from a CDN: the API host is often the only reachable host on the box, and
+ * an operator debugging the webhook should not need egress to read the spec.
+ *
+ * Exported for the wiring test, which parses the inlined <script> to prove it is
+ * valid JavaScript. That check has to run against the REAL module: the page is
+ * built inside a TS template literal, and re-evaluating its source text with
+ * `new Function` produced a different program and a misleading failure.
  */
-function docsPage(specPath: string): string {
+export function renderDocsPage(specPath: string): string {
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -311,7 +316,7 @@ function docsPage(specPath: string): string {
     )
     list.innerHTML = rows.length
       ? rows.map(({ path, method }) => \`<li><span class="m">\${method.toUpperCase()}</span> <code>\${path}</code></li>\`).join("")
-      : "<li class="err">no procedures exposed</li>"
+      : \`<li class="err">no procedures exposed</li>\`
   } catch (err) {
     list.innerHTML = \`<li class="err">\${String(err)}</li>\`
   }
