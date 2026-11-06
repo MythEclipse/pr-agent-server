@@ -81,6 +81,12 @@ export class GitHubApi {
 	private readonly timeoutMs: number
 	private readonly spawn: Spawner
 	/**
+	 * Environment source for `GH_TOKEN`. Injected rather than read from the
+	 * global `process.env` so a test can pin the token without mutating the
+	 * process it shares with 26 other test files.
+	 */
+	private readonly env: Record<string, string | undefined>
+	/**
 	 * Cache for `fetchGhToken`, scoped to this instance rather than the module.
 	 *
 	 * DIVERGENCE FROM THE PYTHON (deliberate, brief-mandated): `_fetch_gh_token`
@@ -115,6 +121,8 @@ export class GitHubApi {
 		timeoutMs?: number
 		/** Injection seam for tests; production uses the real `gh` binary. */
 		spawn?: Spawner
+		/** Injection seam for tests; production passes `process.env`. */
+		env?: Record<string, string | undefined>
 	}) {
 		this.appId = opts.appId
 		this.privateKeyPem = opts.privateKeyPem
@@ -122,6 +130,7 @@ export class GitHubApi {
 		this.retries = opts.retries ?? DEFAULT_RETRIES
 		this.timeoutMs = opts.timeoutMs ?? TIMEOUT_MS
 		this.spawn = opts.spawn ?? spawnGh
+		this.env = opts.env ?? process.env
 	}
 
 	/** Python `get_jwt()` (lines 158-161). Fresh signature per call. */
@@ -210,9 +219,23 @@ export class GitHubApi {
 	 * Python `_fetch_gh_token()` (lines 599-606). `gh auth token` is a local,
 	 * already-authenticated read of the stored PAT — no GitHub round trip — so a
 	 * failure degrades to "" and never throws.
+	 *
+	 * `GH_TOKEN` IS CHECKED FIRST, and it is the path production actually uses.
+	 * The worker runs as `pr-agent` with `HOME=/var/lib/pr-agent-server`, which
+	 * has no `~/.config/gh/hosts.yml` — so `gh auth token` answers "no oauth
+	 * token found" and the CLI path yields "" every single time. The PAT the
+	 * deploy provisions in Bitwarden as `GH_TOKEN` was therefore never read, and
+	 * every merge fell back to the App token — the token whose push does NOT
+	 * trigger workflows. A `GH_TOKEN` in the environment is exactly what `gh`
+	 * itself honours, so reading it here matches the CLI's own precedence.
 	 */
 	fetchGhToken(): string {
 		if (this.ghToken !== undefined) return this.ghToken
+		const fromEnv = (this.env.GH_TOKEN ?? "").trim()
+		if (fromEnv) {
+			this.ghToken = fromEnv
+			return fromEnv
+		}
 		let token = ""
 		try {
 			const r = this.spawn(["gh", "auth", "token"])
