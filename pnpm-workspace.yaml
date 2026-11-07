@@ -43,3 +43,29 @@ allowBuilds:
 # is still proposed and still fails. With only (2), Dependabot's job runs but
 # proposes releases that are days old and unreviewable. Both are required.
 minimumReleaseAge: 0
+
+# Force the transitive esbuild under @esbuild-kit/core-utils up to a patched
+# version, closing Dependabot alert 1 (GHSA-67mh-4wv8-2f99, medium).
+#
+# WHY AN OVERRIDE IS NEEDED: core-utils pins `esbuild: "~0.18.20"`, and the
+# advisory's first patched version is 0.25.0 — outside that range. Dependabot
+# cannot propose a fix it is not allowed to install, which is why this alert sat
+# open with security updates already enabled while the two seroval alerts beside
+# it were fixed automatically by PR #1.
+#
+# WHY IT IS SAFE HERE, verified rather than assumed:
+#   - core-utils is reached only via @esbuild-kit/esm-loader 2.6.5, which comes
+#     from drizzle-kit (a devDependency used for `db:generate`/`db:push`).
+#   - drizzle-kit's actual entrypoint (bin.cjs) never references esbuild-kit —
+#     grepped: 0 occurrences — so the package is installed but inert at runtime.
+#   - nothing in apps/ or packages/ imports @esbuild-kit directly.
+#   - the advisory only affects esbuild's `--serve` dev server (it answers
+#     `Access-Control-Allow-Origin: *`); this repo serves with `tsx watch` and
+#     `vite`, never esbuild's dev server.
+# The override is still the honest fix rather than a dismissal: a patched
+# version is installed, so the vulnerable code is not on disk at all.
+#
+# NB: this is `overrides:` in pnpm-workspace.yaml, NOT `pnpm.overrides` in
+# package.json — pnpm 12 ignores the package.json field with only a warning.
+overrides:
+  "@esbuild-kit/core-utils>esbuild": ^0.25.0
