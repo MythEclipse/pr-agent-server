@@ -1,3 +1,10 @@
+## [1.8.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.5...v1.8.6) (2026-11-07)
+
+
+### Bug Fixes
+
+* **deps:** override the esbuild under core-utils to close Dependabot alert 1 ([acdcca8](https://github.com/MythEclipse/pr-agent-server/commit/acdcca8983e7303d7c1567c0596475e92c9b5c87))
+
 ## [1.8.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.4...v1.8.5) (2026-11-06)
 
 
