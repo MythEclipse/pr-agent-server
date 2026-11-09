@@ -1,3 +1,10 @@
+## [1.8.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.6...v1.8.7) (2026-11-09)
+
+
+### Bug Fixes
+
+* **merge:** a 404 means the PR is gone, not refused ([#11](https://github.com/MythEclipse/pr-agent-server/issues/11)) ([5365094](https://github.com/MythEclipse/pr-agent-server/commit/5365094857de3a130d204e29ba114909bf2f4ff2)), closes [asepharyana/discord-forum-bridge#1](https://github.com/asepharyana/discord-forum-bridge/issues/1)
+
 ## [1.8.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.5...v1.8.6) (2026-11-07)
 
 
