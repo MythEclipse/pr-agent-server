@@ -402,8 +402,33 @@ export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 		)
 		return false
 	}
+	if (status === 404) {
+		// A 404 is NOT a refusal and NOT an outage — it means the repo or the PR
+		// no longer exists. Observed on asepharyana/discord-forum-bridge#1 after
+		// that repository was deleted: the head SHA can never move, so
+		// `noteFailure` counted the same 404 up to attempt 57 while the report
+		// said a merge "failed" every five minutes, and each tick sent a
+		// `failed` notification for a PR that existed nowhere.
+		//
+		// Retrying is pointless here, but so is closing the PR: there is nothing
+		// left to close. The only honest action is to stop tracking it, which is
+		// what `markSkip` does — the disposition is recorded at this head so the
+		// PR is never read again, and the reason survives so a human can see why
+		// it vanished from the queue.
+		deps.report.push("   ⚠️  Merge: HTTP 404 — repo or PR no longer exists")
+		markSkip(
+			c.fixState,
+			c.repo,
+			c.prNum,
+			c.headSha,
+			`gone: merge returned 404 (${data?.message ?? "Not Found"})`,
+		)
+		persist(deps, c.fixState)
+		deps.report.push("   ⏭️  Untracked — nothing left to merge, will not be retried")
+		return false
+	}
 	deps.report.push(`   ⚠️  Merge: HTTP ${status}`)
-	// Counted. A 4xx that is not 405/409 is a standing refusal — a bad merge
+	// Counted. A 4xx that is not 404/405/409 is a standing refusal — a bad merge
 	// method, a missing permission, a draft PR — and none of those clear by
 	// trying again. The head SHA cannot move for any of them, so this arm would
 	// report the same HTTP status on every tick forever.
