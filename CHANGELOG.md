@@ -1,3 +1,10 @@
+# [1.9.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.8...v1.9.0) (2026-11-11)
+
+
+### Features
+
+* **ops:** sync dependabot vulnerability alerts and audit tooling ([9612ecd](https://github.com/MythEclipse/pr-agent-server/commit/9612ecd678a9c0cc7b81fe1df29e94f551a05ec0))
+
 ## [1.8.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.7...v1.8.8) (2026-11-11)
 
 
