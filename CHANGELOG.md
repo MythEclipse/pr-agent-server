@@ -1,3 +1,10 @@
+## [1.9.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.0...v1.9.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **sync-hooks:** ship the templates the bundle resolves, and unblock the gate ([eb3ec44](https://github.com/MythEclipse/pr-agent-server/commit/eb3ec442be66c0a262b563a660b74ffda5754c3c))
+
 # [1.9.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.8...v1.9.0) (2026-11-11)
 
 
