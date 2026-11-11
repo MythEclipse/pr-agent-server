@@ -12,6 +12,35 @@ import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } 
 /** Python `LOCK_FILE` (line 65) — the canonical path the run loop must claim. */
 export const LOCK_FILE = "/tmp/pr-queue-worker.lock"
 
+/**
+ * Wait up to `budgetMs` for the worker lock, then give up.
+ *
+ * WHY A DAILY JOB MUST WAIT AND A TICK MUST NOT. The tick runs every five
+ * minutes and holds the lock for ~36s; the nightly sync runs once a day and holds
+ * it for ~2.5 MINUTES. Failing instantly on contention is fine for the tick —
+ * another one is along in five minutes — but for the nightly it means a ~1-in-8
+ * chance of dying on a collision that would have cleared in seconds, reported as
+ * `Result: exit-code`, which is indistinguishable from a real failure. That is
+ * precisely the noise this job was just dug out of.
+ *
+ * The budget is a few tick lengths, so a normal tick always clears inside it,
+ * while a genuinely stuck run still fails rather than hanging the unit past its
+ * `TimeoutStartSec`.
+ */
+export async function acquireWithWait(
+	path: string,
+	budgetMs = 120_000,
+	pollMs = 2_000,
+): Promise<WorkerLock | null> {
+	const deadline = Date.now() + budgetMs
+	for (;;) {
+		const lock = WorkerLock.acquire(path)
+		if (lock) return lock
+		if (Date.now() >= deadline) return null
+		await new Promise((resolve) => setTimeout(resolve, pollMs))
+	}
+}
+
 export class WorkerLock {
 	private constructor(private readonly path: string) {}
 

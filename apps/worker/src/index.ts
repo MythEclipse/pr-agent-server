@@ -28,7 +28,7 @@ import { AgentClient } from "./claude-agent.ts"
 import { notifyReview, postDiscordOps } from "./discord.ts"
 import { runGit } from "./git.ts"
 import { GitHubApi } from "./github.ts"
-import { LOCK_FILE, WorkerLock } from "./lock.ts"
+import { acquireWithWait, LOCK_FILE, WorkerLock } from "./lock.ts"
 import { dependabotTemplateBody, runSyncHooks } from "./ops/syncHooks.ts"
 import {
 	lanesForAlerts,
@@ -304,9 +304,13 @@ export function syncHooksExitCode(lines: readonly string[]): number {
  * half-apply a fleet.
  */
 async function syncHooks(argv: string[]): Promise<number> {
-	const lock = WorkerLock.acquire(LOCK_FILE)
+	// WAIT, do not fail. A nightly run that dies because a 36-second tick happened
+	// to be in flight is reported as `Result: exit-code` — the same signal as a
+	// real failure, and this job was just dug out of exactly that noise. See
+	// `acquireWithWait`.
+	const lock = await acquireWithWait(LOCK_FILE)
 	if (!lock) {
-		console.log("another pr-queue-worker run holds the lock — try again shortly")
+		console.log("another pr-queue-worker run held the lock for 2 minutes — giving up")
 		return 1
 	}
 	releaseHeld = () => lock.release()
@@ -384,9 +388,11 @@ async function fixVulns(argv: string[]): Promise<number> {
 		return 1
 	}
 	const dry = argv.includes("--dry")
-	const lock = WorkerLock.acquire(LOCK_FILE)
+	// WAIT, do not fail — same reason as `syncHooks`: a nightly-style job colliding
+	// with a 36-second tick must not report a failure.
+	const lock = await acquireWithWait(LOCK_FILE)
 	if (!lock) {
-		console.log("another pr-queue-worker run holds the lock — try again shortly")
+		console.log("another pr-queue-worker run held the lock for 2 minutes — giving up")
 		return 1
 	}
 	releaseHeld = () => lock.release()
