@@ -1,3 +1,10 @@
+## [1.10.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.3...v1.10.4) (2026-11-11)
+
+
+### Bug Fixes
+
+* **lock:** let the nightly sync wait out a tick instead of dying on it ([a54bf3b](https://github.com/MythEclipse/pr-agent-server/commit/a54bf3b5de9da1f30b963dabe4b0f150143e9d9a))
+
 ## [1.10.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.2...v1.10.3) (2026-11-11)
 
 
