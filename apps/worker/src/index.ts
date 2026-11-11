@@ -32,8 +32,8 @@ import { LOCK_FILE, WorkerLock } from "./lock.ts"
 import { dependabotTemplateBody, runSyncHooks } from "./ops/syncHooks.ts"
 import {
 	lanesForAlerts,
-	lanesInConfig,
 	missingLanes,
+	repoLanes,
 	scanVulns,
 	summarizeVulns,
 } from "./ops/vulnFixer.ts"
@@ -469,10 +469,13 @@ async function auditVulns(argv: string[]): Promise<number> {
 	// An audit that only counts advisories answers the wrong question. The one
 	// that matters is how many of them DEPENDABOT CAN ACT ON — an alert on a
 	// manifest no lane names cannot become a PR, so it will still be open in a
-	// month no matter what the count says. Coverage is computed against the same
-	// template the sync ships.
+	// month no matter what the count says.
+	//
+	// COVERAGE IS PER REPO, read from the repo's OWN config. Derived lanes live
+	// there, not in the shared template; comparing against the template reported
+	// every derived lane as missing and would have called a fully-fixed fleet
+	// broken forever.
 	const template = dependabotTemplateBody()
-	const templateLanes = lanesInConfig(template)
 	let totalVulns = 0
 	let unreachable = 0
 	let unreadable = 0
@@ -492,7 +495,8 @@ async function auditVulns(argv: string[]): Promise<number> {
 			for (const line of summarizeVulns(repo, alerts)) {
 				console.log(line)
 			}
-			const missing = missingLanes(lanesForAlerts(alerts), templateLanes)
+			const lanes = await repoLanes(deps.api, repo, token, template)
+			const missing = missingLanes(lanesForAlerts(alerts), lanes)
 			const dead = missing.reduce((sum, lane) => sum + lane.alerts, 0)
 			if (dead > 0) {
 				unreachable += dead

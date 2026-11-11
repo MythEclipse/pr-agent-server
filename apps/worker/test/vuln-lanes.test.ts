@@ -26,6 +26,7 @@ import {
 	lanesInConfig,
 	missingLanes,
 	normaliseEcosystem,
+	repoLanes,
 	summarizeVulns,
 	withDerivedLanes,
 } from "../src/ops/vulnFixer.ts"
@@ -302,5 +303,68 @@ describe("summarizeVulns", () => {
 		const a = alert("npm", "package-lock.json")
 		a.security_vulnerability.first_patched_version = null
 		expect(summarizeVulns("o/r", [a]).join("\n")).toContain("no patch")
+	})
+})
+
+/**
+ * `repoLanes` — coverage is a property of the repo's OWN config.
+ *
+ * The bug this pins: the audit compared alerts against the shared TEMPLATE, so
+ * immediately after `--fix-vulns` wrote ten derived lanes, the audit still
+ * reported "485 unreachable" — and would have forever. The template is not what
+ * GitHub reads for a repo; `.github/dependabot.yml` is.
+ */
+describe("repoLanes reads the repo's config, not the template", () => {
+	const repo = "owner/repo"
+	const api = (status: number, body?: string) => ({
+		async request() {
+			if (status !== 200 || body === undefined) return { status, data: {} }
+			return {
+				status: 200,
+				data: { content: Buffer.from(body, "utf8").toString("base64"), encoding: "base64" },
+			}
+		},
+	})
+
+	test("a derived lane in the repo's config COUNTS as covered", async () => {
+		// The exact false negative that shipped.
+		const config = [
+			"version: 2",
+			"updates:",
+			'  - package-ecosystem: "pip"',
+			'    directory: "/Proyek_Klasifikasi_Gambar"',
+			"    schedule:",
+			'      interval: "weekly"',
+		].join("\n")
+		const lanes = await repoLanes(api(200, config) as never, repo, "t", template)
+		expect(
+			lanes.some((l) => l.ecosystem === "pip" && l.directory === "/Proyek_Klasifikasi_Gambar"),
+		).toBe(true)
+		// And the alert on it is therefore reachable.
+		const needs = lanesForAlerts([alert("pip", "Proyek_Klasifikasi_Gambar/requirements.txt")])
+		expect(missingLanes(needs, lanes)).toEqual([])
+	})
+
+	test("a repo with no config falls back to the template — that is what the sync installs", async () => {
+		const lanes = await repoLanes(api(404) as never, repo, "t", template)
+		expect(lanes.map((l) => `${l.ecosystem} ${l.directory}`)).toContain("github-actions /")
+	})
+
+	test("an empty or undecodable file falls back rather than claiming zero lanes", async () => {
+		// Zero lanes would report EVERY alert as unreachable, which is the same
+		// class of wrong answer in the other direction.
+		expect((await repoLanes(api(200, "   ") as never, repo, "t", template)).length).toBeGreaterThan(
+			0,
+		)
+		expect(
+			(
+				await repoLanes(
+					{ request: async () => ({ status: 200, data: {} }) } as never,
+					repo,
+					"t",
+					template,
+				)
+			).length,
+		).toBeGreaterThan(0)
 	})
 })

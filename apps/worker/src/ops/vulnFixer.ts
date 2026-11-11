@@ -332,6 +332,50 @@ export type ScanAndFixOptions = {
 }
 
 /**
+ * The lanes a repo's LIVE config declares, falling back to the template.
+ *
+ * WHY THE AUDIT MUST READ THE REPO, NOT THE TEMPLATE. Derived lanes live in each
+ * repo's own `.github/dependabot.yml`, not in the shared template. An audit that
+ * compared alerts against the template reported every derived lane as still
+ * missing — so immediately after a successful `--fix-vulns` wrote ten lanes, the
+ * audit still said "485 unreachable" and would have said so forever. The
+ * question "can Dependabot see this manifest" is about the file GitHub reads,
+ * and that file is the repo's.
+ *
+ * A repo with no config, or an unreadable one, falls back to the template: that
+ * is what the next sync will install, so it is the honest answer for coverage.
+ */
+export async function repoLanes(
+	api: GhClient,
+	repo: string,
+	token: string,
+	fallbackTemplate: string,
+): Promise<Lane[]> {
+	const res = await api.request("GET", `/repos/${repo}/contents/${DEPENDABOT_CONFIG_PATH}`, {
+		token,
+	})
+	if (res.status === 200) {
+		const body = decodeContent(res.data)
+		if (body !== undefined && body.trim() !== "") return lanesInConfig(body)
+	}
+	return lanesInConfig(fallbackTemplate)
+}
+
+/** The one path Dependabot reads its configuration from. */
+export const DEPENDABOT_CONFIG_PATH = ".github/dependabot.yml"
+
+/** Base64 file contents out of a contents API response, or undefined. */
+function decodeContent(data: unknown): string | undefined {
+	const content = (data as { content?: unknown } | undefined)?.content
+	if (typeof content !== "string") return undefined
+	try {
+		return Buffer.from(content, "base64").toString("utf8")
+	} catch {
+		return undefined
+	}
+}
+
+/**
  * Scan all repositories for open Dependabot alerts.
  *
  * CARRIES THE FAILURE THROUGH. This used to hand back a bare `alerts` array, so a
