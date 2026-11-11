@@ -168,6 +168,30 @@ export const isTransientInfra = (s: string): boolean => {
 		return false
 	}
 
+	// A PROCESS KILLED BY A SIGNAL SAYS NOTHING ABOUT THE BRANCH.
+	//
+	// `exited 143` is 128 + 15 (SIGTERM), `137` is SIGKILL, `130` SIGINT. The
+	// process did not DECIDE to fail — something outside it ended it: an operator
+	// running `systemctl stop`, a deploy restarting the unit, systemd's stop
+	// timeout, or the OOM killer. All of those are transient by definition, and
+	// all of them were being pinned "until head SHA changes", which no restart
+	// ever moves.
+	//
+	// This is how five PRs died on this fleet: `Claude Code exited 143:` with an
+	// EMPTY detail, one attempt each, recorded as permanent. The tick that killed
+	// them was the worker's own unit being stopped — the agent had produced no
+	// output at all, so there was nothing to judge and nothing an edit could fix.
+	//
+	// Checked BEFORE the status sweep below, because `\b4\d\d\b` would otherwise
+	// never match 143 and the run would fall through to the permanent arm.
+	//
+	// ANCHORED TO THE EXIT-CODE POSITION on purpose. `claude-agent.ts` formats the
+	// snippet as `[INFRA] Claude Code exited ${code}: ${detail}`, so only the
+	// number right after `exited` is the code. A loose `\b1[3-9]\d\b` would also
+	// match a stray "404" in a detail string or a line number, turning a genuine
+	// permanent failure into an endless retry — the mirror of the bug being fixed.
+	if (/exited\s+(?:12[9]|1[3-9]\d)\b/i.test(s)) return true
+
 	// A RUN THAT USED UP ITS OWN ALLOWANCE IS RETRYABLE. This used to be the
 	// opposite — `AI_FIX_TIMEOUT` was pinned permanently, and the test suite
 	// asserted that as a contract — on the reasoning that retrying costs another

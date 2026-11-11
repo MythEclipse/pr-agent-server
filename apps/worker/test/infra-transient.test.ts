@@ -109,3 +109,60 @@ describe("isInfra vs isTransientInfra", () => {
 		)
 	})
 })
+
+/**
+ * A PROCESS KILLED BY A SIGNAL IS NOT A VERDICT ON THE BRANCH.
+ *
+ * Five PRs on this fleet were pinned `Permanently skipped` with
+ * `Claude Code exited 143: ` — 143 is 128 + 15 (SIGTERM), the detail was EMPTY
+ * (the agent never produced a byte), and each had exactly one attempt. The kill
+ * came from outside the process: the worker's own systemd unit being stopped. A
+ * pin is enforced "until head SHA changes", and no restart moves a head, so those
+ * PRs were dead for good — released only by editing the state file.
+ *
+ * These tests pin the split: a signal death is retryable, a refusal is not.
+ */
+describe("a signal death is transient, never pinned", () => {
+	test("exited 143 (SIGTERM) with empty detail is TRANSIENT", () => {
+		// The exact recorded string from the state file.
+		expect(isTransientInfra("[INFRA] Claude Code exited 143: ")).toBe(true)
+	})
+
+	test("exited 137 (SIGKILL) is TRANSIENT", () => {
+		// The OOM killer and `systemctl kill -s KILL` both land here.
+		expect(isTransientInfra("[INFRA] Claude Code exited 137: ")).toBe(true)
+	})
+
+	test("exited 130 (SIGINT) and 129 (SIGHUP) are TRANSIENT", () => {
+		expect(isTransientInfra("[INFRA] Claude Code exited 130: ")).toBe(true)
+		expect(isTransientInfra("[INFRA] Claude Code exited 129: ")).toBe(true)
+	})
+
+	test("exited 1 is NOT rescued by this rule", () => {
+		// The whole point is to add SIGNAL deaths, not to make every failure
+		// retryable. A CLI that decided to exit 1 keeps its old classification.
+		expect(isTransientInfra("[INFRA] Claude Code exited 1: unexpected argument --foo")).toBe(false)
+	})
+
+	test("a signal-shaped number in the DETAIL is not read as the exit code", () => {
+		// The regex is anchored to `exited N`. Without that anchor, this genuine
+		// permanent failure would retry forever — the mirror of the bug.
+		expect(isTransientInfra("[INFRA] Claude Code exited 1: error at line 143")).toBe(false)
+		expect(isTransientInfra("[INFRA] Claude Code exited 1: expected 137 bytes")).toBe(false)
+	})
+
+	test("a real permanent infra failure still pins", () => {
+		expect(
+			isTransientInfra("[INFRA] Claude Code binary not found (looked in /usr/local/bin/claude)"),
+		).toBe(false)
+	})
+
+	test("a signal death is NOT counted as budget exhaustion", () => {
+		// Budget exhaustion is retryable AND expensive, so it counts against
+		// AI_FIX_BUDGET_CEILING. A kill cost nothing the worker chose to spend and
+		// must not consume the budget — otherwise a restart loop would exhaust the
+		// allowance without ever running the agent.
+		expect(isBudgetExhaustion("[INFRA] Claude Code exited 143: ")).toBe(false)
+		expect(isTransientInfra("[INFRA] Claude Code exited 143: ")).toBe(true)
+	})
+})
