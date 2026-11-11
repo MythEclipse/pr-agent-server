@@ -18,6 +18,26 @@ Group=pr-agent
 TimeoutStartSec=900
 Nice=10
 
+# ── The gate, and the three paths it needs ───────────────────────────────────
+# `--sync-hooks` is REFUSED unless PR_AGENT_SYNC_HOOKS is exactly "1" (see
+# apps/worker/src/index.ts, `SYNC_HOOKS`). Without it every run since this unit
+# was written exited 1 with the refusal message and synced NOTHING — the timer
+# was green-looking and the Dependabot templates never reached a single fork.
+# The gate is deliberate; this line is the operator's review of
+# apps/worker/src/ops/templates/ that it asks for.
+Environment=PR_AGENT_SYNC_HOOKS=1
+
+# These mirror pr-agent-worker.service. They are NOT optional: `run-worker.sh`
+# maps GITHUB_APP_ID from BWS but resolves the App's PRIVATE KEY from
+# PR_AGENT_KEY_PATH, whose code default is $HOME/.hermes/keys/pr-agent-key.pem
+# — a path that does not exist for the pr-agent user. Unset, the run dies with
+# "GitHub App private key not found" before a single API call. HOME is what
+# makes gh/bws cache lookups land somewhere writable.
+Environment=HOME=/var/lib/pr-agent-server
+Environment=PR_AGENT_APP_DIR=/var/lib/pr-agent-server
+Environment=PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem
+Environment=PR_AGENT_WEBHOOK_URL=https://pr-agent.asepharyana.my.id/api/v1/github_webhooks
+
 # The tick and this share one lock file, so overlap is already impossible; this
 # only stops systemd from starting a second copy after a slow one finishes.
 

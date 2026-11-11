@@ -119,6 +119,23 @@ jobs:
           cp -r apps/web/dist /tmp/pkg-api/web-dist
           cp deploy/pr-agent-server.service /tmp/pkg-pr-agent-server.service
 
+      # The WORKER half's units travel the same way, and for the same reason the
+      # server unit does: a unit that only exists in git is a unit the box has
+      # never heard of. Before this step the deploy restarted
+      # `pr-agent-sync-hooks.timer` while nothing installed its `.service`, so
+      # every edit to `deploy/pr-agent-sync-hooks.service` — including the
+      # PR_AGENT_SYNC_HOOKS gate variable without which the run is refused —
+      # stayed in the repo and never reached the box. The timer fired nightly
+      # into a unit that refused to do anything.
+      - name: Stage the worker units
+        run: |
+          mkdir -p /tmp/pkg-units
+          cp deploy/pr-agent-worker.service       /tmp/pkg-units/
+          cp deploy/pr-agent-worker.timer         /tmp/pkg-units/
+          cp deploy/pr-agent-sync-hooks.service   /tmp/pkg-units/
+          cp deploy/pr-agent-sync-hooks.timer     /tmp/pkg-units/
+          ls -l /tmp/pkg-units/
+
       - name: Package the worker
         run: |
           mkdir -p /tmp/pkg-worker
@@ -126,6 +143,19 @@ jobs:
           cp apps/worker/package.json /tmp/pkg-worker/package.json
           cp apps/worker/run-worker.sh /tmp/pkg-worker/run-worker.sh
           chmod +x /tmp/pkg-worker/run-worker.sh
+          # The sync-hooks run reads its Dependabot/workflow templates from disk
+          # at runtime, and the bundle resolves them relative to `dist/index.js`
+          # — i.e. `dist/templates`. A build that ships only `dist/ops/templates`
+          # produces a worker that starts fine and then reports
+          # `ENOENT ... dist/templates/dependabot.yml` for EVERY fork, syncing
+          # nothing, with the timer still looking green. Gate it here rather than
+          # discovering it on the box.
+          for t in dependabot.yml dependabot-gmw.yml dependabot-auto-merge.yml; do
+            if [ ! -f "apps/worker/dist/templates/$t" ]; then
+              echo "::error::apps/worker/dist/templates/$t is missing — the bundle resolves templates from dist/templates, and sync-hooks would sync nothing"
+              exit 1
+            fi
+          done
 
       - name: Archive
         # tar, not `cp -r`. The deployed node_modules is 476 symlinks pointing
@@ -203,6 +233,10 @@ jobs:
           # and the restart was skipped with a warning that read like a
           # non-event rather than a missing file.
           scp -o StrictHostKeyChecking=accept-new /tmp/pkg-pr-agent-server.service "$VPS_USER@$VPS_HOST:/tmp/pkg-pr-agent-server.service"
+          # The four worker units, shipped as a directory so the remote side can
+          # install whatever is present without naming each file twice.
+          tar -czf /tmp/pkg-units.tar.gz -C /tmp/pkg-units .
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-units.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-units.tar.gz"
           ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" <<'REMOTE'
           set -euo pipefail
 
@@ -329,6 +363,29 @@ jobs:
           sudo -n chown -R pr-agent:pr-agent /opt/pr-agent-worker
           sudo -n chmod +x /opt/pr-agent-worker/run-worker.sh
           rm -rf /tmp/pkg-worker.new /tmp/pkg-worker.tar.gz
+
+          # --- the worker units ---------------------------------------------
+          # Installed BEFORE the timer is restarted, and daemon-reload'd, so the
+          # restart below actually runs the unit this commit defines rather than
+          # whatever was hand-edited on the box months ago. `install` only when
+          # the file is present, matching the server unit's rule: a checkout that
+          # predates a unit must not blank the live one.
+          if [ -f /tmp/pkg-units.tar.gz ]; then
+            mkdir -p /tmp/pkg-units.new
+            tar -xzf /tmp/pkg-units.tar.gz -C /tmp/pkg-units.new
+            for u in pr-agent-worker.service pr-agent-worker.timer \
+                     pr-agent-sync-hooks.service pr-agent-sync-hooks.timer; do
+              if [ -f "/tmp/pkg-units.new/$u" ]; then
+                sudo -n install -m 644 "/tmp/pkg-units.new/$u" "/etc/systemd/system/$u"
+                echo "installed $u"
+              fi
+            done
+            sudo -n systemctl daemon-reload
+            sudo -n systemctl enable pr-agent-worker.timer pr-agent-sync-hooks.timer
+            rm -rf /tmp/pkg-units.new /tmp/pkg-units.tar.gz
+          else
+            echo "::warning::no /tmp/pkg-units.tar.gz; the worker units were NOT updated on this box"
+          fi
           rm -f /tmp/pkg-pr-agent-server.service
 
           # Restarting the TIMER is not a restart. `pr-agent-worker.service` is

@@ -44,7 +44,7 @@
  * resolves its own PAT (`gh auth token`, a local read via `GitHubApi`), its own
  * client, and its own repo list.
  */
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { GitHubApi } from "../github.ts"
 import type { GhClient } from "../pr/scan.ts"
@@ -190,8 +190,32 @@ export type SyncSummary = { ok: number; skip: number; lines: string[] }
  * Resolved from the module's own directory, not from `process.cwd()`: a cron
  * wrapper may `cd` anywhere, and a wrong directory would mean a silent
  * "template not found" on a live run.
+ *
+ * TWO CANDIDATES, and the second one is why. `esbuild` BUNDLES every module into
+ * one `dist/index.js`, so inside the bundle `import.meta.dirname` is `dist/` —
+ * not `dist/ops/` where this file sits in the source tree. Resolving only
+ * `dirname/templates` therefore pointed at `dist/templates`, which the build did
+ * not ship: every fork in a live run failed with
+ * `ENOENT ... dist/templates/dependabot.yml` and NOTHING was ever synced. The
+ * `ops/templates` fallback keeps a checkout (and the unit tests, which stage the
+ * files beside this module) working, and `templates` is what the bundle needs.
+ *
+ * Checked in that order and with `existsSync`, so a layout change fails at the
+ * first `templateBody` call with a path that names what was actually tried,
+ * rather than at import time.
  */
-const TEMPLATE_DIR = join(import.meta.dirname, "templates")
+const TEMPLATE_DIR = (() => {
+	const candidates = [
+		join(import.meta.dirname, "templates"),
+		join(import.meta.dirname, "ops", "templates"),
+	]
+	for (const dir of candidates) {
+		if (existsSync(join(dir, DEPENDABOT_FILE))) return dir
+	}
+	// Nothing found: keep the first candidate so the ENOENT names the primary
+	// path an operator would expect, not the fallback.
+	return candidates[0] as string
+})()
 
 /**
  * Template bodies, read LAZILY and cached.
