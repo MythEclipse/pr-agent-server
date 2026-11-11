@@ -1,3 +1,10 @@
+## [1.9.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.3...v1.9.4) (2026-11-11)
+
+
+### Bug Fixes
+
+* **sync-hooks:** a dry run must not report "updated" ([ddfdfc9](https://github.com/MythEclipse/pr-agent-server/commit/ddfdfc9ca8d580aab50f4f9ad3c984f137102d8f))
+
 ## [1.9.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.2...v1.9.3) (2026-11-11)
 
 
