@@ -186,3 +186,25 @@ export function upstreamSyncEnabled(
 ): boolean {
 	return env.PR_AGENT_UPSTREAM_SYNC !== "0"
 }
+
+/**
+ * Resolves per-repo overrides from the environment (`PR_AGENT_SYNC_SKIP_REPOS`).
+ *
+ * Comma-separated list of `owner/repo` forks that upstream auto-sync must NOT touch.
+ * Each entry resolves to `{ enabled: false }` in `RepoOverrides`, so the fork is
+ * skipped silently in `sweepForks` before any clone, agent call or report line.
+ */
+export function skipRepoOverrides(
+	env: Record<string, string | undefined> = process.env,
+): RepoOverrides {
+	const raw = env.PR_AGENT_SYNC_SKIP_REPOS
+	if (!raw) return {}
+	const out: RepoOverrides = {}
+	for (const item of raw.split(",")) {
+		const repo = item.trim()
+		if (repo) {
+			out[repo] = { enabled: false }
+		}
+	}
+	return out
+}

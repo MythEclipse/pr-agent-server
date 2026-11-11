@@ -25,6 +25,7 @@ import { sweepForks } from "./sweep.ts"
 import type { RunUpstreamSyncDeps as RunUpstreamSyncDepsType } from "./types.ts"
 import { verifyPendingSyncs } from "./verify.ts"
 
+export { skipRepoOverrides } from "./config.ts"
 // Re-exported, not fixed: the test suite and src/index.ts import these two by
 // name from "./run.ts", so re-exporting is what keeps the split invisible to them.
 export { syncForkRepo } from "./fork.ts"
