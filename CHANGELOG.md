@@ -1,3 +1,10 @@
+# [1.10.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.4...v1.10.0) (2026-11-11)
+
+
+### Features
+
+* **vulns:** make open advisories actionable, and stop under-counting them ([5eb5954](https://github.com/MythEclipse/pr-agent-server/commit/5eb59544690fcb595f02d888fadbf84b00863fac))
+
 ## [1.9.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.3...v1.9.4) (2026-11-11)
 
 
