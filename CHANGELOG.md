@@ -1,3 +1,10 @@
+## [1.10.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.1...v1.10.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **vulns:** page the alerts endpoint by CURSOR — it rejects `?page=` ([c9ed47a](https://github.com/MythEclipse/pr-agent-server/commit/c9ed47ad3e8600f46fc4ad7ce485e4106e7dfe4e))
+
 ## [1.10.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.0...v1.10.1) (2026-11-11)
 
 
