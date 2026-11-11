@@ -36,7 +36,7 @@ import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix.ts"
 import { runTick, type WorkerDeps } from "./pr/pipeline.ts"
 import { Report } from "./report.ts"
 import { FIX_STATE_FILE, loadFixState, loadSyncState, saveFixState } from "./state.ts"
-import { fileSyncState, runUpstreamSync } from "./sync/run.ts"
+import { fileSyncState, runUpstreamSync, skipRepoOverrides } from "./sync/run.ts"
 
 // ── Config, all read at CALL time (Python lines 59-62) ──────────────────────
 
@@ -169,7 +169,7 @@ function buildDeps(opts: { dry: boolean; report: Report }): WorkerDeps {
 		saveFixState: (state) => saveFixState(FIX_STATE_FILE, state),
 		loadSyncState: () => syncState.load(),
 		saveSyncState: (state) => syncState.save(state),
-		repoOverrides: {},
+		repoOverrides: skipRepoOverrides(),
 		now: () => Date.now() / 1000,
 		fetchImpl: (input, init) => fetch(input, init as RequestInit),
 		// The unshippable-bump guard's registry read. Wired here, in the one module

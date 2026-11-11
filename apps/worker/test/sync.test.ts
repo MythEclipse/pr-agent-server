@@ -37,6 +37,7 @@ import {
 	pendingVerify,
 	type SyncConfig,
 	type SyncState,
+	skipRepoOverrides,
 	syncConfig,
 	syncEntry,
 	UPSTREAM_SYNC_DEFAULTS,
@@ -1399,6 +1400,29 @@ describe("group 12 · syncConfig", () => {
 			verify_ci_max_age_h: 6.0,
 			no_ci_grace_s: 600,
 		})
+	})
+
+	test("skipRepoOverrides parses comma-separated repos into enabled: false overrides", () => {
+		expect(skipRepoOverrides({})).toEqual({})
+		expect(skipRepoOverrides({ PR_AGENT_SYNC_SKIP_REPOS: "" })).toEqual({})
+		expect(skipRepoOverrides({ PR_AGENT_SYNC_SKIP_REPOS: "   " })).toEqual({})
+		expect(
+			skipRepoOverrides({
+				PR_AGENT_SYNC_SKIP_REPOS: "MythEclipse/9router, asepharyana/9router",
+			}),
+		).toEqual({
+			"MythEclipse/9router": { enabled: false },
+			"asepharyana/9router": { enabled: false },
+		})
+	})
+
+	test("skipRepoOverrides integrates with syncConfig to disable the fork", () => {
+		const env = { PR_AGENT_SYNC_SKIP_REPOS: "MythEclipse/9router,asepharyana/9router" }
+		const overrides = skipRepoOverrides(env)
+		const skipped = syncConfig("MythEclipse/9router", overrides)
+		expect(skipped.enabled).toBe(false)
+		const active = syncConfig("MythEclipse/other-repo", overrides)
+		expect(active.enabled).toBe(true)
 	})
 })
 
