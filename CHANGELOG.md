@@ -1,3 +1,10 @@
+## [1.10.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.0...v1.10.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **vulns:** an unreadable repo is not a clean repo ([ab13582](https://github.com/MythEclipse/pr-agent-server/commit/ab1358295e8a32a2ee3b12c56a3d1ae378cc1518))
+
 # [1.10.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.4...v1.10.0) (2026-11-11)
 
 
