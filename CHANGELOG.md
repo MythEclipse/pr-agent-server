@@ -1,3 +1,10 @@
+## [1.11.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.1...v1.11.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **timer:** stop the 5-minute loop from dying silently on restart ([9323a0d](https://github.com/MythEclipse/pr-agent-server/commit/9323a0d9cdfd4dd516a56b169bbf24a35a8ece85))
+
 ## [1.11.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.0...v1.11.1) (2026-11-11)
 
 
