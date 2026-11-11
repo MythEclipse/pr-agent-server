@@ -1,3 +1,10 @@
+## [1.8.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.7...v1.8.8) (2026-11-11)
+
+
+### Bug Fixes
+
+* **sync:** skip unmergeable forks configured via PR_AGENT_SYNC_SKIP_REPOS ([#13](https://github.com/MythEclipse/pr-agent-server/issues/13)) ([86c7a57](https://github.com/MythEclipse/pr-agent-server/commit/86c7a57fd1e93f85419a752ce2b0a8af0f1754be))
+
 ## [1.8.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.6...v1.8.7) (2026-11-09)
 
 
