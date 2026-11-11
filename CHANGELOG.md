@@ -1,3 +1,10 @@
+## [1.9.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.1...v1.9.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **ci:** stop a comment from reading as an entrypoint invocation ([8743087](https://github.com/MythEclipse/pr-agent-server/commit/874308779e874f1bed37ba7edfd93ae2bfffb228))
+
 ## [1.9.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.0...v1.9.1) (2026-11-11)
 
 
