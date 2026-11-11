@@ -322,7 +322,17 @@ async function syncHooks(argv: string[]): Promise<number> {
 			dry: argv.includes("--dry"),
 		})
 		for (const line of res.lines) console.log(line)
-		console.log(`sync-hooks: ${res.ok} updated, ${res.skip} skipped`)
+		// A PREVIEW MUST NOT SAY "UPDATED". Dry runs report their suppressed
+		// writes as `ok`, so the summary read "124 updated, 310 skipped" for a
+		// run that changed nothing at all — the same class of lie as the write
+		// itself. The counts are still useful, so they stay; only the verb
+		// changes, and a dry run is named as one.
+		const dry = argv.includes("--dry")
+		console.log(
+			dry
+				? `sync-hooks: DRY RUN — ${res.ok} would change, ${res.skip} already correct (nothing written)`
+				: `sync-hooks: ${res.ok} updated, ${res.skip} skipped`,
+		)
 		const code = syncHooksExitCode(res.lines)
 		if (code !== 0) {
 			console.error(
