@@ -29,8 +29,14 @@ import { notifyReview, postDiscordOps } from "./discord.ts"
 import { runGit } from "./git.ts"
 import { GitHubApi } from "./github.ts"
 import { LOCK_FILE, WorkerLock } from "./lock.ts"
-import { runSyncHooks } from "./ops/syncHooks.ts"
-import { scanVulns, summarizeVulns } from "./ops/vulnFixer.ts"
+import { dependabotTemplateBody, runSyncHooks } from "./ops/syncHooks.ts"
+import {
+	lanesForAlerts,
+	lanesInConfig,
+	missingLanes,
+	scanVulns,
+	summarizeVulns,
+} from "./ops/vulnFixer.ts"
 import { nodeProcessDeps } from "./pr/autofix.ts"
 import { registryFetchFrom } from "./pr/bump-guard.ts"
 import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix.ts"
@@ -347,6 +353,93 @@ async function syncHooks(argv: string[]): Promise<number> {
 }
 
 /**
+ * `--fix-vulns`: make the open advisories ACTIONABLE, then report the coverage.
+ *
+ * WHAT THIS IS NOT. It does not bump manifests or open PRs itself. Dependabot
+ * does that, and it does it well; a second bump engine here would duplicate it
+ * badly and fight it on the same branches. What this fixes is the thing standing
+ * in Dependabot's way: a lane that names the manifest the alert is on.
+ *
+ * THE MEASURED GAP. 478 of 630 open alerts across this fleet sat on manifests no
+ * `updates:` lane named — nested `requirements.txt`, `rust/Cargo.lock`,
+ * `modul6/modul6/pom.xml`. With no lane, "automated security fixes" is switched
+ * on and watches nothing, so the advisory is raised and can never become a PR.
+ * This mode derives a lane per `(ecosystem, directory)` from each repo's own
+ * alerts and writes the config that carries them.
+ *
+ * Runs the SAME writer as `--sync-hooks`, deliberately: two writers of one file
+ * would overwrite each other nightly. It is the same work with a different
+ * report — a coverage table instead of a per-step log.
+ *
+ * Gated like `--sync-hooks`, for the same reason: it rewrites fleet-wide config.
+ */
+async function fixVulns(argv: string[]): Promise<number> {
+	const gate = process.env.PR_AGENT_SYNC_HOOKS
+	if (gate !== "1") {
+		console.error(
+			"pr-queue-worker: --fix-vulns is gated. Set PR_AGENT_SYNC_HOOKS=1 after " +
+				"reviewing apps/worker/src/ops/templates/ — it rewrites Dependabot config " +
+				"across every repo this token can see.",
+		)
+		return 1
+	}
+	const dry = argv.includes("--dry")
+	const lock = WorkerLock.acquire(LOCK_FILE)
+	if (!lock) {
+		console.log("another pr-queue-worker run holds the lock — try again shortly")
+		return 1
+	}
+	releaseHeld = () => lock.release()
+	try {
+		const deps = buildDeps({ dry, report: new Report() })
+		const res = await runSyncHooks({
+			api: deps.api,
+			ghToken: deps.fetchGhToken(),
+			webhookSecret: OPS_WEBHOOK_SECRET,
+			syncSecurity: true,
+			deriveVulnLanes: true,
+			dry,
+		})
+
+		const coverage = res.lanes ?? []
+		const unreachable = coverage.reduce((sum, c) => sum + c.unreachable, 0)
+		const totalAlerts = coverage.reduce((sum, c) => sum + c.alerts, 0)
+		const addedLanes = coverage.reduce((sum, c) => sum + c.added.length, 0)
+
+		// The step log is long and mostly "already in sync". Print only the repos
+		// that had something to say, then the table — the table is the report.
+		for (const line of res.lines) {
+			if (line.startsWith("⚠️")) console.log(line)
+		}
+		for (const c of coverage) {
+			if (c.unreachable === 0) continue
+			console.log(
+				`${dry ? "DRY " : ""}${c.repo}: ${c.alerts} open alert(s), ${c.unreachable} unreachable -> ${c.added.length} lane(s)`,
+			)
+			for (const lane of c.added) {
+				console.log(`      + ${lane.ecosystem} ${lane.directory} (${lane.alerts} alert(s))`)
+			}
+		}
+		console.log(
+			dry
+				? `vuln-fix: DRY RUN — ${totalAlerts} alert(s) across ${coverage.length} repo(s); ${unreachable} would become reachable via ${addedLanes} lane(s). Nothing written.`
+				: `vuln-fix: ${totalAlerts} alert(s) across ${coverage.length} repo(s); ${unreachable} made reachable via ${addedLanes} lane(s).`,
+		)
+		// Dependabot opens the PRs on its own schedule after the config lands, so a
+		// zero here is not "no vulnerabilities" — it is "nothing left to unblock".
+		if (unreachable === 0) {
+			console.log(
+				"vuln-fix: every open alert already sits on a watched manifest — Dependabot owns the rest.",
+			)
+		}
+		return syncHooksExitCode(res.lines)
+	} finally {
+		lock.release()
+		releaseHeld = null
+	}
+}
+
+/**
  * Audit and report Dependabot security vulnerabilities across repos.
  */
 async function auditVulns(argv: string[]): Promise<number> {
@@ -373,12 +466,30 @@ async function auditVulns(argv: string[]): Promise<number> {
 		.filter(Boolean)
 	console.log(`🔍 Scanning Dependabot security alerts across ${repos.length} repositories...`)
 	const results = await scanVulns(deps.api, repos, token)
+	// An audit that only counts advisories answers the wrong question. The one
+	// that matters is how many of them DEPENDABOT CAN ACT ON — an alert on a
+	// manifest no lane names cannot become a PR, so it will still be open in a
+	// month no matter what the count says. Coverage is computed against the same
+	// template the sync ships.
+	const template = dependabotTemplateBody()
+	const templateLanes = lanesInConfig(template)
 	let totalVulns = 0
+	let unreachable = 0
 	for (const { repo, alerts } of results) {
 		if (alerts.length > 0) {
 			totalVulns += alerts.length
 			for (const line of summarizeVulns(repo, alerts)) {
 				console.log(line)
+			}
+			const missing = missingLanes(lanesForAlerts(alerts), templateLanes)
+			const dead = missing.reduce((sum, lane) => sum + lane.alerts, 0)
+			if (dead > 0) {
+				unreachable += dead
+				console.log(
+					`   ⚠️  ${dead} of ${alerts.length} unreachable — no lane covers: ${missing
+						.map((lane) => `${lane.ecosystem} ${lane.directory}`)
+						.join(", ")}`,
+				)
 			}
 		}
 	}
@@ -386,6 +497,13 @@ async function auditVulns(argv: string[]): Promise<number> {
 		console.log("✅ No open Dependabot vulnerabilities found across any repository!")
 	} else {
 		console.log(`⚠️ Total ${totalVulns} open Dependabot vulnerabilities found.`)
+		if (unreachable > 0) {
+			console.log(
+				`⚠️ ${unreachable} of them (${Math.round((unreachable / totalVulns) * 100)}%) sit on manifests no Dependabot lane names — Dependabot cannot open a PR for those. Run --fix-vulns to add the lanes.`,
+			)
+		} else {
+			console.log("✅ Every open alert sits on a watched manifest — Dependabot owns the rest.")
+		}
 	}
 	return 0
 }
@@ -430,7 +548,14 @@ async function main(argvIn?: string[]): Promise<number> {
 		}
 		return syncHooks(argv)
 	}
-	if (argv.includes("--scan-vulns") || argv.includes("--fix-vulns")) {
+	if (argv.includes("--fix-vulns")) {
+		// Gated inside `fixVulns` — it writes fleet-wide config, so it needs the
+		// same review-before-you-run gate as `--sync-hooks`.
+		return fixVulns(argv)
+	}
+	if (argv.includes("--scan-vulns")) {
+		// Read-only: no gate. An audit that requires a write flag is an audit
+		// nobody runs.
 		return auditVulns(argv)
 	}
 

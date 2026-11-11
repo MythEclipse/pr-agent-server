@@ -48,7 +48,18 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { GitHubApi } from "../github.ts"
 import type { GhClient } from "../pr/scan.ts"
-import { enableAutomatedSecurityFixes, enableVulnerabilityAlerts } from "./security.ts"
+import {
+	enableAutomatedSecurityFixes,
+	enableVulnerabilityAlerts,
+	fetchOpenDependabotAlertsResult,
+} from "./security.ts"
+import {
+	type Lane,
+	lanesForAlerts,
+	lanesInConfig,
+	missingLanes,
+	withDerivedLanes,
+} from "./vulnFixer.ts"
 
 /**
  * The owner whose repos are synced.
@@ -180,6 +191,20 @@ export type SyncHooksDeps = {
 	 */
 	syncSecurity?: boolean
 	/**
+	 * Derive a Dependabot lane from each repo's own open alerts, so a nested
+	 * manifest gets watched instead of merely alerted on.
+	 *
+	 * DEFAULT ON when `syncSecurity` is on: an alert on a manifest no lane names
+	 * can never become a PR, so enabling security updates without this only
+	 * produces advisories nobody can action. See `vulnFixer.ts` for the measured
+	 * gap that motivated it (478 of 630 alerts unreachable).
+	 *
+	 * A repo whose alerts cannot be READ is skipped rather than written: the
+	 * derived body would otherwise collapse to the bare template and silently
+	 * drop lanes that are still needed.
+	 */
+	deriveVulnLanes?: boolean
+	/**
 	 * PREVIEW ONLY — report what WOULD change and write nothing.
 	 *
 	 * This exists because `--sync-hooks --dry` used to be a lie: the CLI passed
@@ -195,8 +220,31 @@ export type SyncHooksDeps = {
 	dry?: boolean
 }
 
+/**
+ * What one repo's alert set implied for its Dependabot config.
+ *
+ * Reported rather than logged because the operator question `--fix-vulns` exists
+ * to answer is "how many advisories were unreachable, and did this run make them
+ * reachable" — and that is a number, not a log line.
+ */
+export type LaneCoverage = {
+	repo: string
+	/** Open alerts read for this repo. */
+	alerts: number
+	/** Lanes the repo's alerts needed that the config did not declare. */
+	added: Lane[]
+	/** Alerts that sat on a manifest no lane named, before this run. */
+	unreachable: number
+}
+
 /** The brief's return shape. `ok + skip` is the number of actions attempted. */
-export type SyncSummary = { ok: number; skip: number; lines: string[] }
+export type SyncSummary = {
+	ok: number
+	skip: number
+	lines: string[]
+	/** Per-repo lane derivation, present only when lanes were derived. */
+	lanes?: LaneCoverage[]
+}
 
 // ── Templates ────────────────────────────────────────────────────────────────
 
@@ -247,6 +295,19 @@ const TEMPLATE_DIR = (() => {
  * one report line instead of a stack trace.
  */
 const templateCache = new Map<string, string>()
+
+/**
+ * The base Dependabot template, for callers that need to reason about coverage
+ * (the audit) without running a sync.
+ *
+ * Exported so there is ONE resolution of `TEMPLATE_DIR`. A second copy in the
+ * CLI would have to rediscover the bundling quirk documented above — and get it
+ * wrong the same way it was got wrong the first time, which is how the whole
+ * fleet synced nothing.
+ */
+export function dependabotTemplateBody(): string {
+	return templateBody("dependabot.yml")
+}
 
 function templateBody(file: string): string {
 	const cached = templateCache.get(file)
@@ -574,6 +635,14 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 		else skip += 1
 		lines.push(step.line)
 	}
+	const coverage: LaneCoverage[] = []
+	// Lane derivation follows security sync unless explicitly overridden.
+	// Deriving lanes is what makes the alerts actionable, so defaulting it off
+	// while security sync is on would reproduce the original bug: advisories
+	// raised on manifests nothing watches.
+	//
+	// Declared OUTSIDE the try so the catch can still report it.
+	const deriveLanes = deps.deriveVulnLanes ?? deps.syncSecurity === true
 
 	try {
 		// CALL TIME, not import time. `deps` wins so a test — and the production
@@ -618,16 +687,49 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 				record(await syncHook(api, repo, token, secret, dry))
 			}
 
-			record(
-				await syncFile(
-					api,
-					repo,
-					dependabotPathFor(repo),
-					templateBody(dependabotFileFor(repo)),
-					token,
-					dry,
-				),
-			)
+			// The Dependabot body is DERIVED per repo, not the bare template: the
+			// template only names root lanes, and an alert on a nested manifest
+			// that no lane names can never become a PR. `withDerivedLanes` adds a
+			// lane for every manifest this repo's own alerts point at, and returns
+			// the template untouched when there is nothing to add.
+			//
+			// A repo whose alerts cannot be read is NOT written. Deriving from a
+			// failed read yields the bare template, which would quietly drop the
+			// lanes that are still needed — the failure would look like a
+			// successful sync that shrank a config.
+			const dependabotTemplate = templateBody(dependabotFileFor(repo))
+			if (deriveLanes) {
+				const alerts = await fetchOpenDependabotAlertsResult(api, repo, token)
+				if (!alerts.ok) {
+					record({
+						ok: false,
+						line: `⚠️  ${repo}: alerts unreadable (HTTP ${alerts.status}) — \`${dependabotPathFor(repo)}\` left alone`,
+					})
+				} else {
+					const needs = lanesForAlerts(alerts.alerts)
+					const missing = missingLanes(needs, lanesInConfig(dependabotTemplate))
+					coverage.push({
+						repo,
+						alerts: alerts.alerts.length,
+						added: missing,
+						// Only the alerts on manifests nothing named are unreachable;
+						// alerts already covered by a root lane were fine.
+						unreachable: missing.reduce((sum, lane) => sum + lane.alerts, 0),
+					})
+					record(
+						await syncFile(
+							api,
+							repo,
+							dependabotPathFor(repo),
+							withDerivedLanes(dependabotTemplate, needs),
+							token,
+							dry,
+						),
+					)
+				}
+			} else {
+				record(await syncFile(api, repo, dependabotPathFor(repo), dependabotTemplate, token, dry))
+			}
 			// The auto-merge WORKFLOW goes to EVERY repo, GMW included. Read that
 			// twice: the gmw Dependabot variant is GMW-only, the workflow is not.
 			record(await syncFile(api, repo, AUTO_MERGE_PATH, templateBody(AUTO_MERGE_FILE), token, dry))
@@ -657,7 +759,7 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 			}
 		}
 
-		return { ok, skip, lines }
+		return { ok, skip, lines, ...(deriveLanes ? { lanes: coverage } : {}) }
 	} catch (err) {
 		// The templates are the one thing that can be structurally missing, and the
 		// message names the cause instead of surfacing a bare ENOENT from deep
@@ -666,6 +768,6 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 		const msg = err instanceof Error ? err.message : String(err)
 		lines.push(`⚠️  sync-hooks: ${name}: ${msg}`)
 		skip += 1
-		return { ok, skip, lines }
+		return { ok, skip, lines, ...(deriveLanes ? { lanes: coverage } : {}) }
 	}
 }

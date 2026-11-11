@@ -56,7 +56,7 @@ const unb64 = (text: string) => Buffer.from(text, "base64").toString("utf8")
 type Recorded = { method: string; path: string; token?: string; json?: any }
 
 /** Per-repo world: which hooks exist, and which files exist with what content. */
-type Fixture = { hooks?: any[]; files?: Record<string, string>; labels?: string[] }
+type Fixture = { hooks?: any[]; files?: Record<string, string>; labels?: string[]; alerts?: any[] }
 
 type Fake = { api: NonNullable<SyncHooksDeps["api"]>; calls: Recorded[] }
 
@@ -79,6 +79,19 @@ function fakeApi(repos: string[], fixtures: Record<string, Fixture> = {}): Fake 
 		// Dependabot config would never be synced and never look missing.
 		if (method === "GET" && path === "/user/repos?affiliation=owner&per_page=100") {
 			return { status: 200, data: repos.map((full_name) => ({ full_name })) }
+		}
+		// Dependabot alerts, paginated. A repo with no fixture answers `[]`, which
+		// is a SHORT page, so pagination stops after one request — exactly what
+		// the live API does for a clean repo. `?per_page=100&page=1` is part of
+		// the path, so this must be matched before the generic content rules.
+		const alerts = /^GET \/repos\/([^/]+(?:\/[^/]+)*?)\/dependabot\/alerts\?/.exec(
+			`${method} ${path}`,
+		)
+		if (alerts) {
+			const held = fixtures[alerts[1]]?.alerts ?? []
+			const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? "1")
+			const size = Number(/[?&]per_page=(\d+)/.exec(path)?.[1] ?? "100")
+			return { status: 200, data: held.slice((page - 1) * size, page * size) }
 		}
 		const hooks = /^GET \/repos\/([^/]+\/[^/]+)\/hooks$/.exec(`${method} ${path}`)
 		if (hooks) {
@@ -786,5 +799,132 @@ describe("dry mode writes nothing", () => {
 		const fake = fakeApi([repo], needsWork)
 		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s" })
 		expect(fake.calls.filter((c) => c.method !== "GET").length).toBeGreaterThan(0)
+	})
+})
+
+/**
+ * Lane derivation, END TO END through the sync.
+ *
+ * `vuln-lanes.test.ts` proves the renderer. This proves the renderer is what
+ * reaches GitHub — a config that is correct in a pure function and never written
+ * is exactly the failure this feature exists to correct, one level up.
+ */
+describe("the sync writes the DERIVED Dependabot config", () => {
+	const repo = "owner/nested"
+	const dependabotPath = ".github/dependabot.yml"
+
+	/** An alert on a NESTED manifest — the case no root lane covers. */
+	const nestedAlert = (dir: string) => ({
+		number: 1,
+		state: "open",
+		dependency: {
+			package: { ecosystem: "pip", name: "pillow" },
+			manifest_path: `${dir}/requirements.txt`,
+		},
+		security_advisory: { ghsa_id: "G", cve_id: null, summary: "", severity: "high" },
+		security_vulnerability: {
+			package: { ecosystem: "pip", name: "pillow" },
+			severity: "high",
+			vulnerable_version_range: "<1",
+			first_patched_version: { identifier: "1" },
+		},
+		url: "",
+		html_url: "",
+		created_at: "",
+	})
+
+	const putBody = (calls: Recorded[]) => {
+		const put = of(calls, "PUT", `/repos/${repo}/contents/${dependabotPath}`)[0]
+		return put?.json ? unb64(String((put.json as { content: string }).content)) : undefined
+	}
+
+	test("a nested manifest gets a lane written into the repo's config", async () => {
+		const fake = fakeApi([repo], { [repo]: { files: {}, alerts: [nestedAlert("Proyek_A")] } })
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s", syncSecurity: true })
+
+		const body = putBody(fake.calls)
+		expect(body).toBeDefined()
+		// The lane the template does not have, and the one that makes the alert
+		// actionable.
+		expect(body).toContain('- package-ecosystem: "pip"')
+		expect(body).toContain('directory: "/Proyek_A"')
+		// And the template's own lanes survive.
+		expect(body).toContain("github-actions")
+	})
+
+	test("a repo whose alerts are all on root manifests gets the plain template", async () => {
+		// No lane to add, so the body is byte-identical to the template — which is
+		// what keeps a converged fleet from committing every night.
+		const rootAlert = {
+			...nestedAlert("x"),
+			dependency: { package: { ecosystem: "npm", name: "x" }, manifest_path: "package-lock.json" },
+		}
+		const fake = fakeApi([repo], { [repo]: { files: {}, alerts: [rootAlert] } })
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s", syncSecurity: true })
+		expect(putBody(fake.calls)).toBe(template("dependabot.yml"))
+	})
+
+	test("a FAILED alerts read leaves the config ALONE — it must not shrink it", async () => {
+		// The dangerous case: deriving from a failed read yields the bare template,
+		// which would quietly drop the lanes still needed. The repo must be skipped
+		// and the failure reported, not written.
+		const fake = fakeApi([repo], { [repo]: { files: {} } })
+		const blind = {
+			async request(method: string, path: string, opts: { token?: string; json?: unknown } = {}) {
+				if (path.includes("/dependabot/alerts")) {
+					fake.calls.push({ method, path, token: opts.token, json: opts.json })
+					return { status: 500, data: { message: "boom" } }
+				}
+				return fake.api.request(method, path, opts)
+			},
+		}
+		const res = await runSyncHooks({
+			api: blind as never,
+			ghToken: "t",
+			webhookSecret: "s",
+			syncSecurity: true,
+		})
+		expect(of(fake.calls, "PUT", `/repos/${repo}/contents/${dependabotPath}`)).toHaveLength(0)
+		expect(res.lines.some((l) => l.startsWith("⚠️") && l.includes("alerts unreadable"))).toBe(true)
+	})
+
+	test("derivation is OFF when security sync is off — the old behaviour is intact", async () => {
+		const fake = fakeApi([repo], { [repo]: { files: {}, alerts: [nestedAlert("Proyek_A")] } })
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s" })
+		// No alerts request at all, and the plain template is written.
+		expect(fake.calls.some((c) => c.path.includes("/dependabot/alerts"))).toBe(false)
+		expect(putBody(fake.calls)).toBe(template("dependabot.yml"))
+	})
+
+	test("dry mode reports the lane it would add and writes nothing", async () => {
+		const fake = fakeApi([repo], { [repo]: { files: {}, alerts: [nestedAlert("Proyek_A")] } })
+		const res = await runSyncHooks({
+			api: fake.api,
+			ghToken: "t",
+			webhookSecret: "s",
+			syncSecurity: true,
+			dry: true,
+		})
+		expect(fake.calls.filter((c) => c.method !== "GET")).toEqual([])
+		expect(res.lines.some((l) => l.startsWith("DRY") && l.includes("dependabot.yml"))).toBe(true)
+	})
+
+	test("the coverage summary counts the alerts that were unreachable", async () => {
+		const fake = fakeApi([repo], {
+			[repo]: {
+				files: {},
+				alerts: [nestedAlert("Proyek_A"), nestedAlert("Proyek_A"), nestedAlert("Proyek_B")],
+			},
+		})
+		const res = await runSyncHooks({
+			api: fake.api,
+			ghToken: "t",
+			webhookSecret: "s",
+			syncSecurity: true,
+		})
+		expect(res.lanes).toBeDefined()
+		const mine = res.lanes?.find((c) => c.repo === repo)
+		expect(mine).toMatchObject({ repo, alerts: 3, unreachable: 3 })
+		expect(mine?.added.map((l) => l.directory).sort()).toEqual(["/Proyek_A", "/Proyek_B"])
 	})
 })

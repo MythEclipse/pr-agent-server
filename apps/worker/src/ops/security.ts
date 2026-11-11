@@ -97,18 +97,72 @@ export type DependabotAlert = {
 }
 
 /**
+ * The page size GitHub caps this endpoint at, and the hard stop on pagination.
+ *
+ * THE CAP IS NOT COSMETIC. This endpoint is paginated, and the original code
+ * read ONE page and stopped — so a fleet audit reported 317 open alerts when the
+ * real number was 630. Nearly half the problem was invisible, which is exactly
+ * the failure mode a security audit must not have. 50 pages is 5000 alerts: far
+ * above any real fleet, and low enough that a broken `Link` header cannot spin
+ * forever.
+ */
+const ALERT_PAGE_SIZE = 100
+const ALERT_MAX_PAGES = 50
+
+export type AlertsResult =
+	| { ok: true; alerts: DependabotAlert[] }
+	| { ok: false; status: number; alerts: DependabotAlert[] }
+
+/**
+ * Fetch every open Dependabot alert for a repository, following pagination.
+ *
+ * Returns a DISCRIMINATED RESULT, not a bare array, because "no alerts" and
+ * "the call failed" are opposite facts and the caller's next move differs: an
+ * empty list means the repo is clean, a failure means the caller must not
+ * conclude anything — in particular it must not overwrite a Dependabot config
+ * with one derived from an empty alert list.
+ */
+export async function fetchOpenDependabotAlertsResult(
+	api: GhClient,
+	repo: string,
+	token: string,
+): Promise<AlertsResult> {
+	const all: DependabotAlert[] = []
+	for (let page = 1; page <= ALERT_MAX_PAGES; page += 1) {
+		const res = await api.request(
+			"GET",
+			`/repos/${repo}/dependabot/alerts?state=open&per_page=${ALERT_PAGE_SIZE}&page=${page}`,
+			{ token },
+		)
+		if (res.status !== 200 || !Array.isArray(res.data)) {
+			// A failure on page 1 is a failure. A failure on a LATER page is a
+			// partial answer: reporting the pages we did get is better than
+			// discarding them, but it is still not "ok" — so it is surfaced.
+			if (page === 1) return { ok: false, status: res.status, alerts: [] }
+			return { ok: false, status: res.status, alerts: all }
+		}
+		const batch = res.data as DependabotAlert[]
+		all.push(...batch)
+		// A short page is the end. Asking for page N+1 after a short page would
+		// return empty, so this also saves a request per repo.
+		if (batch.length < ALERT_PAGE_SIZE) return { ok: true, alerts: all }
+	}
+	return { ok: true, alerts: all }
+}
+
+/**
  * Fetch open Dependabot alerts for a repository.
+ *
+ * Thin wrapper over `fetchOpenDependabotAlertsResult` for callers that only
+ * want the list. PREFER THE RESULT FORM anywhere the answer decides a WRITE:
+ * this one collapses "failed" into "none", which would let a failed read
+ * overwrite a repo's Dependabot config with a truncated one.
  */
 export async function fetchOpenDependabotAlerts(
 	api: GhClient,
 	repo: string,
 	token: string,
 ): Promise<DependabotAlert[]> {
-	const res = await api.request("GET", `/repos/${repo}/dependabot/alerts?state=open&per_page=100`, {
-		token,
-	})
-	if (res.status !== 200 || !Array.isArray(res.data)) {
-		return []
-	}
-	return res.data as DependabotAlert[]
+	const res = await fetchOpenDependabotAlertsResult(api, repo, token)
+	return res.alerts
 }
