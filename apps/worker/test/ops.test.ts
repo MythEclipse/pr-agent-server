@@ -80,18 +80,31 @@ function fakeApi(repos: string[], fixtures: Record<string, Fixture> = {}): Fake 
 		if (method === "GET" && path === "/user/repos?affiliation=owner&per_page=100") {
 			return { status: 200, data: repos.map((full_name) => ({ full_name })) }
 		}
-		// Dependabot alerts, paginated. A repo with no fixture answers `[]`, which
-		// is a SHORT page, so pagination stops after one request — exactly what
-		// the live API does for a clean repo. `?per_page=100&page=1` is part of
-		// the path, so this must be matched before the generic content rules.
+		// Dependabot alerts, CURSOR-paginated. The real endpoint rejects `?page=N`
+		// outright with HTTP 400, so this fake refuses it too — a fake that served
+		// `page` is how a `?page=` regression reached production once already.
+		// `after` is an opaque offset; a `Link` header is offered only when more
+		// alerts remain.
 		const alerts = /^GET \/repos\/([^/]+(?:\/[^/]+)*?)\/dependabot\/alerts\?/.exec(
 			`${method} ${path}`,
 		)
 		if (alerts) {
+			if (/[?&]page=/.test(path)) {
+				return {
+					status: 400,
+					data: { message: "Pagination using the `page` parameter is not supported." },
+				}
+			}
 			const held = fixtures[alerts[1]]?.alerts ?? []
-			const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? "1")
 			const size = Number(/[?&]per_page=(\d+)/.exec(path)?.[1] ?? "100")
-			return { status: 200, data: held.slice((page - 1) * size, page * size) }
+			const after = Number(/[?&]after=(\d+)/.exec(path)?.[1] ?? "0")
+			const data = held.slice(after, after + size)
+			const next = after + data.length
+			const link =
+				next < held.length
+					? `<https://api.github.com/repos/${alerts[1]}/dependabot/alerts?state=open&per_page=${size}&after=${next}>; rel="next"`
+					: undefined
+			return { status: 200, data, link }
 		}
 		const hooks = /^GET \/repos\/([^/]+\/[^/]+)\/hooks$/.exec(`${method} ${path}`)
 		if (hooks) {

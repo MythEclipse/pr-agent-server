@@ -30,7 +30,7 @@ export type GhClient = {
 		method: string,
 		path: string,
 		opts?: { token?: string; json?: unknown },
-	): Promise<{ status: number; data: any }>
+	): Promise<{ status: number; data: any; link?: string }>
 }
 
 /** `GhClient` plus the token minting `gatherOpenPrs` needs. */
