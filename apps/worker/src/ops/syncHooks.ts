@@ -48,6 +48,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { GitHubApi } from "../github.ts"
 import type { GhClient } from "../pr/scan.ts"
+import { enableAutomatedSecurityFixes, enableVulnerabilityAlerts } from "./security.ts"
 
 /**
  * The owner whose repos are synced.
@@ -173,6 +174,11 @@ export type SyncHooksDeps = {
 	webhookSecret?: string
 	/** Injectable repo list; when absent, the owner listing is used. */
 	repos?: string[]
+	/**
+	 * Whether to sync vulnerability alerts and automated security fixes.
+	 * Default: true when syncing hooks/repos. Can be disabled in tests or via options.
+	 */
+	syncSecurity?: boolean
 }
 
 /** The brief's return shape. `ok + skip` is the number of actions attempted. */
@@ -558,6 +564,14 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 			// conditional write can only create or update — it never cleans up a
 			// path that stopped being used.
 			record(await removeStaleFile(api, repo, LEGACY_AUTO_MERGE_PATH, token))
+
+			// Enable Dependabot vulnerability alerts and automated security fixes.
+			// When enabled, GitHub continuously checks dependencies against security advisories
+			// and automatically generates security update PRs.
+			if (deps.syncSecurity) {
+				record(await enableVulnerabilityAlerts(api, repo, token))
+				record(await enableAutomatedSecurityFixes(api, repo, token))
+			}
 		}
 
 		return { ok, skip, lines }

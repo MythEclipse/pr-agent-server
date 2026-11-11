@@ -30,6 +30,7 @@ import { runGit } from "./git.ts"
 import { GitHubApi } from "./github.ts"
 import { LOCK_FILE, WorkerLock } from "./lock.ts"
 import { runSyncHooks } from "./ops/syncHooks.ts"
+import { scanVulns, summarizeVulns } from "./ops/vulnFixer.ts"
 import { nodeProcessDeps } from "./pr/autofix.ts"
 import { registryFetchFrom } from "./pr/bump-guard.ts"
 import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix.ts"
@@ -289,6 +290,7 @@ async function syncHooks(argv: string[]): Promise<number> {
 			// `_fetch_gh_token()` did.
 			ghToken: deps.fetchGhToken(),
 			webhookSecret: OPS_WEBHOOK_SECRET,
+			syncSecurity: true,
 		})
 		for (const line of res.lines) console.log(line)
 		console.log(`sync-hooks: ${res.ok} updated, ${res.skip} skipped`)
@@ -297,6 +299,50 @@ async function syncHooks(argv: string[]): Promise<number> {
 		lock.release()
 		releaseHeld = null
 	}
+}
+
+/**
+ * Audit and report Dependabot security vulnerabilities across repos.
+ */
+async function auditVulns(argv: string[]): Promise<number> {
+	const deps = buildDeps({ dry: argv.includes("--dry"), report: new Report() })
+	const token = deps.fetchGhToken()
+	if (!token) {
+		console.error("vuln-scan: no GitHub token available")
+		return 1
+	}
+	// Fetch list of repositories
+	const { status, data } = await deps.api.request(
+		"GET",
+		"/user/repos?affiliation=owner&per_page=100",
+		{ token },
+	)
+	if (status !== 200 || !Array.isArray(data)) {
+		console.error(`vuln-scan: failed to list repos (HTTP ${status})`)
+		return 1
+	}
+	const repos = data
+		.map((r: unknown) =>
+			typeof r === "object" && r !== null && "full_name" in r ? String(r.full_name ?? "") : "",
+		)
+		.filter(Boolean)
+	console.log(`🔍 Scanning Dependabot security alerts across ${repos.length} repositories...`)
+	const results = await scanVulns(deps.api, repos, token)
+	let totalVulns = 0
+	for (const { repo, alerts } of results) {
+		if (alerts.length > 0) {
+			totalVulns += alerts.length
+			for (const line of summarizeVulns(repo, alerts)) {
+				console.log(line)
+			}
+		}
+	}
+	if (totalVulns === 0) {
+		console.log("✅ No open Dependabot vulnerabilities found across any repository!")
+	} else {
+		console.log(`⚠️ Total ${totalVulns} open Dependabot vulnerabilities found.`)
+	}
+	return 0
 }
 
 // ── main ───────────────────────────────────────────────────────────────────
@@ -338,6 +384,9 @@ async function main(argvIn?: string[]): Promise<number> {
 			return 1
 		}
 		return syncHooks(argv)
+	}
+	if (argv.includes("--scan-vulns") || argv.includes("--fix-vulns")) {
+		return auditVulns(argv)
 	}
 
 	const report = new Report()
