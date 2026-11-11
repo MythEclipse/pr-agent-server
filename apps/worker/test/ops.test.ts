@@ -637,3 +637,154 @@ describe("the --sync-hooks CLI gate", () => {
 		}
 	})
 })
+
+/**
+ * The `--sync-hooks` exit code.
+ *
+ * This is a separate concern from the gate above and it broke in production:
+ * the rule was `ok > 0 || skip === 0`, so the STEADY STATE — every repo already
+ * in sync, `0 updated, N skipped` — exited 1 and systemd recorded the unit as
+ * `failed`. The nightly timer therefore reported failure every night it did its
+ * job, which is how a real gate refusal sat unnoticed for three days: the two
+ * conditions were indistinguishable in `systemctl status`.
+ *
+ * `skip` counts steps that needed no change, so it can never be a failure
+ * signal. The only failure signal the summary carries is a ⚠️ line.
+ */
+describe("the --sync-hooks exit code", () => {
+	let exitCode: (lines: readonly string[]) => number
+
+	beforeAll(async () => {
+		const mod = await import("../src/index")
+		exitCode = mod.syncHooksExitCode
+	})
+
+	test("a fully in-sync run is a SUCCESS, not a failure", () => {
+		// The exact shape the box produced: nothing to change, everything skipped.
+		const lines = Array.from(
+			{ length: 7 },
+			(_, i) => `\u23ed\ufe0f  owner/repo: check ${i} already in sync`,
+		)
+		expect(exitCode(lines)).toBe(0)
+	})
+
+	test("a run that changed something is a success", () => {
+		expect(exitCode(["\u2705 owner/repo: pr-agent webhook created"])).toBe(0)
+	})
+
+	test("a run with no lines at all is a success", () => {
+		expect(exitCode([])).toBe(0)
+	})
+
+	test("a ⚠️ line makes it a failure, even when other repos succeeded", () => {
+		const lines = ["\u2705 owner/a: created", "\u26a0\ufe0f  sync-hooks: owner/b: HTTP 500"]
+		expect(exitCode(lines)).toBe(1)
+	})
+
+	test("the module's own no-token and listing-failure lines are failures", () => {
+		expect(exitCode(["\u26a0\ufe0f  sync-hooks: no GitHub token available — nothing synced"])).toBe(
+			1,
+		)
+		expect(exitCode(["\u26a0\ufe0f  sync-hooks: repo listing failed (HTTP 500)"])).toBe(1)
+	})
+})
+
+/**
+ * `dry` — the preview must not write.
+ *
+ * This is the one behaviour whose absence was INVISIBLE: `--sync-hooks --dry`
+ * looked like a preview, reported plausible lines, and rewrote the fleet. It was
+ * found by noticing that a "dry" run had left `chore(deps): sync
+ * .github/dependabot.yml from the ops template` commits across repos. A preview
+ * that performs the change is worse than no preview at all, because it is
+ * trusted exactly where trust matters most.
+ *
+ * Asserted on the RECORDED REQUESTS, not on the lines: a write that happened and
+ * was merely not reported would still be a write.
+ */
+describe("dry mode writes nothing", () => {
+	const repo = "owner/repo"
+	/** A repo where every step has work to do, so a real run would write. */
+	const needsWork: Record<string, Fixture> = {
+		[repo]: { hooks: [], files: {}, labels: [] },
+	}
+
+	const runDry = async (extra: Partial<SyncHooksDeps> = {}) => {
+		const fake = fakeApi([repo], needsWork)
+		const res = await runSyncHooks({
+			api: fake.api,
+			ghToken: "t",
+			webhookSecret: "s",
+			syncSecurity: true,
+			dry: true,
+			...extra,
+		})
+		return { res, calls: fake.calls }
+	}
+
+	test("no PUT, POST or DELETE is issued at all", async () => {
+		const { calls } = await runDry()
+		const writes = calls.filter((c) => c.method !== "GET")
+		expect(writes).toEqual([])
+	})
+
+	test("the webhook is not created, so no secret goes on the wire", async () => {
+		const { calls } = await runDry()
+		expect(hookPosts(calls)).toHaveLength(0)
+	})
+
+	test("no file is created or updated", async () => {
+		const { calls } = await runDry()
+		expect(contentPuts(calls)).toHaveLength(0)
+	})
+
+	test("the label is not created", async () => {
+		const { calls } = await runDry()
+		const labelPosts = calls.filter((c) => c.method === "POST" && c.path.endsWith("/labels"))
+		expect(labelPosts).toHaveLength(0)
+	})
+
+	test("the stale path is not deleted", async () => {
+		const { calls } = await runDry()
+		expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0)
+	})
+
+	test("what WOULD happen is still reported, marked DRY", async () => {
+		const { res } = await runDry()
+		const dryLines = res.lines.filter((l) => l.startsWith("DRY "))
+		expect(dryLines.length).toBeGreaterThan(0)
+		// And nothing claims to have done it.
+		expect(res.lines.some((l) => l.startsWith("✅"))).toBe(false)
+	})
+
+	test("a dry run never reports a ⚠️ failure, so the exit code stays 0", async () => {
+		const { res } = await runDry()
+		expect(res.lines.filter((l) => l.startsWith("⚠️"))).toEqual([])
+	})
+
+	test("the SAME fixture with dry off DOES write — the fixture is not vacuous", async () => {
+		// Without this, every assertion above would pass on a repo that had
+		// nothing to do, and the suite would prove nothing.
+		const fake = fakeApi([repo], needsWork)
+		await runSyncHooks({
+			api: fake.api,
+			ghToken: "t",
+			webhookSecret: "s",
+			syncSecurity: true,
+		})
+		expect(hookPosts(fake.calls).length).toBeGreaterThan(0)
+		expect(contentPuts(fake.calls).length).toBeGreaterThan(0)
+		expect(
+			fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/labels")).length,
+		).toBeGreaterThan(0)
+	})
+
+	test("dry is OFF unless explicitly true", async () => {
+		// `deps.dry` must be compared with `=== true`: a truthy string from a
+		// stray env var must not silently turn a real run into a preview, and
+		// more importantly its absence must not turn a preview into a real run.
+		const fake = fakeApi([repo], needsWork)
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s" })
+		expect(fake.calls.filter((c) => c.method !== "GET").length).toBeGreaterThan(0)
+	})
+})

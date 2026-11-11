@@ -179,6 +179,20 @@ export type SyncHooksDeps = {
 	 * Default: true when syncing hooks/repos. Can be disabled in tests or via options.
 	 */
 	syncSecurity?: boolean
+	/**
+	 * PREVIEW ONLY — report what WOULD change and write nothing.
+	 *
+	 * This exists because `--sync-hooks --dry` used to be a lie: the CLI passed
+	 * `dry` into `buildDeps` (which is where the tick reads it), but this module
+	 * never looked at it and every PUT went out. Measured on the box: a
+	 * `--dry` invocation rewrote `.github/dependabot.yml` across the fleet, so
+	 * the one command an operator would reach for to preview a fleet-wide
+	 * rewrite was the command that performed it.
+	 *
+	 * Every write path below checks this, and a suppressed write is reported
+	 * with a `DRY` marker so the preview is distinguishable from a real run.
+	 */
+	dry?: boolean
 }
 
 /** The brief's return shape. `ok + skip` is the number of actions attempted. */
@@ -302,7 +316,13 @@ type Step = { ok: boolean; line: string }
  * honest read of a failed listing is unknown, and not wiring the hook is a
  * worse failure than a 422 from the POST. The line says which it was.
  */
-async function syncHook(api: GhClient, repo: string, token: string, secret: string): Promise<Step> {
+async function syncHook(
+	api: GhClient,
+	repo: string,
+	token: string,
+	secret: string,
+	dry = false,
+): Promise<Step> {
 	const { status, data } = await api.request("GET", `/repos/${repo}/hooks`, { token })
 	const hooks = Array.isArray(data) ? data : []
 	if (
@@ -310,6 +330,12 @@ async function syncHook(api: GhClient, repo: string, token: string, secret: stri
 		hooks.some((h) => str(asObject(asObject(h)?.config)?.url) === PR_AGENT_WEBHOOK_URL)
 	) {
 		return { ok: false, line: `⏭️  ${repo}: pr-agent webhook already present` }
+	}
+
+	if (dry) {
+		// No POST. The webhook payload carries `secret`, and a preview that sends
+		// a credential to a live endpoint is not a preview.
+		return { ok: true, line: `DRY ${repo}: pr-agent webhook would be created` }
 	}
 
 	const created = await api.request("POST", `/repos/${repo}/hooks`, {
@@ -346,12 +372,21 @@ async function syncHook(api: GhClient, repo: string, token: string, secret: stri
  * harmless outcome — whereas skipping on a failed read would leave the label
  * missing while the report said it was fine.
  */
-async function syncOptOutLabel(api: GhClient, repo: string, token: string): Promise<Step> {
+async function syncOptOutLabel(
+	api: GhClient,
+	repo: string,
+	token: string,
+	dry = false,
+): Promise<Step> {
 	const existing = await api.request("GET", `/repos/${repo}/labels/${AUTO_MERGE_OPTOUT_LABEL}`, {
 		token,
 	})
 	if (existing.status === 200) {
 		return { ok: false, line: `⏭️  ${repo}: \`${AUTO_MERGE_OPTOUT_LABEL}\` label already present` }
+	}
+
+	if (dry) {
+		return { ok: true, line: `DRY ${repo}: \`${AUTO_MERGE_OPTOUT_LABEL}\` label would be created` }
 	}
 
 	const created = await api.request("POST", `/repos/${repo}/labels`, {
@@ -396,6 +431,7 @@ async function syncFile(
 	path: string,
 	body: string,
 	token: string,
+	dry = false,
 ): Promise<Step> {
 	const apiPath = `/repos/${repo}/contents/${path}`
 	const current = await api.request("GET", apiPath, { token })
@@ -403,6 +439,9 @@ async function syncFile(
 	if (current.status === 200) {
 		if (decodeContent(current.data) === body) {
 			return { ok: false, line: `⏭️  ${repo}: \`${path}\` already in sync` }
+		}
+		if (dry) {
+			return { ok: true, line: `DRY ${repo}: \`${path}\` would be updated` }
 		}
 		const sha = str(asObject(current.data)?.sha)
 		const written = await api.request("PUT", apiPath, {
@@ -424,6 +463,9 @@ async function syncFile(
 	}
 
 	if (current.status === 404) {
+		if (dry) {
+			return { ok: true, line: `DRY ${repo}: \`${path}\` would be created` }
+		}
 		const created = await api.request("PUT", apiPath, {
 			token,
 			json: {
@@ -467,6 +509,7 @@ async function removeStaleFile(
 	repo: string,
 	path: string,
 	token: string,
+	dry = false,
 ): Promise<Step> {
 	const apiPath = `/repos/${repo}/contents/${path}`
 	const current = await api.request("GET", apiPath, { token })
@@ -488,6 +531,10 @@ async function removeStaleFile(
 			ok: false,
 			line: `⏭️  ${repo}: \`${path}\` has no sha — cannot delete safely`,
 		}
+	}
+
+	if (dry) {
+		return { ok: true, line: `DRY ${repo}: \`${path}\` would be removed (stale path)` }
 	}
 
 	const removed = await api.request("DELETE", apiPath, {
@@ -532,6 +579,9 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 		// CALL TIME, not import time. `deps` wins so a test — and the production
 		// wiring — can pin both without touching the process environment.
 		const secret = deps.webhookSecret ?? process.env.GITHUB_WEBHOOK_SECRET ?? ""
+		// Preview flag, read once here so every write path below sees the same
+		// value. See `SyncHooksDeps.dry` for why this exists at all.
+		const dry = deps.dry === true
 		// An empty key is a valid-looking `GitHubApi` that would throw on its first
 		// signed call, so the client is built with a deliberately blank key and the
 		// token is checked here instead. Every request below carries `token`, so
@@ -565,7 +615,7 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 			// secret issues no request against the hooks endpoint at all — not the
 			// POST, and not the GET that would decide whether to POST.
 			if (secret) {
-				record(await syncHook(api, repo, token, secret))
+				record(await syncHook(api, repo, token, secret, dry))
 			}
 
 			record(
@@ -575,26 +625,35 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 					dependabotPathFor(repo),
 					templateBody(dependabotFileFor(repo)),
 					token,
+					dry,
 				),
 			)
 			// The auto-merge WORKFLOW goes to EVERY repo, GMW included. Read that
 			// twice: the gmw Dependabot variant is GMW-only, the workflow is not.
-			record(await syncFile(api, repo, AUTO_MERGE_PATH, templateBody(AUTO_MERGE_FILE), token))
+			record(await syncFile(api, repo, AUTO_MERGE_PATH, templateBody(AUTO_MERGE_FILE), token, dry))
 			// The workflow's escape hatch is a label, so the label has to exist on
 			// every repo or the gate is documented and unusable.
-			record(await syncOptOutLabel(api, repo, token))
+			record(await syncOptOutLabel(api, repo, token, dry))
 			// And the copy at the old, non-executable path is retired. Without
 			// this the fleet keeps an inert duplicate forever, because a
 			// conditional write can only create or update — it never cleans up a
 			// path that stopped being used.
-			record(await removeStaleFile(api, repo, LEGACY_AUTO_MERGE_PATH, token))
+			record(await removeStaleFile(api, repo, LEGACY_AUTO_MERGE_PATH, token, dry))
 
 			// Enable Dependabot vulnerability alerts and automated security fixes.
 			// When enabled, GitHub continuously checks dependencies against security advisories
 			// and automatically generates security update PRs.
 			if (deps.syncSecurity) {
-				record(await enableVulnerabilityAlerts(api, repo, token))
-				record(await enableAutomatedSecurityFixes(api, repo, token))
+				// Both are unconditional PUTs with no read to compare against, so
+				// there is nothing to preview beyond "it would be enabled". Skipped
+				// entirely under dry rather than called and discarded.
+				if (dry) {
+					record({ ok: true, line: `DRY ${repo}: vulnerability alerts would be enabled` })
+					record({ ok: true, line: `DRY ${repo}: automated security fixes would be enabled` })
+				} else {
+					record(await enableVulnerabilityAlerts(api, repo, token))
+					record(await enableAutomatedSecurityFixes(api, repo, token))
+				}
 			}
 		}
 

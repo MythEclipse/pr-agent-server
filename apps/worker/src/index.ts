@@ -261,6 +261,29 @@ async function syncOnly(argv: string[]): Promise<number> {
 }
 
 /**
+ * Exit code for a `--sync-hooks` run.
+ *
+ * EXIT 1 MEANS "SOMETHING FAILED", NOT "NOTHING CHANGED". The previous rule was
+ * `ok > 0 || skip === 0`, so a run where every repo was already in sync — the
+ * steady state, and the overwhelmingly common outcome — returned 1 and systemd
+ * marked the unit `failed`. Measured on the box: a clean 62-repo run reporting
+ * "0 updated, 434 skipped" landed as `Result: exit-code`, indistinguishable from
+ * the gate refusal that had actually been breaking this job for three nights. A
+ * monitor that cannot tell "nothing to do" from "broken" is worse than none.
+ *
+ * `skip` counts every step that needed no change, so it is not a failure signal
+ * at all. The only failure signal the summary carries is a line the module emits
+ * with the ⚠️ prefix — `runSyncHooks` turns a thrown error and every per-repo
+ * failure into exactly one of those.
+ *
+ * Exported for the test: the decision is the whole point, and reaching it
+ * through `syncHooks()` would need a fully stubbed GitHub client.
+ */
+export function syncHooksExitCode(lines: readonly string[]): number {
+	return lines.some((line) => line.startsWith("⚠️")) ? 1 : 0
+}
+
+/**
  * `--sync-hooks` (Task 16): the daily fork-config sync — the pr-agent webhook
  * plus the three Dependabot files, across every repo the token can see.
  *
@@ -291,10 +314,22 @@ async function syncHooks(argv: string[]): Promise<number> {
 			ghToken: deps.fetchGhToken(),
 			webhookSecret: OPS_WEBHOOK_SECRET,
 			syncSecurity: true,
+			// `--dry` is FORWARDED, and it must be. It used to be passed only to
+			// `buildDeps`, which is where the TICK reads it; this module ignored
+			// it, so `--sync-hooks --dry` performed the fleet-wide writes it was
+			// asked to preview. Measured on the box: a dry run rewrote
+			// `.github/dependabot.yml` across every repo.
+			dry: argv.includes("--dry"),
 		})
 		for (const line of res.lines) console.log(line)
 		console.log(`sync-hooks: ${res.ok} updated, ${res.skip} skipped`)
-		return res.ok > 0 || res.skip === 0 ? 0 : 1
+		const code = syncHooksExitCode(res.lines)
+		if (code !== 0) {
+			console.error(
+				`sync-hooks: ${res.lines.filter((l) => l.startsWith("⚠️")).length} step(s) reported an error`,
+			)
+		}
+		return code
 	} finally {
 		lock.release()
 		releaseHeld = null
