@@ -36,15 +36,15 @@
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
-		"@electric-sql/pglite": "^0.5.12",
-		"@electric-sql/pglite-socket": "^0.2.15",
-		"@types/node": "^26.6.5",
+		"@electric-sql/pglite": "^0.5.15",
+		"@electric-sql/pglite-socket": "^0.2.18",
+		"@types/node": "^26.6.6",
 		"@types/nunjucks": "^3.2.6",
 		"@types/pg": "^8.23.1",
 		"drizzle-kit": "^0.31.11",
 		"esbuild": "^0.28.2",
 		"tsx": "^4.20.0",
 		"typescript": "^7.0.2",
-		"vitest": "^5.0.5"
+		"vitest": "^5.1.0"
 	}
 }
