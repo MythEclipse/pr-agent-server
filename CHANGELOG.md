@@ -1,3 +1,10 @@
+## [1.10.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.2...v1.10.3) (2026-11-11)
+
+
+### Bug Fixes
+
+* **vulns:** measure coverage against each repo's OWN config ([44e9f88](https://github.com/MythEclipse/pr-agent-server/commit/44e9f880c2b6af71b77813d345ab35dc4ce642f1))
+
 ## [1.10.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.1...v1.10.2) (2026-11-11)
 
 
