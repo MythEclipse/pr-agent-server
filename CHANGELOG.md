@@ -1,3 +1,10 @@
+## [1.9.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.2...v1.9.3) (2026-11-11)
+
+
+### Bug Fixes
+
+* **sync-hooks:** honour --dry, and stop reporting "nothing to do" as failure ([acfd55e](https://github.com/MythEclipse/pr-agent-server/commit/acfd55e64ee2befba983c548527e82ec0f4289b4))
+
 ## [1.9.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.1...v1.9.2) (2026-11-11)
 
 
