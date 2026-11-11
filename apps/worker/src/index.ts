@@ -475,7 +475,18 @@ async function auditVulns(argv: string[]): Promise<number> {
 	const templateLanes = lanesInConfig(template)
 	let totalVulns = 0
 	let unreachable = 0
-	for (const { repo, alerts } of results) {
+	let unreadable = 0
+	const unreadableByStatus = new Map<number, number>()
+	for (const { repo, alerts, ok, status } of results) {
+		// A REPO THAT COULD NOT BE READ IS NOT A CLEAN REPO. Reporting it as clean
+		// is how this audit once printed "No open vulnerabilities found across any
+		// repository" for a fleet carrying 630.
+		if (!ok) {
+			unreadable += 1
+			unreadableByStatus.set(status, (unreadableByStatus.get(status) ?? 0) + 1)
+			console.log(`   ⚠️  ${repo}: alerts unreadable (HTTP ${status}) — NOT counted as clean`)
+			continue
+		}
 		if (alerts.length > 0) {
 			totalVulns += alerts.length
 			for (const line of summarizeVulns(repo, alerts)) {
@@ -493,8 +504,12 @@ async function auditVulns(argv: string[]): Promise<number> {
 			}
 		}
 	}
-	if (totalVulns === 0) {
+	if (totalVulns === 0 && unreadable === 0) {
 		console.log("✅ No open Dependabot vulnerabilities found across any repository!")
+	} else if (totalVulns === 0) {
+		console.log(
+			`❌ Could not read alerts for ${unreadable}/${results.length} repositor${results.length === 1 ? "y" : "ies"} — the audit is INCOMPLETE, not clean.`,
+		)
 	} else {
 		console.log(`⚠️ Total ${totalVulns} open Dependabot vulnerabilities found.`)
 		if (unreachable > 0) {
@@ -505,7 +520,20 @@ async function auditVulns(argv: string[]): Promise<number> {
 			console.log("✅ Every open alert sits on a watched manifest — Dependabot owns the rest.")
 		}
 	}
-	return 0
+	if (unreadable > 0) {
+		const detail = [...unreadableByStatus.entries()]
+			.map(([status, count]) => `HTTP ${status} x${count}`)
+			.join(", ")
+		console.log(`⚠️ ${unreadable}/${results.length} repositor(ies) could not be read (${detail}).`)
+		console.log(
+			"   A 403 here means the GitHub App lacks the `dependabot_alerts: read` permission — " +
+				"the audit cannot see advisories it is not granted, and will under-report until that is fixed.",
+		)
+	}
+	// Exit non-zero only when the audit could not do its job at all, so a cron
+	// wrapper notices. Findings are not failures: an audit that exits 1 because
+	// the fleet has vulnerabilities is an audit that gets muted.
+	return unreadable === results.length && results.length > 0 ? 1 : 0
 }
 
 // ── main ───────────────────────────────────────────────────────────────────

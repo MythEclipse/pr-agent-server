@@ -27,7 +27,7 @@
  */
 
 import type { GhClient } from "../pr/scan.ts"
-import { type DependabotAlert, fetchOpenDependabotAlerts } from "./security.ts"
+import { type DependabotAlert, fetchOpenDependabotAlertsResult } from "./security.ts"
 
 export type VulnFixResult = {
 	repo: string
@@ -332,17 +332,23 @@ export type ScanAndFixOptions = {
 }
 
 /**
- * Scan all repositories for open Dependabot alerts and report vulnerabilities.
+ * Scan all repositories for open Dependabot alerts.
+ *
+ * CARRIES THE FAILURE THROUGH. This used to hand back a bare `alerts` array, so a
+ * repo whose alerts could not be read was indistinguishable from a clean one —
+ * and the audit printed "No open vulnerabilities found across any repository"
+ * for a fleet with 630 of them. An audit that reports a clean fleet when it
+ * could not read the fleet is worse than no audit: it retires the question.
  */
 export async function scanVulns(
 	api: GhClient,
 	repos: string[],
 	token: string,
-): Promise<{ repo: string; alerts: DependabotAlert[] }[]> {
-	const results: { repo: string; alerts: DependabotAlert[] }[] = []
+): Promise<{ repo: string; alerts: DependabotAlert[]; ok: boolean; status: number }[]> {
+	const results: { repo: string; alerts: DependabotAlert[]; ok: boolean; status: number }[] = []
 	for (const repo of repos) {
-		const alerts = await fetchOpenDependabotAlerts(api, repo, token)
-		results.push({ repo, alerts })
+		const res = await fetchOpenDependabotAlertsResult(api, repo, token)
+		results.push({ repo, alerts: res.alerts, ok: res.ok, status: res.ok ? 200 : res.status })
 	}
 	return results
 }
