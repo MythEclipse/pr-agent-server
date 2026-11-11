@@ -54,8 +54,9 @@ import {
 	fetchOpenDependabotAlertsResult,
 } from "./security.ts"
 import {
+	derivableLanes,
+	hasPatch,
 	type Lane,
-	lanesForAlerts,
 	lanesInConfig,
 	missingLanes,
 	withDerivedLanes,
@@ -233,8 +234,16 @@ export type LaneCoverage = {
 	alerts: number
 	/** Lanes the repo's alerts needed that the config did not declare. */
 	added: Lane[]
-	/** Alerts that sat on a manifest no lane named, before this run. */
+	/**
+	 * FIXABLE alerts that sat on a manifest no lane named, before this run.
+	 *
+	 * Counts only alerts with a patched version. An advisory with nothing to
+	 * upgrade to is not a gap in the config — no lane can help it — so including
+	 * it would inflate the number this report exists to make honest.
+	 */
 	unreachable: number
+	/** Alerts skipped because upstream has published no fix. */
+	unfixable: number
 }
 
 /** The brief's return shape. `ok + skip` is the number of actions attempted. */
@@ -706,15 +715,16 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 						line: `⚠️  ${repo}: alerts unreadable (HTTP ${alerts.status}) — \`${dependabotPathFor(repo)}\` left alone`,
 					})
 				} else {
-					const needs = lanesForAlerts(alerts.alerts)
+					const needs = derivableLanes(alerts.alerts)
 					const missing = missingLanes(needs, lanesInConfig(dependabotTemplate))
 					coverage.push({
 						repo,
 						alerts: alerts.alerts.length,
 						added: missing,
-						// Only the alerts on manifests nothing named are unreachable;
-						// alerts already covered by a root lane were fine.
-						unreachable: missing.reduce((sum, lane) => sum + lane.alerts, 0),
+						// Only the FIXABLE alerts on manifests nothing named are
+						// unreachable. A no-patch advisory is not a config gap.
+						unreachable: missing.reduce((sum, lane) => sum + lane.fixable, 0),
+						unfixable: alerts.alerts.filter((a) => !hasPatch(a)).length,
 					})
 					record(
 						await syncFile(

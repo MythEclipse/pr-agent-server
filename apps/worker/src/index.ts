@@ -31,7 +31,8 @@ import { GitHubApi } from "./github.ts"
 import { acquireWithWait, LOCK_FILE, WorkerLock } from "./lock.ts"
 import { dependabotTemplateBody, runSyncHooks } from "./ops/syncHooks.ts"
 import {
-	lanesForAlerts,
+	derivableLanes,
+	hasPatch,
 	missingLanes,
 	repoLanes,
 	scanVulns,
@@ -409,6 +410,7 @@ async function fixVulns(argv: string[]): Promise<number> {
 
 		const coverage = res.lanes ?? []
 		const unreachable = coverage.reduce((sum, c) => sum + c.unreachable, 0)
+		const unfixable = coverage.reduce((sum, c) => sum + c.unfixable, 0)
 		const totalAlerts = coverage.reduce((sum, c) => sum + c.alerts, 0)
 		const addedLanes = coverage.reduce((sum, c) => sum + c.added.length, 0)
 
@@ -420,22 +422,28 @@ async function fixVulns(argv: string[]): Promise<number> {
 		for (const c of coverage) {
 			if (c.unreachable === 0) continue
 			console.log(
-				`${dry ? "DRY " : ""}${c.repo}: ${c.alerts} open alert(s), ${c.unreachable} unreachable -> ${c.added.length} lane(s)`,
+				`${dry ? "DRY " : ""}${c.repo}: ${c.alerts} open alert(s), ${c.unreachable} fixable and unreachable -> ${c.added.length} lane(s)`,
 			)
 			for (const lane of c.added) {
-				console.log(`      + ${lane.ecosystem} ${lane.directory} (${lane.alerts} alert(s))`)
+				console.log(`      + ${lane.ecosystem} ${lane.directory} (${lane.fixable} fixable)`)
 			}
 		}
 		console.log(
 			dry
-				? `vuln-fix: DRY RUN — ${totalAlerts} alert(s) across ${coverage.length} repo(s); ${unreachable} would become reachable via ${addedLanes} lane(s). Nothing written.`
-				: `vuln-fix: ${totalAlerts} alert(s) across ${coverage.length} repo(s); ${unreachable} made reachable via ${addedLanes} lane(s).`,
+				? `vuln-fix: DRY RUN — ${totalAlerts} alert(s) across ${coverage.length} repo(s); ${unreachable} fixable alert(s) would become reachable via ${addedLanes} lane(s). Nothing written.`
+				: `vuln-fix: ${totalAlerts} alert(s) across ${coverage.length} repo(s); ${unreachable} fixable alert(s) made reachable via ${addedLanes} lane(s).`,
 		)
-		// Dependabot opens the PRs on its own schedule after the config lands, so a
-		// zero here is not "no vulnerabilities" — it is "nothing left to unblock".
+		// The no-patch count is stated, not hidden. Those advisories are not a
+		// backlog anyone can work off — they are waiting on upstream — and the
+		// user's instruction was to skip them rather than chase them.
+		if (unfixable > 0) {
+			console.log(
+				`vuln-fix: ${unfixable} alert(s) skipped — no patched version published, so there is nothing to upgrade to. They are re-checked every run and a lane appears automatically once upstream ships a fix.`,
+			)
+		}
 		if (unreachable === 0) {
 			console.log(
-				"vuln-fix: every open alert already sits on a watched manifest — Dependabot owns the rest.",
+				"vuln-fix: every fixable alert already sits on a watched manifest — Dependabot owns the rest.",
 			)
 		}
 		return syncHooksExitCode(res.lines)
@@ -484,6 +492,7 @@ async function auditVulns(argv: string[]): Promise<number> {
 	const template = dependabotTemplateBody()
 	let totalVulns = 0
 	let unreachable = 0
+	let unfixable = 0
 	let unreadable = 0
 	const unreadableByStatus = new Map<number, number>()
 	for (const { repo, alerts, ok, status } of results) {
@@ -498,12 +507,13 @@ async function auditVulns(argv: string[]): Promise<number> {
 		}
 		if (alerts.length > 0) {
 			totalVulns += alerts.length
+			unfixable += alerts.filter((a) => !hasPatch(a)).length
 			for (const line of summarizeVulns(repo, alerts)) {
 				console.log(line)
 			}
 			const lanes = await repoLanes(deps.api, repo, token, template)
-			const missing = missingLanes(lanesForAlerts(alerts), lanes)
-			const dead = missing.reduce((sum, lane) => sum + lane.alerts, 0)
+			const missing = missingLanes(derivableLanes(alerts), lanes)
+			const dead = missing.reduce((sum, lane) => sum + lane.fixable, 0)
 			if (dead > 0) {
 				unreachable += dead
 				console.log(
@@ -522,12 +532,19 @@ async function auditVulns(argv: string[]): Promise<number> {
 		)
 	} else {
 		console.log(`⚠️ Total ${totalVulns} open Dependabot vulnerabilities found.`)
+		// The actionables are stated separately from the rest. 32 of this fleet's
+		// 598 have no published fix, so "598 vulnerabilities" overstates the work
+		// owed by that much and makes a converged fleet look neglected.
+		const actionable = totalVulns - unfixable
+		console.log(
+			`   ${actionable} have a published fix; ${unfixable} have none — no patched version exists, so nothing can be upgraded and they are skipped.`,
+		)
 		if (unreachable > 0) {
 			console.log(
-				`⚠️ ${unreachable} of them (${Math.round((unreachable / totalVulns) * 100)}%) sit on manifests no Dependabot lane names — Dependabot cannot open a PR for those. Run --fix-vulns to add the lanes.`,
+				`⚠️ ${unreachable} fixable alert(s) sit on manifests no Dependabot lane names — Dependabot cannot open a PR for those. Run --fix-vulns to add the lanes.`,
 			)
 		} else {
-			console.log("✅ Every open alert sits on a watched manifest — Dependabot owns the rest.")
+			console.log("✅ Every fixable alert sits on a watched manifest — Dependabot owns the rest.")
 		}
 	}
 	if (unreadable > 0) {

@@ -43,6 +43,34 @@ export type Lane = {
 	directory: string
 	/** Alert count behind this lane. 0 for a lane read out of a template. */
 	alerts: number
+	/**
+	 * How many of those alerts have a patched version to move to.
+	 *
+	 * A LANE IS ONLY WORTH ADDING IF SOMETHING IN IT CAN BE FIXED. An advisory
+	 * with no `first_patched_version` has no release to upgrade to — Dependabot
+	 * cannot open a PR for it no matter how many lanes point at the manifest. On
+	 * this fleet, 8 alerts across 6 manifests were exactly that, and deriving
+	 * lanes from them wrote four lanes (`maven /ProjectBP1`, `/modul6/modul6`,
+	 * `/modul7&8/modul7`, `/modul7&8/modul8`) that could never produce anything.
+	 *
+	 * They are not permanent omissions: when upstream ships a patch the alert
+	 * gains a `first_patched_version`, `fixable` becomes non-zero, and the next
+	 * nightly run adds the lane. Deriving from the live alert keeps that
+	 * automatic.
+	 */
+	fixable: number
+}
+
+/**
+ * True when the advisory names a version to move to.
+ *
+ * The absence of a patched version is the one case where "do nothing" is the
+ * correct action, so it is checked explicitly rather than inferred from a
+ * failed lookup.
+ */
+export function hasPatch(alert: DependabotAlert): boolean {
+	const patched = alert.security_vulnerability?.first_patched_version?.identifier
+	return typeof patched === "string" && patched.trim() !== ""
 }
 
 /**
@@ -183,9 +211,14 @@ export function lanesForAlerts(alerts: readonly DependabotAlert[]): Lane[] {
 			(alert.dependency as { manifest_path?: unknown } | undefined)?.manifest_path,
 		)
 		const key = `${ecosystem}\u0000${directory}`
+		const patchable = hasPatch(alert) ? 1 : 0
 		const held = counts.get(key)
-		if (held) held.alerts += 1
-		else counts.set(key, { ecosystem, directory, alerts: 1 })
+		if (held) {
+			held.alerts += 1
+			held.fixable += patchable
+		} else {
+			counts.set(key, { ecosystem, directory, alerts: 1, fixable: patchable })
+		}
 	}
 	return [...counts.values()].sort(
 		(a, b) =>
@@ -193,6 +226,20 @@ export function lanesForAlerts(alerts: readonly DependabotAlert[]): Lane[] {
 			a.ecosystem.localeCompare(b.ecosystem) ||
 			a.directory.localeCompare(b.directory),
 	)
+}
+
+/**
+ * The lanes worth WRITING: those where at least one alert has a patch to move to.
+ *
+ * A lane whose alerts are all "no patched version available" cannot produce a PR
+ * — the manifest is watched and there is still nothing Dependabot may do. Writing
+ * it is a config commit that fixes nothing, and it reads as progress.
+ *
+ * The omission is temporary by construction: `fixable` comes from the live alert,
+ * so the lane appears on the first nightly run after upstream ships a patch.
+ */
+export function derivableLanes(alerts: readonly DependabotAlert[]): Lane[] {
+	return lanesForAlerts(alerts).filter((lane) => lane.fixable > 0)
 }
 
 /**
@@ -218,7 +265,7 @@ export function lanesInConfig(body: string): Lane[] {
 		}
 		const dir = /^directory:\s*"?([^"#]+?)"?\s*$/.exec(line)
 		if (dir && pendingEcosystem) {
-			lanes.push({ ecosystem: pendingEcosystem, directory: dir[1].trim(), alerts: 0 })
+			lanes.push({ ecosystem: pendingEcosystem, directory: dir[1].trim(), alerts: 0, fixable: 0 })
 			pendingEcosystem = undefined
 		}
 	}
@@ -310,17 +357,26 @@ export function summarizeVulns(repo: string, alerts: DependabotAlert[]): string[
 	if (alerts.length === 0) {
 		return [`✅ ${repo}: 0 open Dependabot security alerts`]
 	}
+	const fixable = alerts.filter(hasPatch).length
+	const skipped = alerts.length - fixable
 	const lines = [`🛡️  ${repo}: ${alerts.length} open security alert${alerts.length > 1 ? "s" : ""}:`]
 	for (const a of alerts.slice(0, 10)) {
 		const pkg = a.dependency.package.name
-		const patched = a.security_vulnerability.first_patched_version?.identifier ?? "no patch"
+		const patched = a.security_vulnerability.first_patched_version?.identifier
 		const cve = a.security_advisory.cve_id ?? a.security_advisory.ghsa_id
-		lines.push(
-			`   - ${pkg} (${cve}, severity: ${a.security_vulnerability.severity}) -> patch ${patched}`,
-		)
+		// "no patch" is not a to-do. Spelling it out as skipped stops an operator
+		// reading 598 alerts as 598 fixes owed, when 32 of them have no release to
+		// move to and nothing Dependabot may do.
+		const target = patched ? `-> patch ${patched}` : "-> NO PATCH AVAILABLE (skipped)"
+		lines.push(`   - ${pkg} (${cve}, severity: ${a.security_vulnerability.severity}) ${target}`)
 	}
 	if (alerts.length > 10) {
 		lines.push(`   ... and ${alerts.length - 10} more`)
+	}
+	if (skipped > 0) {
+		lines.push(
+			`   ↳ ${skipped} of ${alerts.length} have no patched version — nothing to upgrade to, skipped`,
+		)
 	}
 	return lines
 }

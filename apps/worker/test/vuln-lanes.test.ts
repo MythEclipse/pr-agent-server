@@ -20,8 +20,10 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
 import {
+	derivableLanes,
 	directoryOf,
 	ecosystemOf,
+	hasPatch,
 	lanesForAlerts,
 	lanesInConfig,
 	missingLanes,
@@ -185,13 +187,13 @@ describe("lanes already declared by a config", () => {
 				'    directory: "/x"',
 			].join("\n"),
 		)
-		expect(lanes).toEqual([{ ecosystem: "pip", directory: "/x", alerts: 0 }])
+		expect(lanes).toEqual([{ ecosystem: "pip", directory: "/x", alerts: 0, fixable: 0 }])
 	})
 
 	test("a quoted directory is unquoted for comparison", () => {
 		// Otherwise `/x` and `"/x"` never match and the lane is added every run.
 		const lanes = lanesInConfig('  - package-ecosystem: "npm"\n    directory: "/x"')
-		expect(lanes).toEqual([{ ecosystem: "npm", directory: "/x", alerts: 0 }])
+		expect(lanes).toEqual([{ ecosystem: "npm", directory: "/x", alerts: 0, fixable: 0 }])
 	})
 })
 
@@ -366,5 +368,80 @@ describe("repoLanes reads the repo's config, not the template", () => {
 				)
 			).length,
 		).toBeGreaterThan(0)
+	})
+})
+
+/**
+ * "No patched version" means there is nothing to upgrade to.
+ *
+ * THE INSTRUCTION THESE TESTS ENCODE: skip them. An advisory with no
+ * `first_patched_version` has no release to move to, so no lane, no config and no
+ * PR can address it — the only correct action is to wait for upstream and
+ * re-check later. Deriving lanes from such alerts wrote four lanes on this fleet
+ * (`maven /ProjectBP1`, `/modul6/modul6`, `/modul7&8/modul7`, `/modul7&8/modul8`)
+ * that could never produce anything, and counted 8 alerts as "made reachable"
+ * when nothing had been made possible.
+ */
+describe("alerts with no patched version are skipped", () => {
+	/** Same alert, but with no version to move to. */
+	const noPatch = (ecosystem: string, manifestPath: string) => {
+		const a = alert(ecosystem, manifestPath)
+		a.security_vulnerability.first_patched_version = null
+		return a
+	}
+
+	test("hasPatch distinguishes a real target from an absent one", () => {
+		expect(hasPatch(alert("npm", "package-lock.json"))).toBe(true)
+		expect(hasPatch(noPatch("npm", "package-lock.json"))).toBe(false)
+	})
+
+	test("an empty or blank identifier is NOT a patch", () => {
+		// Some advisories carry the object with an empty string rather than null.
+		// Treating that as fixable would derive a lane for a version that does not
+		// exist.
+		const a = alert("npm", "package-lock.json")
+		a.security_vulnerability.first_patched_version = { identifier: "   " }
+		expect(hasPatch(a)).toBe(false)
+	})
+
+	test("derivableLanes drops a lane whose only alerts have no patch", () => {
+		// The exact shape of the four dead lanes this fleet produced.
+		const alerts = [noPatch("maven", "ProjectBP1/pom.xml"), noPatch("maven", "ProjectBP1/pom.xml")]
+		expect(lanesForAlerts(alerts)).toHaveLength(1) // still counted for reporting
+		expect(lanesForAlerts(alerts)[0].fixable).toBe(0)
+		expect(derivableLanes(alerts)).toEqual([]) // but never written
+	})
+
+	test("a lane is KEPT when at least one alert in it is fixable", () => {
+		// Mixed manifests are the common case (105 npm alerts, 17 unfixable): the
+		// lane must still be written, and must not lose the unfixable ones from
+		// the report.
+		const alerts = [
+			alert("pip", "sub/requirements.txt"),
+			noPatch("pip", "sub/requirements.txt"),
+			noPatch("pip", "sub/requirements.txt"),
+		]
+		const lanes = derivableLanes(alerts)
+		expect(lanes).toHaveLength(1)
+		expect(lanes[0]).toMatchObject({ alerts: 3, fixable: 1 })
+	})
+
+	test("a no-patch-only manifest does NOT get a lane written", () => {
+		const out = withDerivedLanes(template, derivableLanes([noPatch("maven", "only/pom.xml")]))
+		expect(out).toBe(template)
+		expect(out).not.toContain('directory: "/only"')
+	})
+
+	test("the summary says SKIPPED rather than reporting a phantom patch", () => {
+		// Previously this read "-> patch no patch", which reads as a target named
+		// "no patch" rather than an absence.
+		const lines = summarizeVulns("o/r", [noPatch("npm", "package-lock.json")])
+		expect(lines.join("\n")).toContain("NO PATCH AVAILABLE (skipped)")
+		expect(lines.join("\n")).toContain("1 of 1 have no patched version")
+	})
+
+	test("a fully-fixable repo gets no skip note at all", () => {
+		const lines = summarizeVulns("o/r", [alert("npm", "package-lock.json")])
+		expect(lines.join("\n")).not.toContain("no patched version")
 	})
 })
