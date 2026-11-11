@@ -1,3 +1,10 @@
+# [1.11.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.4...v1.11.0) (2026-11-11)
+
+
+### Features
+
+* **vulns:** skip advisories that have no patched version ([a43b488](https://github.com/MythEclipse/pr-agent-server/commit/a43b488e7ee75cb3ef3980786c3fd2e6ef000d38))
+
 ## [1.10.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.3...v1.10.4) (2026-11-11)
 
 
