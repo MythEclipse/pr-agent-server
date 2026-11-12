@@ -1,15 +1,38 @@
 # 5-minute PR queue loop, matching the interval the Python worker ran at.
 #
-# OnBootSec 2min so a reboot does not immediately fire a tick against GitHub
-# while the network is still settling; OnUnitActiveSec is measured from the END
-# of the last run, which is what keeps a slow tick from stacking up behind itself
-# (Persistent=false, so a machine that was off just waits for the next window).
+# THREE TRIGGERS, because no single one is sufficient. Each was verified on the
+# host with a throwaway timer, not assumed:
+#
+#   OnBootSec=2min          the FIRST tick. 2min so a reboot does not fire a tick
+#                           at GitHub while the network is still settling.
+#   OnActiveSec=5min        RE-ANCHORS when the timer itself is (re)started.
+#                           Without it, `systemctl restart <timer>` during a long
+#                           tick leaves the timer `active` with
+#                           `NextElapseUSecMonotonic=infinity` and it never fires
+#                           again — a silent dead loop.
+#   OnUnitInactiveSec=5min  every SUBSEQUENT tick, measured from when the
+#                           previous run FINISHED.
+#
+# OnUnitActiveSec is deliberately NOT used. It is measured from when the unit
+# STARTED, which is what this file's old comment claimed was the opposite
+# ("measured from the END of the last run"). With a tick that can legitimately run
+# 30 minutes on an AI fix, a 5-minute OnUnitActiveSec elapses WHILE the tick is
+# still running, so the loop does not hold its spacing and a restart at that
+# moment computes an elapse in the past.
+#
+# OnUnitInactiveSec ALONE is also insufficient: it needs a prior inactive
+# transition to schedule from, so a freshly started timer with no history sits at
+# infinity. Verified: a probe timer with only OnUnitInactiveSec never fired.
+#
+# Persistent=false: a machine that was off just waits for the next window rather
+# than replaying a backlog of ticks against GitHub.
 [Unit]
 Description=Run the PR-Agent queue worker every 5 minutes
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnActiveSec=5min
+OnUnitInactiveSec=5min
 AccuracySec=15s
 Unit=pr-agent-worker.service
 

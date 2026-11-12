@@ -23,6 +23,16 @@ await build({
 
 // The sync-hooks unit installs workflow templates from src/ops/templates, and
 // they are data rather than code, so they ship verbatim.
+//
+// TWO DESTINATIONS, and the second one is the one production reads. `esbuild`
+// BUNDLES every module into the single `dist/index.js`, so inside the bundle
+// `import.meta.dirname` is `dist/` — not `dist/ops/` where syncHooks.ts lived
+// in the source tree. `TEMPLATE_DIR` therefore resolves to `dist/templates`,
+// and shipping only `dist/ops/templates` produced a live failure: every fork
+// reported `ENOENT ... dist/templates/dependabot.yml` and NOTHING was synced.
+// The `ops/templates` copy is kept because it mirrors the source layout and is
+// what the unit tests stage against; `templates/` is what the bundle resolves.
+await cp("src/ops/templates", `${outdir}/templates`, { recursive: true })
 await cp("src/ops/templates", `${outdir}/ops/templates`, { recursive: true })
 
 console.log("built dist/")

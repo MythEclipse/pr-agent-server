@@ -30,7 +30,25 @@ const DEFAULT_RETRIES = 3
 
 /** Result of a completed HTTP round trip, or the `{0, {}}` failure sentinel. */
 // biome-ignore lint/suspicious/noExplicitAny: verbatim from the pr_agent port
-export type GhResult = { status: number; data: any }
+export type GhResult = {
+	status: number
+	data: any
+	/**
+	 * The `Link` header, when the endpoint paginates.
+	 *
+	 * ADDED FOR THE DEPENDABOT ALERTS ENDPOINT, which refuses `?page=N` outright
+	 * ("Pagination using the `page` parameter is not supported", HTTP 400) and
+	 * pages by cursor instead: the only way to reach page 2 is to follow the
+	 * `rel="next"` URL this header carries. Without it a caller can read the
+	 * first 100 alerts and no more, which is how a 630-alert fleet was reported
+	 * as 317.
+	 *
+	 * Optional, so every existing caller and every test fake that returns only
+	 * `{status, data}` keeps working — a caller that needs pagination checks for
+	 * it and stops after one page when it is absent.
+	 */
+	link?: string
+}
 
 export type RequestOpts = {
 	/** When present, authenticates as `token <t>`; when absent, as `Bearer <jwt>`. */
@@ -182,10 +200,14 @@ export class GitHubApi {
 				// `res.text()` is read OUTSIDE the parse guard on purpose — a rejected
 				// read must reach the transport catch below, not be swallowed here.
 				const text = await res.text()
+				// The `Link` header rides along so cursor-paginated endpoints can be
+				// followed; `null` is normalised to `undefined` so a caller's check
+				// is a plain truthiness test.
+				const link = res.headers.get("link") ?? undefined
 				try {
-					return { status: res.status, data: JSON.parse(text) }
+					return { status: res.status, data: JSON.parse(text), link }
 				} catch {
-					return { status: res.status, data: {} }
+					return { status: res.status, data: {}, link }
 				}
 			} catch (e) {
 				// Python lines 175-191. httpx distinguishes its transport errors and

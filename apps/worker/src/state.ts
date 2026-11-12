@@ -107,6 +107,24 @@ export interface PrEntry {
 	 */
 	bad_bump?: string
 	bad_bump_sha?: string
+	/**
+	 * The head at which the Dependabot rebase ladder was last advanced, plus the
+	 * rung it reached.
+	 *
+	 * WHY THE SHA. A successful rebase MOVES the head, so a record keyed on the
+	 * SHA releases itself and the next tick examines the PR afresh — no separate
+	 * cleanup. It also stops a five-minute tick from re-posting while Dependabot
+	 * works.
+	 *
+	 * WHY THE RUNG. `@dependabot rebase` is not always actionable: it answers
+	 * "already up-to-date, request a recreate" on a branch that is not behind, and
+	 * "the dependabot.yml entry was deleted, close the PR" when the ecosystem
+	 * config is gone. Recording only "requested, waiting" would leave those PRs
+	 * waiting forever — a permanent stall of a new shape. The rung is what lets the
+	 * next tick at the SAME head escalate instead of repeating.
+	 */
+	rebase_requested_sha?: string
+	rebase_step?: string
 	[key: string]: unknown
 }
 
@@ -495,6 +513,40 @@ export function markSkipNotified(
 ): PrEntry {
 	const entry = prEntry(state, repo, pr)
 	entry.notified = true
+	if (file !== undefined) saveFixState(file, state)
+	return entry
+}
+
+/**
+ * The rung the rebase ladder already reached at this head, or `undefined`.
+ *
+ * `undefined` means the ladder has not been started for this SHA — a fresh head,
+ * or a PR never seen before. Any returned rung means "this head already spent that
+ * rung", so the caller escalates to the next one instead of repeating. The rung is
+ * deliberately NOT a skip: nothing here stops the PR from being examined again.
+ */
+export function rebaseStepAt(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): string | undefined {
+	const entry = prEntry(state, repo, pr)
+	return entry.rebase_requested_sha === headSha ? entry.rebase_step : undefined
+}
+
+/** Record the rung the ladder reached at this head. */
+export function markRebaseStep(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+	step: string,
+	file?: string,
+): PrEntry {
+	const entry = prEntry(state, repo, pr)
+	entry.rebase_requested_sha = headSha
+	entry.rebase_step = step
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }

@@ -43,7 +43,17 @@ describe("api build entrypoints", () => {
 			"utf8",
 		)
 		const built = ["main", "migrate", "db/seed"]
-		const invoked = [...deploy.matchAll(/dist\/([A-Za-z0-9_/-]+)\.js/g)].map((m) => m[1])
+		// WHOLE-LINE COMMENTS ARE NOT INVOCATIONS. The check is about what the
+		// deploy RUNS, and a comment explaining the bundle layout names a path
+		// without running it — that produced a red CI on a comment that said
+		// "the bundle resolves them relative to `dist/index.js`", which is true
+		// and has nothing to do with entrypoints. Strip them before matching so
+		// the guard keeps catching real `node dist/x.js` lines.
+		const invocations = deploy
+			.split("\n")
+			.filter((line) => !line.trim().startsWith("#"))
+			.join("\n")
+		const invoked = [...invocations.matchAll(/dist\/([A-Za-z0-9_/-]+)\.js/g)].map((m) => m[1])
 		expect(invoked.length).toBeGreaterThan(0)
 		for (const entry of invoked) {
 			expect(built, `deploy.yml runs dist/${String(entry)}.js`).toContain(entry)

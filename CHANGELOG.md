@@ -1,3 +1,108 @@
+## [1.11.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.4...v1.11.5) (2026-11-12)
+
+
+### Bug Fixes
+
+* **scan:** paginate the PR fan-out — 21 of 51 repositories were never scanned ([#18](https://github.com/MythEclipse/pr-agent-server/issues/18)) ([748b7fc](https://github.com/MythEclipse/pr-agent-server/commit/748b7fc3ff4f1898623cdd4080737b2b04091229))
+
+## [1.11.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.3...v1.11.4) (2026-11-12)
+
+
+### Bug Fixes
+
+* **pr:** escalate a stuck Dependabot bump rebase -> recreate -> close ([#17](https://github.com/MythEclipse/pr-agent-server/issues/17)) ([88792d2](https://github.com/MythEclipse/pr-agent-server/commit/88792d2210a324ce246ceb457eee54791c5734a3)), closes [#16](https://github.com/MythEclipse/pr-agent-server/issues/16) [web1#20](https://github.com/web1/issues/20) [ML-Tapi#4](https://github.com/ML-Tapi/issues/4) [#5](https://github.com/MythEclipse/pr-agent-server/issues/5)
+
+## [1.11.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.2...v1.11.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **pr:** stop the queue stalling on the worker's own merge job and on conflicted bumps ([#16](https://github.com/MythEclipse/pr-agent-server/issues/16)) ([d10bfec](https://github.com/MythEclipse/pr-agent-server/commit/d10bfec9ec7abcf464a77355468c4b0f68ad2263)), closes [MythEclipse/ML-Tapi-Bukan-Mobile-Legends#4](https://github.com/MythEclipse/ML-Tapi-Bukan-Mobile-Legends/issues/4) [#5](https://github.com/MythEclipse/pr-agent-server/issues/5)
+
+## [1.11.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.1...v1.11.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **timer:** stop the 5-minute loop from dying silently on restart ([9323a0d](https://github.com/MythEclipse/pr-agent-server/commit/9323a0d9cdfd4dd516a56b169bbf24a35a8ece85))
+
+## [1.11.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.0...v1.11.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **worker:** a signal death is not a verdict on the branch ([6f24920](https://github.com/MythEclipse/pr-agent-server/commit/6f24920e4279bcbbdf5c7d73ab3531e4f607aa0d))
+
+# [1.11.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.4...v1.11.0) (2026-11-11)
+
+
+### Features
+
+* **vulns:** skip advisories that have no patched version ([a43b488](https://github.com/MythEclipse/pr-agent-server/commit/a43b488e7ee75cb3ef3980786c3fd2e6ef000d38))
+
+## [1.10.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.3...v1.10.4) (2026-11-11)
+
+
+### Bug Fixes
+
+* **lock:** let the nightly sync wait out a tick instead of dying on it ([a54bf3b](https://github.com/MythEclipse/pr-agent-server/commit/a54bf3b5de9da1f30b963dabe4b0f150143e9d9a))
+
+## [1.10.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.2...v1.10.3) (2026-11-11)
+
+
+### Bug Fixes
+
+* **vulns:** measure coverage against each repo's OWN config ([44e9f88](https://github.com/MythEclipse/pr-agent-server/commit/44e9f880c2b6af71b77813d345ab35dc4ce642f1))
+
+## [1.10.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.1...v1.10.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **vulns:** page the alerts endpoint by CURSOR — it rejects `?page=` ([c9ed47a](https://github.com/MythEclipse/pr-agent-server/commit/c9ed47ad3e8600f46fc4ad7ce485e4106e7dfe4e))
+
+## [1.10.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.10.0...v1.10.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **vulns:** an unreadable repo is not a clean repo ([ab13582](https://github.com/MythEclipse/pr-agent-server/commit/ab1358295e8a32a2ee3b12c56a3d1ae378cc1518))
+
+# [1.10.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.4...v1.10.0) (2026-11-11)
+
+
+### Features
+
+* **vulns:** make open advisories actionable, and stop under-counting them ([5eb5954](https://github.com/MythEclipse/pr-agent-server/commit/5eb59544690fcb595f02d888fadbf84b00863fac))
+
+## [1.9.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.3...v1.9.4) (2026-11-11)
+
+
+### Bug Fixes
+
+* **sync-hooks:** a dry run must not report "updated" ([ddfdfc9](https://github.com/MythEclipse/pr-agent-server/commit/ddfdfc9ca8d580aab50f4f9ad3c984f137102d8f))
+
+## [1.9.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.2...v1.9.3) (2026-11-11)
+
+
+### Bug Fixes
+
+* **sync-hooks:** honour --dry, and stop reporting "nothing to do" as failure ([acfd55e](https://github.com/MythEclipse/pr-agent-server/commit/acfd55e64ee2befba983c548527e82ec0f4289b4))
+
+## [1.9.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.1...v1.9.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* **ci:** stop a comment from reading as an entrypoint invocation ([8743087](https://github.com/MythEclipse/pr-agent-server/commit/874308779e874f1bed37ba7edfd93ae2bfffb228))
+
+## [1.9.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.9.0...v1.9.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **sync-hooks:** ship the templates the bundle resolves, and unblock the gate ([eb3ec44](https://github.com/MythEclipse/pr-agent-server/commit/eb3ec442be66c0a262b563a660b74ffda5754c3c))
+
 # [1.9.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.8.8...v1.9.0) (2026-11-11)
 
 
