@@ -1,3 +1,10 @@
+## [1.11.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.6...v1.11.7) (2026-11-12)
+
+
+### Bug Fixes
+
+* **api:** prevent duplicate persistent review comments and package bump rows ([530d550](https://github.com/MythEclipse/pr-agent-server/commit/530d550397a4494278b9b41e9c3f24c242c4700c))
+
 ## [1.11.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.5...v1.11.6) (2026-11-12)
 
 
