@@ -176,6 +176,8 @@ type Options = {
 	 * its old behaviour (the record falls back to the pre-push head).
 	 */
 	pushedSha?: string
+	/** `POST /repos/:r/issues/:n/comments` reply — the rebase request's write. */
+	commentPost?: Route
 	/** `--dry`: start the deps in dry mode, so the effects are suppressed. */
 	dry?: boolean
 }
@@ -230,6 +232,12 @@ function harness(opts: Options = {}): Harness {
 			}
 			if (/\/pulls\?/.test(path)) return { status: 200, data: prs }
 			if (path === `/repos/${REPO}`) return repoMeta
+			// The rebase request is a WRITE, so it is answered before the GET arm
+			// below — otherwise a POST to `.../comments` would fall into the
+			// "list comments" reply and appear to succeed with the wrong body.
+			if (method === "POST" && /\/issues\/\d+\/comments$/.test(path)) {
+				return opts.commentPost ?? { status: 201, data: { id: 1 } }
+			}
 			if (/\/issues\/\d+\/comments$/.test(path)) return { status: 200, data: comments }
 			if (/\/check-runs$/.test(path))
 				return checkRunsReply ?? { status: 200, data: { check_runs: checkRuns } }
@@ -1121,6 +1129,195 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 
 		expect(h.lines).not.toContain("   🔴 Merge conflicts")
 		expect(out.merged).toBe(true)
+	})
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A conflicted DEPENDABOT bump asks Dependabot to rebase, never the agent
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// THE BUG THIS PINS. The resolver handed every conflict to Claude Code, whose
+// job is source edits — it cannot regenerate a lockfile, so on a dependency bump
+// it makes no push. The failure arm then wrote
+// `Unresolvable merge conflict (Claude Code made no push)` as a `skip_reason`,
+// enforced "until head SHA changes", which no failed run ever does. The PR was
+// pinned permanently.
+//
+// THE PATH IS THE LIVE ONE. In the 2026-11-12 report the conflict was found by
+// `stepMerge`'s `mergeableGate`, AFTER the Dependabot-green fast path had already
+// decided to merge — so the harness must give green CI and a DIRTY mergeable,
+// not a red CI (a red CI ends the turn in `stepSafetyAndCi` before any conflict
+// check, which is a different, correct arm).
+//
+//   🤖 Dependabot CI green (✅ 1 checks green) — merging without AI review
+//   🔴 Merge conflicts (mergeable_state: dirty) — resolving before approving
+//   ⏭️  Skipping (conflict, already attempted at this SHA)
+//
+// `@dependabot rebase` is the deterministic remedy AND it moves the head, which
+// releases the pin by itself.
+describe("a conflicted Dependabot bump requests a rebase instead of the agent", () => {
+	/** A dependabot bump whose base moved under it: green CI, dirty mergeable. */
+	const conflictedBump = () =>
+		makePr({ ...LOCKFILE_BUMP, mergeable: false, user: { login: "dependabot[bot]" } })
+
+	/** `GET /pulls/:n` as `mergeableGate` sees it: a definitive conflict. */
+	const dirtyReply = () => ({
+		status: 200,
+		data: {
+			state: "open",
+			merged: false,
+			head: { sha: HEAD, ref: "dependabot/npm_and_yarn/x" },
+			mergeable: false,
+			mergeable_state: "dirty",
+		},
+	})
+
+	const commentsPosted = (calls: Call[]) =>
+		calls.filter((c) => c.method === "POST" && /\/issues\/\d+\/comments$/.test(c.path))
+
+	test("posts `@dependabot rebase` once and spends no agent run", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+		})
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		// Nothing merged, nothing fixed — the PR is WAITING, not broken.
+		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
+		expect(h.agentPosts).toHaveLength(0)
+		expect(merges(h.calls)).toBe(0)
+
+		const posted = commentsPosted(h.calls)
+		expect(posted).toHaveLength(1)
+		expect(posted[0].json).toEqual({ body: "@dependabot rebase" })
+
+		expect(h.lines).toContain(
+			"   🔴 Merge conflicts (mergeable_state: dirty) — resolving before approving",
+		)
+		expect(h.lines).toContain("   🔧 Conflicted dependency bump — asking Dependabot to rebase...")
+		expect(h.lines).toContain(
+			"   ⏳ Rebase requested — Dependabot will re-create the bump on the current base",
+		)
+		// The pin that caused the permanent stall must NOT be written.
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+		expect(h.fixState[REPO][String(PR_NUM)].rebase_requested_sha).toBe(HEAD)
+	})
+
+	test("the comment is sent once per head, not once per tick", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			// A previous tick already asked.
+			fixState: { [REPO]: { [String(PR_NUM)]: { rebase_requested_sha: HEAD } } },
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		expect(commentsPosted(h.calls)).toHaveLength(0)
+		expect(h.agentPosts).toHaveLength(0)
+		expect(h.lines).toContain(
+			"   ⏭️  Dependabot rebase already requested at this SHA — waiting for it to move the branch",
+		)
+	})
+
+	test("a dry run says what it would do and posts nothing", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			dry: true,
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		expect(commentsPosted(h.calls)).toHaveLength(0)
+		expect(h.lines).toContain("   🧪 dry run: would comment `@dependabot rebase`")
+	})
+
+	// A failed comment must NOT fall through to the agent: that is the expensive
+	// path this branch exists to avoid, and the operator has to see it failed.
+	test("a refused comment is reported and counted, and still no agent run", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			commentPost: { status: 500, data: { message: "Server Error" } },
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		expect(h.agentPosts).toHaveLength(0)
+		expect(h.lines).toContain("   ⚠️  Could not comment the rebase request (HTTP 500)")
+		// Counted, so the repeated line is answerable ("attempt 2") rather than
+		// looking like the first failure every five minutes.
+		expect(h.lines).toContain(
+			"   🔁 dependabot rebase request failed (HTTP 500) (attempt 1 at this SHA — retrying next tick)",
+		)
+		// NOT pinned: the next tick may well succeed.
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+	})
+
+	// ── THE ORDERING THAT MADE THE OLD PRs STUCK ─────────────────────────────
+	//
+	// The Dependabot-green fast path calls `stepMerge(deps, c, true)` — `already`
+	// is the LITERAL true, not a state lookup — and `stepMerge`'s conflict arm
+	// then reaches the resolver with `already === true`. In the old code the
+	// resolver's only branch was `if (AI_FIX_ENABLED && !already)`, so the agent
+	// was never even offered, and every tick printed the `giveUp` line:
+	//
+	//   🤖 Dependabot CI green (✅ 1 checks green) — merging without AI review
+	//   🔴 Merge conflicts (mergeable_state: dirty) — resolving before approving
+	//   ⏭️  Skipping (conflict, already attempted at this SHA)
+	//
+	// which is exactly ML-Tapi#4/#5 in the 2026-11-12 report. The rebase branch
+	// therefore MUST sit before the `!already` test, or the fix is unreachable on
+	// the very path that reports it.
+	test("the rebase is requested even though the fast path passes already=true", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		// The green fast path is what routes this PR into `stepMerge`.
+		expect(h.lines).toContain(
+			"   🤖 Dependabot CI green (✅ 1 checks green) — merging without AI review",
+		)
+		expect(commentsPosted(h.calls)).toHaveLength(1)
+		// The old dead-end line must be gone for a dependency bump.
+		expect(h.lines).not.toContain("   ⏭️  Skipping (conflict, already attempted at this SHA)")
+	})
+
+	// A HUMAN PR's conflict still goes to the agent: the rebase path is
+	// Dependabot-only, and a human's branch is theirs to resolve.
+	test("a human PR's conflict still goes to Claude Code", async () => {
+		// A trivial TITLE with a human AUTHOR is the combination that reaches the
+		// resolver: `isTrivialPr` is title-only, so `NO_CODE_MARKER` is honoured
+		// and the AI fix is skipped, while `c.author` is still a human — which is
+		// exactly what the rebase branch must not match on.
+		const human = makePr({ ...LOCKFILE_BUMP, mergeable: false, user: { login: "alice" } })
+		const h = harness({
+			prs: [human],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			agent: [{ ok: false, snippet: "conflict with main, gave up" }],
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: human })
+
+		expect(commentsPosted(h.calls)).toHaveLength(0)
+		expect(h.agentPosts).toHaveLength(1)
+		expect(h.lines).toContain("   🤖 Resolving merge conflict with Claude Code...")
 	})
 })
 
