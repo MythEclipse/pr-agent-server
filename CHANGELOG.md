@@ -1,3 +1,10 @@
+## [1.11.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.2...v1.11.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **pr:** stop the queue stalling on the worker's own merge job and on conflicted bumps ([#16](https://github.com/MythEclipse/pr-agent-server/issues/16)) ([d10bfec](https://github.com/MythEclipse/pr-agent-server/commit/d10bfec9ec7abcf464a77355468c4b0f68ad2263)), closes [MythEclipse/ML-Tapi-Bukan-Mobile-Legends#4](https://github.com/MythEclipse/ML-Tapi-Bukan-Mobile-Legends/issues/4) [#5](https://github.com/MythEclipse/pr-agent-server/issues/5)
+
 ## [1.11.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.1...v1.11.2) (2026-11-11)
 
 
