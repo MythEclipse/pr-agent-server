@@ -1,3 +1,10 @@
+## [1.11.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.5...v1.11.6) (2026-11-12)
+
+
+### Bug Fixes
+
+* auto-fix code quality ([38dd457](https://github.com/MythEclipse/pr-agent-server/commit/38dd45716323ec98e1a12fa95e9b286117d64920))
+
 ## [1.11.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.4...v1.11.5) (2026-11-12)
 
 
