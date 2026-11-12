@@ -1,3 +1,10 @@
+## [1.11.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.4...v1.11.5) (2026-11-12)
+
+
+### Bug Fixes
+
+* **scan:** paginate the PR fan-out — 21 of 51 repositories were never scanned ([#18](https://github.com/MythEclipse/pr-agent-server/issues/18)) ([748b7fc](https://github.com/MythEclipse/pr-agent-server/commit/748b7fc3ff4f1898623cdd4080737b2b04091229))
+
 ## [1.11.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.3...v1.11.4) (2026-11-12)
 
 
