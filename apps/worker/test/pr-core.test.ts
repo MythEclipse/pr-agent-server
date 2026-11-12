@@ -819,10 +819,11 @@ describe("gatherOpenPrs", () => {
 				if (path === "/app/installations") {
 					return { status: 200, data: [{ id: 1 }, { id: 2 }] } as any
 				}
-				if (path === "/installation/repositories") {
+				if (path.startsWith("/installation/repositories")) {
 					return {
 						status: 200,
 						data: {
+							total_count: 1,
 							repositories:
 								opts?.token === "tok-2"
 									? [{ full_name: "owner/target" }]
@@ -844,16 +845,90 @@ describe("gatherOpenPrs", () => {
 		const out = await gatherOpenPrs(api)
 		expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
 			"GET /app/installations",
-			"GET /installation/repositories",
-			"GET /repos/owner/other/pulls?state=open&per_page=20&sort=updated",
-			"GET /installation/repositories",
-			"GET /repos/owner/target/pulls?state=open&per_page=20&sort=updated",
+			"GET /installation/repositories?per_page=100&page=1",
+			"GET /repos/owner/other/pulls?state=open&per_page=100&page=1&sort=updated",
+			"GET /installation/repositories?per_page=100&page=1",
+			"GET /repos/owner/target/pulls?state=open&per_page=100&page=1&sort=updated",
 		])
 		expect(out).toEqual([
 			{ token: "tok-1", repo: "owner/other", pr: { number: 5 } },
 			{ token: "tok-2", repo: "owner/target", pr: { number: 5 } },
 		])
 	})
+
+	// ── THE SILENT TRUNCATION THAT HID 21 REPOSITORIES ──────────────────────
+	//
+	// `GET /installation/repositories` reports `total_count` for the whole
+	// installation but returns ONE page — 30 by default. The worker asked once and
+	// trusted the body, so on MythEclipse (installation 177719826, 2026-11-12)
+	// `total_count` was 51 while 30 came back, and 21 repos were NEVER SCANNED —
+	// including pr-agent-server, TeleUploader, mcpedia and zesdex, which is exactly
+	// where four open Dependabot PRs were sitting. The queue said "Found 2 open
+	// PR(s)" and nothing anywhere reported an error.
+	test("paginates installation repositories past the first page", async () => {
+		const total = 51
+		const calls: string[] = []
+		// 51 repos over pages of 30 — the REAL shape of the production failure:
+		// the default page is 30 and `total_count` said 51.
+		const repos = Array.from({ length: total }, (_, i) => ({ full_name: `o/r${i}` }))
+		const api: GhAppClient = {
+			async request(_m, path) {
+				calls.push(path)
+				if (path === "/app/installations") return { status: 200, data: [{ id: 1 }] } as any
+				if (path.startsWith("/installation/repositories")) {
+					const page = Number(new URL(`http://x${path}`).searchParams.get("page"))
+					// Simulate a server that caps a page at 30 regardless of `per_page`.
+					const start = (page - 1) * 30
+					return {
+						status: 200,
+						data: { total_count: total, repositories: repos.slice(start, start + 30) },
+					} as any
+				}
+				// A PR in the LAST repo of the LAST page: the one production missed.
+				const repo = path.split("/repos/")[1]?.split("/pulls")[0]
+				return {
+					status: 200,
+					data: repo === `o/r${total - 1}` ? [{ number: 777 }] : [],
+				} as any
+			},
+			installationToken: async () => "tok",
+		}
+		const out = await gatherOpenPrs(api)
+		// THE ASSERTION THAT MATTERS: the tail repo is scanned and its PR is found.
+		expect(out).toEqual([{ token: "tok", repo: `o/r${total - 1}`, pr: { number: 777 } }])
+		expect(calls.filter((c) => c.startsWith("/installation/repositories")).length).toBe(2)
+	})
+
+	test("a full page with more behind it is followed", async () => {
+		const calls: string[] = []
+		let prPage = 0
+		const api: GhAppClient = {
+			async request(_m, path) {
+				calls.push(path)
+				if (path === "/app/installations") return { status: 200, data: [{ id: 1 }] } as any
+				if (path.startsWith("/installation/repositories")) {
+					return {
+						status: 200,
+						data: { total_count: 1, repositories: [{ full_name: "o/r" }] },
+					} as any
+				}
+				// Two pages of PRs: a full one then a short one.
+				prPage += 1
+				if (prPage === 1) {
+					return {
+						status: 200,
+						data: Array.from({ length: 100 }, (_, i) => ({ number: i })),
+					} as any
+				}
+				return { status: 200, data: [{ number: 999 }] } as any
+			},
+			installationToken: async () => "tok",
+		}
+		const out = await gatherOpenPrs(api)
+		expect(out).toHaveLength(101)
+		expect(out.at(-1)?.pr.number).toBe(999)
+	})
+
 	test("an empty installation list yields nothing", async () => {
 		const api: GhAppClient = {
 			request: async () => ({ status: 200, data: [] }),
