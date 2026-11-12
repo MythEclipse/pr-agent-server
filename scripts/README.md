@@ -2,6 +2,7 @@
 
 `apps/worker/` (TypeScript/Node) — the 5-minute job that watches open PRs across every
 repo where the PR-Agent GitHub App is installed, and drives the full lifecycle:
+
 1. **Open PR found** → ensure a PR-Agent review exists (fabricates a webhook to
    `pr-agent.asepharyana.my.id` if not)
 2. **Toolchain pin guard** → closes dependabot PRs that bump pinned toolchain
@@ -26,6 +27,7 @@ Every repo in the App installation whose GitHub metadata says `fork: true`: new
 upstream (parent) commits are **merged** (never rebased) into the fork's default
 branch, gated by a per-repo interval (default **1 hour**; the `UPSTREAM_SYNC`
 config block in `apps/worker/src/sync/config.ts`).
+
 - **Conflicted merge** → the Hermes agent (via the gateway API server) resolves
   it (merge-reconciler rules: merge hunks by hand, never wholesale
   `--ours/--theirs`, run the repo's own typecheck/tests before committing). The

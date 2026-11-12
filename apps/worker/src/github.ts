@@ -29,9 +29,9 @@ const GH_CLI_TIMEOUT_MS = 10_000
 const DEFAULT_RETRIES = 3
 
 /** Result of a completed HTTP round trip, or the `{0, {}}` failure sentinel. */
-// biome-ignore lint/suspicious/noExplicitAny: verbatim from the pr_agent port
 export type GhResult = {
 	status: number
+	// biome-ignore lint/suspicious/noExplicitAny: verbatim from the pr_agent port
 	data: any
 	/**
 	 * The `Link` header, when the endpoint paginates.
