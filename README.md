@@ -183,6 +183,7 @@ previous tree is kept as `.prev` for a manual rollback. The runtime has no Nix
 dependency — the `cleanup` job only reaps leftover Nix store entries on the VPS.
 
 Secrets required in GitHub Actions:
+
 - `VPS_HOST` — VPS IP address
 - `VPS_USER` — SSH user
 - `SSH_PRIVATE_KEY` — SSH private key for deploy user
