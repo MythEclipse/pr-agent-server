@@ -14,7 +14,15 @@
  * The stale-dependabot age arithmetic (Python 2051) is `ageDays` in `./context`.
  */
 
-import { alreadyFixed, bumpAttempt, bumpBudgetRun, markFixed, markSkip } from "../state.ts"
+import {
+	alreadyFixed,
+	bumpAttempt,
+	bumpBudgetRun,
+	markFixed,
+	markRebaseRequested,
+	markSkip,
+	wasRebaseRequested,
+} from "../state.ts"
 import { checkPrStillValid, killOrphanedAgent, runAiFix } from "./autofix.ts"
 import { checkCiPassed, closeStaleCiPr, STALE_CI_CLOSE_DAYS } from "./ci.ts"
 import {
@@ -37,6 +45,7 @@ import {
 	type WorkerDeps,
 } from "./context.ts"
 import { approvePr, mergePr } from "./merge.ts"
+import { requestDependabotRebase } from "./rebase.ts"
 import { analyzeReviewSafety } from "./safety.ts"
 
 // ── The conflict resolver, used from TWO sites (2071-2105 and 2134-2161) ────
@@ -61,6 +70,53 @@ export async function resolveConflict(
 	const giveUp = recheck
 		? "   ⏭️  Skipping (conflict, already attempted at this SHA)"
 		: "   ⏭️  Skipping (409 conflict, already attempted)"
+
+	// ── DEPENDABOT FIRST: ask Dependabot to rebase, do NOT spend the agent ───
+	//
+	// A conflicted dependency bump is not an agent problem. The agent edits source
+	// files and cannot regenerate a lockfile or a pin graph, so it makes no push,
+	// and `resolveConflict`'s failure arm then writes
+	// `Unresolvable merge conflict (Claude Code made no push)` as a `skip_reason`
+	// — enforced "until head SHA changes", which no failed run ever does. The PR
+	// was pinned permanently; ML-Tapi#4/#5 sat on exactly that line.
+	//
+	// `@dependabot rebase` is Dependabot's own documented remedy: it re-creates
+	// the bump on the current base and regenerates the lockfile with the resolver
+	// that understands the ecosystem. It costs no tokens and it MOVES THE HEAD,
+	// which releases the pin (and every other head-keyed record) by itself.
+	//
+	// Once per head: `rebase_requested_sha` is recorded so a five-minute tick
+	// cannot post the comment repeatedly while Dependabot works. The PR is left
+	// OPEN and untallied — there is nothing wrong with it, it is waiting.
+	if (c.author === "dependabot[bot]") {
+		if (wasRebaseRequested(c.fixState, c.repo, c.prNum, c.headSha)) {
+			deps.report.push(
+				"   ⏭️  Dependabot rebase already requested at this SHA — waiting for it to move the branch",
+			)
+			return
+		}
+		if (deps.dry) {
+			deps.report.push("   🧪 dry run: would comment `@dependabot rebase`")
+			return
+		}
+		deps.report.push("   🔧 Conflicted dependency bump — asking Dependabot to rebase...")
+		const status = await requestDependabotRebase(deps.api, c.token, c.repo, c.prNum)
+		if (status >= 200 && status < 300) {
+			markRebaseRequested(c.fixState, c.repo, c.prNum, c.headSha)
+			persist(deps, c.fixState)
+			deps.report.push(
+				"   ⏳ Rebase requested — Dependabot will re-create the bump on the current base",
+			)
+			return
+		}
+		// A failed comment must not silently fall through to the agent: that is
+		// the expensive path this branch exists to avoid, and a refusal here is
+		// reported so the operator can see the request never landed.
+		deps.report.push(`   ⚠️  Could not comment the rebase request (HTTP ${status})`)
+		await noteFailure(deps, c, `dependabot rebase request failed (HTTP ${status})`)
+		return
+	}
+
 	if (AI_FIX_ENABLED && !already) {
 		if (deps.dry) {
 			deps.report.push("   🧪 dry run: would ask the agent to resolve the merge conflict")

@@ -107,6 +107,16 @@ export interface PrEntry {
 	 */
 	bad_bump?: string
 	bad_bump_sha?: string
+	/**
+	 * The head at which a `@dependabot rebase` comment was already posted, so the
+	 * comment is sent ONCE per head rather than on every tick.
+	 *
+	 * A rebase moves the branch, so it also moves the head SHA — which releases
+	 * every other head-keyed record here by itself. Keying the "already asked"
+	 * flag on the SHA is what stops a five-minute tick from posting the same
+	 * comment repeatedly while Dependabot works.
+	 */
+	rebase_requested_sha?: string
 	[key: string]: unknown
 }
 
@@ -495,6 +505,37 @@ export function markSkipNotified(
 ): PrEntry {
 	const entry = prEntry(state, repo, pr)
 	entry.notified = true
+	if (file !== undefined) saveFixState(file, state)
+	return entry
+}
+
+/**
+ * True when a `@dependabot rebase` comment was already posted for this head.
+ *
+ * Keyed on the SHA for the reason in the field's doc comment: a rebase moves the
+ * head, so a successful request clears itself. This only prevents the COMMENT
+ * from repeating — it deliberately records nothing that would stop the PR from
+ * being examined again.
+ */
+export function wasRebaseRequested(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): boolean {
+	return prEntry(state, repo, pr).rebase_requested_sha === headSha
+}
+
+/** Record that a `@dependabot rebase` comment went out for this head. */
+export function markRebaseRequested(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+	file?: string,
+): PrEntry {
+	const entry = prEntry(state, repo, pr)
+	entry.rebase_requested_sha = headSha
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }

@@ -22,6 +22,7 @@ import {
 	runSyncHooks,
 	type SyncHooksDeps,
 } from "../src/ops/syncHooks.ts"
+import { SELF_CHECK_NAMES } from "../src/pr/ci.ts"
 
 const TEMPLATE_DIR = join(import.meta.dirname, "..", "src", "ops", "templates")
 
@@ -379,6 +380,26 @@ describe("runSyncHooks > dependabot templates", () => {
 		// The job's display name is the check-run name GitHub reports for it.
 		expect(wf).toMatch(/name: Auto-merge dependency PR\n/)
 		expect(wf).toContain("SELF_CHECK_NAME: Auto-merge dependency PR")
+	})
+
+	// THE OTHER HALF OF THE SAME CONTRACT. The workflow filters its own run out
+	// internally, but the WORKER's `checkCiPassed` reads the same check-runs
+	// endpoint and must filter the identical name — otherwise it counts the merge
+	// job's `failure`/`cancelled` as a red test suite. Measured on
+	// MythEclipse/web1#20, where those two were the ONLY check runs and the gate
+	// reported `CI FAILED: Auto-merge dependency PR, Auto-merge dependency PR`
+	// on a repo with no test workflow at all.
+	//
+	// Pinning the pair here is what stops the two names drifting apart: a rename
+	// in the template alone would silently re-arm the bug on every repo.
+	test("the worker filters the same self-check name the template uses", () => {
+		const wf = template("dependabot-auto-merge.yml")
+		const jobName = wf.match(/^ {4}name: (.+)$/m)?.[1]?.trim()
+		expect(jobName).toBe("Auto-merge dependency PR")
+		expect(SELF_CHECK_NAMES).toContain(jobName)
+		// And the template's own SELF_CHECK_NAME env must equal the job name.
+		const envName = wf.match(/SELF_CHECK_NAME: (.+)$/m)?.[1]?.trim()
+		expect(envName).toBe(jobName)
 	})
 
 	// The body has to be the real file, base64-encoded as the contents API

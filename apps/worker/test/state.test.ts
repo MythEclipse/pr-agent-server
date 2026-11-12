@@ -11,9 +11,11 @@ import {
 	getSkipReason,
 	loadFixState,
 	markFixed,
+	markRebaseRequested,
 	markSkip,
 	markSkipNotified,
 	prEntry,
+	wasRebaseRequested,
 	wasSkipNotified,
 } from "../src/state.ts"
 
@@ -123,5 +125,28 @@ describe("fix state", () => {
 		markFixed(s, "o/r", 1, "sha9")
 		expect(alreadyFixed(s, "o/r", 1, "sha9")).toBe(true)
 		expect(alreadyFixed(s, "o/r", 1, "other")).toBe(false)
+	})
+
+	// The rebase request is keyed on the SHA for a reason that is worth pinning:
+	// a rebase MOVES the head, so the record releases itself and the next tick
+	// examines the PR again. Anything else would either repeat the comment every
+	// five minutes or block the PR after one successful request.
+	test("a rebase request is recorded per head and releases on a new head", () => {
+		const s: any = {}
+		expect(wasRebaseRequested(s, "o/r", 1, "sha1")).toBe(false)
+		markRebaseRequested(s, "o/r", 1, "sha1")
+		expect(wasRebaseRequested(s, "o/r", 1, "sha1")).toBe(true)
+		// A new head (the rebase landed) is a fresh question.
+		expect(wasRebaseRequested(s, "o/r", 1, "sha2")).toBe(false)
+	})
+
+	// It must NOT double as a skip: the PR is waiting, not broken, and a
+	// skip_reason would pin it until the head moves — the exact stall this
+	// record exists to avoid.
+	test("a rebase request records no skip reason", () => {
+		const s: any = {}
+		markRebaseRequested(s, "o/r", 1, "sha1")
+		expect(getSkipReason(s, "o/r", 1, "sha1")).toBeUndefined()
+		expect(alreadyFixed(s, "o/r", 1, "sha1")).toBe(false)
 	})
 })
