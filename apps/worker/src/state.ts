@@ -108,15 +108,23 @@ export interface PrEntry {
 	bad_bump?: string
 	bad_bump_sha?: string
 	/**
-	 * The head at which a `@dependabot rebase` comment was already posted, so the
-	 * comment is sent ONCE per head rather than on every tick.
+	 * The head at which the Dependabot rebase ladder was last advanced, plus the
+	 * rung it reached.
 	 *
-	 * A rebase moves the branch, so it also moves the head SHA — which releases
-	 * every other head-keyed record here by itself. Keying the "already asked"
-	 * flag on the SHA is what stops a five-minute tick from posting the same
-	 * comment repeatedly while Dependabot works.
+	 * WHY THE SHA. A successful rebase MOVES the head, so a record keyed on the
+	 * SHA releases itself and the next tick examines the PR afresh — no separate
+	 * cleanup. It also stops a five-minute tick from re-posting while Dependabot
+	 * works.
+	 *
+	 * WHY THE RUNG. `@dependabot rebase` is not always actionable: it answers
+	 * "already up-to-date, request a recreate" on a branch that is not behind, and
+	 * "the dependabot.yml entry was deleted, close the PR" when the ecosystem
+	 * config is gone. Recording only "requested, waiting" would leave those PRs
+	 * waiting forever — a permanent stall of a new shape. The rung is what lets the
+	 * next tick at the SAME head escalate instead of repeating.
 	 */
 	rebase_requested_sha?: string
+	rebase_step?: string
 	[key: string]: unknown
 }
 
@@ -510,32 +518,35 @@ export function markSkipNotified(
 }
 
 /**
- * True when a `@dependabot rebase` comment was already posted for this head.
+ * The rung the rebase ladder already reached at this head, or `undefined`.
  *
- * Keyed on the SHA for the reason in the field's doc comment: a rebase moves the
- * head, so a successful request clears itself. This only prevents the COMMENT
- * from repeating — it deliberately records nothing that would stop the PR from
- * being examined again.
+ * `undefined` means the ladder has not been started for this SHA — a fresh head,
+ * or a PR never seen before. Any returned rung means "this head already spent that
+ * rung", so the caller escalates to the next one instead of repeating. The rung is
+ * deliberately NOT a skip: nothing here stops the PR from being examined again.
  */
-export function wasRebaseRequested(
+export function rebaseStepAt(
 	state: FixState,
 	repo: string,
 	pr: number | string,
 	headSha: string,
-): boolean {
-	return prEntry(state, repo, pr).rebase_requested_sha === headSha
+): string | undefined {
+	const entry = prEntry(state, repo, pr)
+	return entry.rebase_requested_sha === headSha ? entry.rebase_step : undefined
 }
 
-/** Record that a `@dependabot rebase` comment went out for this head. */
-export function markRebaseRequested(
+/** Record the rung the ladder reached at this head. */
+export function markRebaseStep(
 	state: FixState,
 	repo: string,
 	pr: number | string,
 	headSha: string,
+	step: string,
 	file?: string,
 ): PrEntry {
 	const entry = prEntry(state, repo, pr)
 	entry.rebase_requested_sha = headSha
+	entry.rebase_step = step
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }

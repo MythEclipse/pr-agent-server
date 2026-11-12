@@ -122,7 +122,7 @@ function makePr(over: Record<string, any> = {}): any {
 // Harness
 // ═══════════════════════════════════════════════════════════════════════════
 
-type Call = { method: string; path: string; json?: unknown }
+type Call = { method: string; path: string; json?: unknown; token?: string }
 type Notify = {
 	repo: string
 	pr: number
@@ -180,6 +180,8 @@ type Options = {
 	commentPost?: Route
 	/** `--dry`: start the deps in dry mode, so the effects are suppressed. */
 	dry?: boolean
+	/** Model a host with no owner PAT: `fetchGhToken()` answers `""`. */
+	noPat?: boolean
 }
 
 type Harness = {
@@ -224,7 +226,7 @@ function harness(opts: Options = {}): Harness {
 
 	const api: GhAppClient = {
 		async request(method, path, o = {}) {
-			calls.push({ method, path, json: o.json })
+			calls.push({ method, path, json: o.json, token: o.token })
 			if (opts.throwOn?.(path)) throw new Error("boom")
 			if (path.startsWith("/app/installations")) return { status: 200, data: [{ id: 1 }] }
 			if (path.startsWith("/installation/repositories")) {
@@ -238,7 +240,7 @@ function harness(opts: Options = {}): Harness {
 			if (method === "POST" && /\/issues\/\d+\/comments$/.test(path)) {
 				return opts.commentPost ?? { status: 201, data: { id: 1 } }
 			}
-			if (/\/issues\/\d+\/comments$/.test(path)) return { status: 200, data: comments }
+			if (/\/issues\/\d+\/comments(\?|$)/.test(path)) return { status: 200, data: comments }
 			if (/\/check-runs$/.test(path))
 				return checkRunsReply ?? { status: 200, data: { check_runs: checkRuns } }
 			if (/\/git\/trees\/.*recursive/.test(path)) {
@@ -324,7 +326,7 @@ function harness(opts: Options = {}): Harness {
 		exec,
 		workdirs,
 		procs: { workdirs, procExists: () => false, kill: () => {}, sleep: () => {}, pid: 4242 },
-		fetchGhToken: () => "gh-pat",
+		fetchGhToken: () => (opts.noPat ? "" : "gh-pat"),
 		report,
 		flushReport: () => Promise.resolve(),
 		notify: (
@@ -1206,22 +1208,175 @@ describe("a conflicted Dependabot bump requests a rebase instead of the agent", 
 		expect(h.fixState[REPO][String(PR_NUM)].rebase_requested_sha).toBe(HEAD)
 	})
 
-	test("the comment is sent once per head, not once per tick", async () => {
+	// ── THE IDENTITY, WHICH IS THE WHOLE BUG ONCE THE COMMENT LANDS ──────────
+	//
+	// Dependabot only obeys a slash command from an identity with PUSH access, and
+	// the App installation is not one. The first live deploy posted the comment as
+	// the App and Dependabot answered, in public on ML-Tapi#4:
+	//
+	//   Sorry, only users with push access can use that command.
+	//
+	// A 201 from the comments API proves only that a comment landed. So the PAT
+	// must be the identity that speaks, and the harness records the token per call
+	// precisely so this is assertable.
+	test("the rebase is posted with the owner PAT, not the App token", async () => {
 		const pr = conflictedBump()
 		const h = harness({
 			prs: [pr],
 			comments: [NO_CODE_MARKER],
 			pullReply: dirtyReply(),
-			// A previous tick already asked.
-			fixState: { [REPO]: { [String(PR_NUM)]: { rebase_requested_sha: HEAD } } },
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		const posted = commentsPosted(h.calls)
+		expect(posted).toHaveLength(1)
+		// `gh-pat` is the harness's `fetchGhToken()` answer.
+		expect(posted[0].token).toBe("gh-pat")
+		expect(posted[0].token).not.toBe("install-token")
+	})
+
+	// With no PAT configured the comment still goes out as the App — but the
+	// report must NOT claim the rebase was requested, because Dependabot will
+	// refuse it.
+	test("with no PAT the App posts, and the report says the request may be refused", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			noPat: true,
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		const posted = commentsPosted(h.calls)
+		expect(posted).toHaveLength(1)
+		expect(posted[0].token).toBe("install-token")
+		expect(h.lines).toContain(
+			"   ⏳ Comment posted as the App — Dependabot may refuse it (no push access)",
+		)
+		expect(h.lines).not.toContain(
+			"   ⏳ Rebase requested — Dependabot will re-create the bump on the current base",
+		)
+	})
+
+	test("the comment is sent once per head, then the ladder escalates", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			// A previous tick already spent rung 1 at this head.
+			fixState: {
+				[REPO]: {
+					[String(PR_NUM)]: { rebase_requested_sha: HEAD, rebase_step: "rebase" },
+				},
+			},
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		// NOT the same comment again — the next rung.
+		const posted = commentsPosted(h.calls)
+		expect(posted).toHaveLength(1)
+		expect(posted[0].json).toEqual({ body: "@dependabot recreate" })
+		expect(h.agentPosts).toHaveLength(0)
+		expect(h.lines).toContain(
+			"   🔧 Rebase was a no-op — asking Dependabot to recreate the branch...",
+		)
+		expect(h.fixState[REPO][String(PR_NUM)].rebase_step).toBe("recreate")
+	})
+
+	// ── THE THIRD RUNG: close, reached deterministically ─────────────────────
+	//
+	// The ladder advances one rung per tick at the same head, so arriving at
+	// "close" means `@dependabot rebase` AND `@dependabot recreate` were both
+	// already issued for this exact SHA and the head still has not moved. That is
+	// the fact the API states; no prose matching is involved.
+	//
+	// A prose gate ("only close if the last reply says close") was the first cut
+	// and it degraded the whole ladder to "leaving this bump for a human" on the
+	// live fleet, because after a recreate Dependabot's last reply is an unrelated
+	// acknowledgement. These tests pin the deterministic behaviour instead.
+	test("after rebase and recreate fail to move the head, the bump is closed", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			fixState: {
+				[REPO]: {
+					[String(PR_NUM)]: { rebase_requested_sha: HEAD, rebase_step: "recreate" },
+				},
+			},
 		})
 
 		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
 
 		expect(commentsPosted(h.calls)).toHaveLength(0)
+		expect(closes(h.calls)).toHaveLength(1)
+		expect(h.lines).toContain(
+			"   🧹 Rebase and recreate both failed to move this branch — closing so Dependabot can re-open it...",
+		)
+		expect(h.lines).toContain(
+			"   ✅ Closed — Dependabot will open a fresh bump from the current config",
+		)
+		expect(h.fixState[REPO][String(PR_NUM)].rebase_step).toBe("close")
+	})
+
+	// FULL AUTO is the requirement: no rung may end in "leaving it for a human"
+	// unless the ladder is genuinely exhausted. Dependabot's reply text must not be
+	// able to stop the ladder — that is what broke the first cut.
+	test("Dependabot's reply text cannot stop the ladder", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			// An acknowledgement, exactly the kind that defeated the prose gate.
+			comments: [
+				{
+					user: { login: "dependabot[bot]" },
+					body: "OK, I won't notify you again about this release, but will get in touch when a new version is available.",
+				},
+			],
+			pullReply: dirtyReply(),
+			fixState: {
+				[REPO]: {
+					[String(PR_NUM)]: { rebase_requested_sha: HEAD, rebase_step: "recreate" },
+				},
+			},
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		expect(closes(h.calls)).toHaveLength(1)
+		expect(h.lines).not.toContain(
+			"   ⏭️  Dependabot did not ask for a close — leaving this bump for a human",
+		)
+	})
+
+	// The ladder must TERMINATE: an exhausted ladder does not re-post forever, and
+	// says who owns the PR now.
+	test("an exhausted ladder stops and leaves the PR to a human", async () => {
+		const pr = conflictedBump()
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			pullReply: dirtyReply(),
+			fixState: {
+				[REPO]: {
+					[String(PR_NUM)]: { rebase_requested_sha: HEAD, rebase_step: "close" },
+				},
+			},
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		expect(commentsPosted(h.calls)).toHaveLength(0)
+		expect(closes(h.calls)).toHaveLength(0)
 		expect(h.agentPosts).toHaveLength(0)
 		expect(h.lines).toContain(
-			"   ⏭️  Dependabot rebase already requested at this SHA — waiting for it to move the branch",
+			"   ⏭️  Dependabot escalation exhausted at this SHA — leaving it to a human",
 		)
 	})
 
