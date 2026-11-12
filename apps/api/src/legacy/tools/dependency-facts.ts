@@ -221,14 +221,22 @@ export function renderDependencyFacts(report: DepBumpReport): string {
 	lines.push("### Dependency changes")
 	lines.push("")
 
-	if (report.bumps.length === 0) {
+	const seen = new Set<string>()
+	const uniqueBumps = report.bumps.filter((b) => {
+		const key = `${b.name}::${b.from}::${b.to}`
+		if (seen.has(key)) return false
+		seen.add(key)
+		return true
+	})
+
+	if (uniqueBumps.length === 0) {
 		lines.push(
 			"No version movement could be parsed from the manifest diff — the lockfile changed but no manifest range did.",
 		)
 	} else {
 		lines.push("| Package | From | To | Change |")
 		lines.push("| --- | --- | --- | --- |")
-		for (const b of report.bumps) {
+		for (const b of uniqueBumps) {
 			const flag = b.severity === "major" ? "**major**" : b.severity
 			const zero = b.zeroX ? " (0.x — no semver guarantee)" : ""
 			lines.push(`| \`${b.name}\` | \`${b.from}\` | \`${b.to}\` | ${flag}${zero} |`)
@@ -248,7 +256,7 @@ export function renderDependencyFacts(report: DepBumpReport): string {
 		lines.push("Lockfile updated alongside the manifests.")
 	}
 
-	const majors = report.bumps.filter((b) => b.severity === "major")
+	const majors = uniqueBumps.filter((b) => b.severity === "major")
 	if (majors.length > 0) {
 		lines.push("")
 		lines.push(

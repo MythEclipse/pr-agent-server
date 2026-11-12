@@ -48,6 +48,7 @@ type PersistentStub = {
 	ensureToken: () => Promise<void>
 	listIssueComments: () => Promise<GhComment[]>
 	editComment: (commentId: number, body: string) => Promise<void>
+	deleteComment: (commentId: number) => Promise<void>
 	getLatestCommitUrl: () => Promise<string>
 	publishComment: (body: string, isTemporary?: boolean) => Promise<GhComment>
 	publishPersistentComment: (
@@ -61,32 +62,38 @@ type PersistentStub = {
 /** A GitHubProvider whose octokit-bound methods are recording fakes: the
  *  constructor calls createAppAuth (network/config), so build the object from
  *  the prototype and stub only what publishPersistentComment touches. */
-function stubProvider(): {
+function stubProvider(initialComments?: GhComment[]): {
 	provider: PersistentStub
 	edits: { id: number; body: string }[]
+	deleted: number[]
 	published: string[]
 } {
 	const edits: { id: number; body: string }[] = []
+	const deleted: number[] = []
 	const published: string[] = []
 	const provider = Object.create(GitHubProvider.prototype) as PersistentStub
 	provider.ensureToken = async () => {}
-	provider.listIssueComments = async () => [
-		{
-			id: 7,
-			body: `${INITIAL_HEADER}\n\nprevious review`,
-			htmlUrl: "https://gh/comment/7",
-			createdAt: "",
-		},
-	]
+	provider.listIssueComments = async () =>
+		initialComments ?? [
+			{
+				id: 7,
+				body: `${INITIAL_HEADER}\n\nprevious review`,
+				htmlUrl: "https://gh/comment/7",
+				createdAt: "",
+			},
+		]
 	provider.editComment = async (commentId: number, body: string) => {
 		edits.push({ id: commentId, body })
+	}
+	provider.deleteComment = async (commentId: number) => {
+		deleted.push(commentId)
 	}
 	provider.getLatestCommitUrl = async () => COMMIT_URL
 	provider.publishComment = async (body: string) => {
 		published.push(body)
 		return { id: 99, body, htmlUrl: "https://gh/comment/99", createdAt: "" }
 	}
-	return { provider, edits, published }
+	return { provider, edits, deleted, published }
 }
 
 describe("publishPersistentComment header (S9)", () => {
@@ -120,6 +127,47 @@ describe("publishPersistentComment header (S9)", () => {
 		expect(edits[0].body).toContain("fresh review body")
 		// the stale previous body must be gone
 		expect(edits[0].body).not.toContain("previous review")
+	})
+
+	test("matches and updates an existing comment when dependency facts precede the header", async () => {
+		const existingComment = {
+			id: 42,
+			body: `### Dependency changes\n\n| Package | From | To | Change |\n\n${INITIAL_HEADER}\n\nprevious review`,
+			htmlUrl: "https://gh/comment/42",
+			createdAt: "",
+		}
+		const { provider, edits, published } = stubProvider([existingComment])
+		const newContent = `### Dependency changes\n\n| Package | From | To | Change |\n\n${INITIAL_HEADER}\n\nfresh review`
+		await provider.publishPersistentComment(newContent, INITIAL_HEADER, "review", false)
+		// Must edit the existing comment instead of publishing a duplicate
+		expect(edits.length).toBe(1)
+		expect(edits[0].id).toBe(42)
+		expect(edits[0].body).toContain(UPDATED_HEADER_NOTE)
+		expect(edits[0].body).toContain("fresh review")
+		expect(published.length).toBe(0)
+	})
+
+	test("cleans up older duplicate comments and updates the latest matching comment", async () => {
+		const staleDup = {
+			id: 10,
+			body: `### Dependency changes\n\n${INITIAL_HEADER}\n\nstale review 1`,
+			htmlUrl: "https://gh/comment/10",
+			createdAt: "",
+		}
+		const latestDup = {
+			id: 11,
+			body: `### Dependency changes\n\n${INITIAL_HEADER}\n\nstale review 2`,
+			htmlUrl: "https://gh/comment/11",
+			createdAt: "",
+		}
+		const { provider, edits, deleted, published } = stubProvider([staleDup, latestDup])
+		const newContent = `${INITIAL_HEADER}\n\nfresh unified review`
+		await provider.publishPersistentComment(newContent, INITIAL_HEADER, "review", false)
+		expect(deleted).toContain(10)
+		expect(edits.length).toBe(1)
+		expect(edits[0].id).toBe(11)
+		expect(edits[0].body).toContain("fresh unified review")
+		expect(published.length).toBe(0)
 	})
 })
 

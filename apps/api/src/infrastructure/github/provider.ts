@@ -31,6 +31,14 @@ export interface GhComment {
 
 const MAX_FILES_ALLOWED_FULL = 50
 
+function matchesPersistentHeader(body: string, header: string): boolean {
+	if (body.startsWith(header)) return true
+	return body.split("\n").some((line) => {
+		const trimmed = line.trim()
+		return trimmed.startsWith(header) && !trimmed.startsWith(">")
+	})
+}
+
 export class GitHubProvider {
 	private authClient: AppAuthClient
 	private octokit: Octokit
@@ -346,8 +354,9 @@ export class GitHubProvider {
 		return pr.htmlUrl
 	}
 
-	/** Persistent comment: find a previous comment starting with `header` and
-	 *  update it in place; else create new. Mirrors pr_agent behavior. */
+	/** Persistent comment: find a previous comment containing `header` and
+	 *  update it in place; else create new. Cleans up any duplicate comments
+	 *  from prior runs to keep the PR timeline tidy. Mirrors pr_agent behavior. */
 	async publishPersistentComment(
 		content: string,
 		initialHeader: string,
@@ -355,24 +364,33 @@ export class GitHubProvider {
 		finalUpdateMessage = true,
 	): Promise<void> {
 		const comments = await this.listIssueComments()
-		for (const c of comments) {
-			if (c.body.startsWith(initialHeader)) {
-				const latestCommitUrl = await this.getLatestCommitUrl()
-				const updatedHeader = `${initialHeader}\n\n#### (${name.charAt(0).toUpperCase() + name.slice(1)} updated until commit ${latestCommitUrl})\n`
-				// S9: always publish the fresh content. If it lacks the header (e.g. a
-				// review with no findings renders without one) prepend the updated
-				// header, otherwise the next run could not find this comment.
-				const updated = content.includes(initialHeader)
-					? content.replace(initialHeader, updatedHeader)
-					: `${updatedHeader}\n${content}`
-				await this.editComment(c.id, updated)
-				if (finalUpdateMessage) {
-					await this.publishComment(
-						`**[Persistent ${name}](<${c.htmlUrl}>)** updated to latest commit [${latestCommitUrl}](${latestCommitUrl})`,
-					)
+		const matching = comments.filter((c) => matchesPersistentHeader(c.body, initialHeader))
+		if (matching.length > 0) {
+			const target = matching[matching.length - 1]
+			const duplicates = matching.slice(0, -1)
+			for (const dup of duplicates) {
+				try {
+					await this.deleteComment(dup.id)
+				} catch {
+					// best-effort cleanup of stale duplicates
 				}
-				return
 			}
+
+			const latestCommitUrl = await this.getLatestCommitUrl()
+			const updatedHeader = `${initialHeader}\n\n#### (${name.charAt(0).toUpperCase() + name.slice(1)} updated until commit ${latestCommitUrl})\n`
+			// S9: always publish the fresh content. If it lacks the header (e.g. a
+			// review with no findings renders without one) prepend the updated
+			// header, otherwise the next run could not find this comment.
+			const updated = content.includes(initialHeader)
+				? content.replace(initialHeader, updatedHeader)
+				: `${updatedHeader}\n${content}`
+			await this.editComment(target.id, updated)
+			if (finalUpdateMessage) {
+				await this.publishComment(
+					`**[Persistent ${name}](<${target.htmlUrl}>)** updated to latest commit [${latestCommitUrl}](${latestCommitUrl})`,
+				)
+			}
+			return
 		}
 		await this.publishComment(content)
 	}

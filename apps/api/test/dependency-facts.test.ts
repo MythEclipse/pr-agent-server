@@ -167,6 +167,18 @@ describe("rendering", () => {
 		expect(md).not.toContain("no issues")
 	})
 
+	test("deduplicates identical bumps across multiple manifests in the table and majors", () => {
+		const r = analyseDependencyPr([
+			pkg("^5.0.5", "^5.1.0", "apps/backend/package.json"),
+			pkg("^5.0.5", "^5.1.0", "apps/frontend/package.json"),
+			lock,
+		])
+		const md = renderDependencyFacts(r)
+		const vitestOccurrences = (md.match(/`openai`/g) ?? []).length
+		// Even though both manifests bumped openai from ^5.0.5 to ^5.1.0, the table lists it only once
+		expect(vitestOccurrences).toBe(1)
+	})
+
 	test("recognises the manifests of the other ecosystems here", () => {
 		expect(isManifest("Cargo.toml")).toBe(true)
 		expect(isManifest("pyproject.toml")).toBe(true)
