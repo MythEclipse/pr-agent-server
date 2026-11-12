@@ -95,6 +95,81 @@ describe("ci gate", () => {
 			).ok,
 		).toBe(true)
 	})
+
+	// THE WORKER'S OWN MERGE JOB IS NOT CI.
+	//
+	// Measured on MythEclipse/web1#20 (2026-11-12): the head's check runs were
+	// `Auto-merge dependency PR: failure` and `... : cancelled` — two copies of
+	// the worker's own merge job, no test suite anywhere in the repo. Both
+	// conclusions are red, so the gate reported `CI FAILED: Auto-merge dependency
+	// PR, Auto-merge dependency PR` on a repo with no CI, and the attempt tally
+	// ran to 86.
+	test("the auto-merge job's own check run is not counted as CI", async () => {
+		const r = await checkCiPassed(
+			api({
+				check_runs: [
+					{ name: "Auto-merge dependency PR", conclusion: "failure", status: "completed" },
+					{ name: "Auto-merge dependency PR", conclusion: "cancelled", status: "completed" },
+				],
+			}),
+			"t",
+			"o/r",
+			"sha",
+		)
+		expect(r.ok).toBe(true)
+		expect(r.msg).toContain("No test CI configured")
+	})
+
+	// The filter must not become a way to hide a REAL red suite: a genuine
+	// failure sitting beside the merge job still blocks.
+	test("a real failure beside the self check is still red", async () => {
+		const r = await checkCiPassed(
+			api({
+				check_runs: [
+					{ name: "Auto-merge dependency PR", conclusion: "failure", status: "completed" },
+					{ name: "verify", conclusion: "failure", status: "completed" },
+				],
+			}),
+			"t",
+			"o/r",
+			"sha",
+		)
+		expect(r.ok).toBe(false)
+		expect(r.msg).toBe("CI FAILED: verify")
+	})
+
+	// A real green suite beside the merge job is green, and the count names only
+	// the suite — otherwise the report claims a check count inflated by the
+	// worker's own bookkeeping.
+	test("a green suite beside the self check reports one green check", async () => {
+		const r = await checkCiPassed(
+			api({
+				check_runs: [
+					{ name: "Auto-merge dependency PR", conclusion: "failure", status: "completed" },
+					{ name: "verify", conclusion: "success", status: "completed" },
+				],
+			}),
+			"t",
+			"o/r",
+			"sha",
+		)
+		expect(r).toEqual({ ok: true, msg: "✅ 1 checks green" })
+	})
+
+	// The workflow's own name is what a never-re-synced copy reports.
+	test("the `Dependabot auto-merge` workflow name is filtered too", async () => {
+		const r = await checkCiPassed(
+			api({
+				check_runs: [
+					{ name: "Dependabot auto-merge", conclusion: "cancelled", status: "completed" },
+				],
+			}),
+			"t",
+			"o/r",
+			"sha",
+		)
+		expect(r.ok).toBe(true)
+	})
 })
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -49,6 +49,45 @@ const joinNames = (checks: any[]): string =>
 		.join(", ")
 
 /**
+ * Check-run names that belong to THIS worker's own tooling, not to the repo's
+ * test suite, and must never be counted as CI evidence.
+ *
+ * WHY THIS IS NOT OPTIONAL. `GET /commits/{sha}/check-runs` returns the check
+ * runs of every app on the commit, the auto-merge workflow included. That
+ * workflow is installed by `ops/syncHooks.ts` on every repo in the fleet, and it
+ * is a MERGE JOB, not a test: it reports `failure` precisely when it declined to
+ * merge, and `cancelled` whenever `concurrency.cancel-in-progress` superseded a
+ * run. Both are in `FAILED_CONCLUSIONS`, so this gate read the worker's own
+ * refusal as a red test suite.
+ *
+ * Measured on MythEclipse/web1#20, 2026-11-12. The head's only check runs were
+ * `Auto-merge dependency PR: failure` and `Auto-merge dependency PR: cancelled`
+ * — two copies of the merge job and nothing else; the repo has no test workflow
+ * at all. The report line was
+ *
+ *   🧪 CI: CI FAILED: Auto-merge dependency PR, Auto-merge dependency PR
+ *   🔁 CI still red: ... (attempt 86 at this SHA — retrying next tick)
+ *
+ * so a repo with NO CI was treated as permanently red, and the attempt tally ran
+ * to 86. The same list is what the workflow's own internal gate already filters
+ * out with `SELF_CHECK_NAME`; the two sides must agree on the name, so it is
+ * spelled once here and asserted against the template by `ops.test.ts`.
+ *
+ * The `Dependabot auto-merge` name is included as well because that is the
+ * WORKFLOW's name and GitHub reports a run's check run under the JOB name — a
+ * repo whose copy was never re-synced still carries whichever variant it had.
+ * Filtering both is harmless: neither is a test suite.
+ */
+export const SELF_CHECK_NAMES: readonly string[] = [
+	"Auto-merge dependency PR",
+	"Dependabot auto-merge",
+]
+
+/** True when a check run belongs to the worker's own auto-merge tooling. */
+const isSelfCheck = (check: any): boolean =>
+	SELF_CHECK_NAMES.includes(typeof check?.name === "string" ? check.name : "")
+
+/**
  * Every `conclusion` that means the run did NOT pass.
  *
  * GitHub's set is `success | failure | neutral | cancelled | skipped |
@@ -97,10 +136,15 @@ export async function checkCiPassed(
 	const { status, data } = await api.request("GET", `/repos/${repo}/commits/${sha}/check-runs`, {
 		token,
 	})
-	const checks =
+	const all =
 		data !== null && typeof data === "object" && Array.isArray((data as any).check_runs)
 			? ((data as any).check_runs as any[])
 			: []
+	// Filtered BEFORE anything counts them, exactly like the workflow's own
+	// `SELF_CHECK_NAME` filter — see `SELF_CHECK_NAMES`. `total`, `failed` and
+	// `pending` must all describe the repo's real CI, or a merge job that refused
+	// to merge reads as a red test suite.
+	const checks = all.filter((c) => !isSelfCheck(c))
 
 	if (!checks.length) {
 		// Only a 200 proves "this repo has no checks". A non-200 — the transport
@@ -108,6 +152,16 @@ export async function checkCiPassed(
 		// and green would be a guess.
 		if (status !== 200)
 			return { ok: false, unknown: true, msg: `⚠️ CI status unavailable (HTTP ${status})` }
+		// A repo whose ONLY check runs are this worker's own merge job has no test
+		// suite, so the gate passes — the same verdict as a head with no checks at
+		// all. Saying so explicitly keeps the report honest about WHY it passed,
+		// and stops the operator reading "no CI configured" on a repo that clearly
+		// has a workflow.
+		if (all.length)
+			return {
+				ok: true,
+				msg: `✅ No test CI configured (only this worker's own merge job) — skipping CI gate`,
+			}
 		return { ok: true, msg: "✅ No CI configured — skipping CI gate" } // line 399
 	}
 
@@ -174,7 +228,7 @@ export async function checkCiWithSuiteRequirement(
 		data !== null && typeof data === "object" && Array.isArray((data as any).check_runs)
 			? ((data as any).check_runs as any[])
 			: []
-	const names = new Set(checks.map((c) => String(c?.name ?? "")))
+	const names = new Set(checks.filter((c) => !isSelfCheck(c)).map((c) => String(c?.name ?? "")))
 	if (expectedChecks.some((name) => names.has(name))) return result
 
 	return {
