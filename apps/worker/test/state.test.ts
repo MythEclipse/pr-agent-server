@@ -11,11 +11,11 @@ import {
 	getSkipReason,
 	loadFixState,
 	markFixed,
-	markRebaseRequested,
+	markRebaseStep,
 	markSkip,
 	markSkipNotified,
 	prEntry,
-	wasRebaseRequested,
+	rebaseStepAt,
 	wasSkipNotified,
 } from "../src/state.ts"
 
@@ -127,25 +127,35 @@ describe("fix state", () => {
 		expect(alreadyFixed(s, "o/r", 1, "other")).toBe(false)
 	})
 
-	// The rebase request is keyed on the SHA for a reason that is worth pinning:
-	// a rebase MOVES the head, so the record releases itself and the next tick
+	// The ladder record is keyed on the SHA for a reason worth pinning: a successful
+	// rebase MOVES the head, so the record releases itself and the next tick
 	// examines the PR again. Anything else would either repeat the comment every
 	// five minutes or block the PR after one successful request.
-	test("a rebase request is recorded per head and releases on a new head", () => {
+	test("a rebase rung is recorded per head and releases on a new head", () => {
 		const s: any = {}
-		expect(wasRebaseRequested(s, "o/r", 1, "sha1")).toBe(false)
-		markRebaseRequested(s, "o/r", 1, "sha1")
-		expect(wasRebaseRequested(s, "o/r", 1, "sha1")).toBe(true)
-		// A new head (the rebase landed) is a fresh question.
-		expect(wasRebaseRequested(s, "o/r", 1, "sha2")).toBe(false)
+		expect(rebaseStepAt(s, "o/r", 1, "sha1")).toBeUndefined()
+		markRebaseStep(s, "o/r", 1, "sha1", "rebase")
+		expect(rebaseStepAt(s, "o/r", 1, "sha1")).toBe("rebase")
+		// A new head (the rebase landed) is a fresh ladder.
+		expect(rebaseStepAt(s, "o/r", 1, "sha2")).toBeUndefined()
+	})
+
+	// The rung is what lets the next tick ESCALATE at the same head instead of
+	// repeating a rung Dependabot already answered as a no-op.
+	test("the rung advances at the same head", () => {
+		const s: any = {}
+		markRebaseStep(s, "o/r", 1, "sha1", "rebase")
+		expect(rebaseStepAt(s, "o/r", 1, "sha1")).toBe("rebase")
+		markRebaseStep(s, "o/r", 1, "sha1", "recreate")
+		expect(rebaseStepAt(s, "o/r", 1, "sha1")).toBe("recreate")
 	})
 
 	// It must NOT double as a skip: the PR is waiting, not broken, and a
 	// skip_reason would pin it until the head moves — the exact stall this
 	// record exists to avoid.
-	test("a rebase request records no skip reason", () => {
+	test("a rebase rung records no skip reason", () => {
 		const s: any = {}
-		markRebaseRequested(s, "o/r", 1, "sha1")
+		markRebaseStep(s, "o/r", 1, "sha1", "rebase")
 		expect(getSkipReason(s, "o/r", 1, "sha1")).toBeUndefined()
 		expect(alreadyFixed(s, "o/r", 1, "sha1")).toBe(false)
 	})
