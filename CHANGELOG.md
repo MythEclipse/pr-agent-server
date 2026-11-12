@@ -1,3 +1,10 @@
+## [1.11.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.3...v1.11.4) (2026-11-12)
+
+
+### Bug Fixes
+
+* **pr:** escalate a stuck Dependabot bump rebase -> recreate -> close ([#17](https://github.com/MythEclipse/pr-agent-server/issues/17)) ([88792d2](https://github.com/MythEclipse/pr-agent-server/commit/88792d2210a324ce246ceb457eee54791c5734a3)), closes [#16](https://github.com/MythEclipse/pr-agent-server/issues/16) [web1#20](https://github.com/web1/issues/20) [ML-Tapi#4](https://github.com/ML-Tapi/issues/4) [#5](https://github.com/MythEclipse/pr-agent-server/issues/5)
+
 ## [1.11.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.2...v1.11.3) (2026-11-12)
 
 
