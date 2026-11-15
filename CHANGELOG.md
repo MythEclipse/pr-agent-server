@@ -1,3 +1,10 @@
+## [1.11.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.7...v1.11.8) (2026-11-15)
+
+
+### Bug Fixes
+
+* **worker:** merge a green, reviewed PR instead of rewriting it ([#19](https://github.com/MythEclipse/pr-agent-server/issues/19)) ([a25cfe4](https://github.com/MythEclipse/pr-agent-server/commit/a25cfe49875479b00881fb5e02d5384e6a93be2f))
+
 ## [1.11.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.6...v1.11.7) (2026-11-12)
 
 
