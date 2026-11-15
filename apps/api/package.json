@@ -36,8 +36,8 @@
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
-		"@electric-sql/pglite": "^0.5.15",
-		"@electric-sql/pglite-socket": "^0.2.18",
+		"@electric-sql/pglite": "^0.5.16",
+		"@electric-sql/pglite-socket": "^0.2.19",
 		"@types/node": "^26.6.6",
 		"@types/nunjucks": "^3.2.6",
 		"@types/pg": "^8.23.1",
