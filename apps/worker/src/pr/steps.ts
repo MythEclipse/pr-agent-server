@@ -289,6 +289,58 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 		return
 	}
 
+	// ── NO AGENT RUN WHEN CI IS ALREADY GREEN ────────────────────────────────
+	//
+	// THE ORDER THIS FIXES. `stepAiFix` ran unconditionally: nothing between the
+	// review and this call ever asked whether CI had anything wrong with it. So a
+	// human PR that was already green — reviewed, mergeable, ready — still paid
+	// for a full `AI_FIX_TIMEOUT` (1800s) agent run whose prompt is literally
+	// "improve code quality of ALL changed files", and the agent then PUSHED that
+	// rewrite onto the contributor's branch. The merge gate sat behind it, so the
+	// PR could not merge until the rewrite finished, and what finally merged was
+	// not the change that had been reviewed.
+	//
+	// Measured on MythEclipse/GMW#6: reviewed at 10:22, CI green at `f30321a0`,
+	// `mergeable: true`, and the worker spent 16+ minutes rewriting the branch
+	// instead of merging it. The queue lock is held for the whole run, so every
+	// other PR in the fleet waited behind a PR that had no problem.
+	//
+	// The review is the product here: this worker exists to read a change and
+	// decide whether it may land. Rewriting a green branch before that decision
+	// inverts it — the operator reviewed one diff and got another.
+	//
+	// So the agent is offered ONLY when there is a failure to fix. This is the
+	// same rule `stepLockPrefix` already applies for trivial PRs ("CI is red" is
+	// its entry condition); it was simply never applied to the ordinary path.
+	//
+	// `unknown` does NOT buy a run either. An unreadable gate is transient
+	// (GitHub 5xx, a rate limit, a runner still registering) and spending 30
+	// minutes of a paid model on a guess is worse than waiting one tick — the
+	// CI gate downstream refuses to merge on an unknown gate anyway.
+	const ciNow = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+	if (ciNow.ok) {
+		deps.report.push(
+			`   ✅ CI already green (${ciNow.msg}) — no fix needed, going to the merge gate`,
+		)
+		return
+	}
+	if (ciNow.unknown) {
+		deps.report.push(
+			`   ⏳ CI unknown (${ciNow.msg}) — not spending an agent run on an unreadable gate`,
+		)
+		return
+	}
+	// PENDING is not RED. `checkCiPassed` answers `ok: false` for both, and only
+	// the message separates them — reading pending as red would launch the agent
+	// against a suite that has not finished, which is the same waste this block
+	// exists to stop. The downstream CI gate waits for pending too, so waiting
+	// here costs one tick and nothing else.
+	if (/^CI pending/.test(ciNow.msg)) {
+		deps.report.push(`   ⏳ ${ciNow.msg} — waiting for it to settle before spending an agent run`)
+		return
+	}
+	deps.report.push(`   🔧 CI is red (${ciNow.msg}) — offering the agent a fix`)
+
 	// ── FIX UNTIL CI IS GREEN ────────────────────────────────────────────────
 	//
 	// The single-shot flow below this line ends the moment a commit is pushed.

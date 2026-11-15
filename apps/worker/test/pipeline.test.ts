@@ -70,6 +70,21 @@ const SAFE_REVIEW = [
 	"🧪 No relevant tests",
 ].join("\n")
 
+/**
+ * RED CI — the entry condition for the AI fix, as of the "no agent run on a
+ * green branch" change in `stepAiFix`.
+ *
+ * These tests all exercise the FIX LOOP: budget ceilings, transient [INFRA]
+ * retries, the pushed-tip record. That loop is a remedy for a failing suite, so
+ * its precondition is a failing suite. They used to reach it through the
+ * harness's default green checks, which was only possible while `stepAiFix` ran
+ * unconditionally — the exact behaviour that made a reviewed, green, mergeable
+ * PR sit behind a 30-minute rewrite instead of merging.
+ *
+ * The assertions below are unchanged. Only the CI state that arms the step is.
+ */
+const RED_FOR_FIX = [{ name: "build", status: "completed", conclusion: "failure" }]
+
 const BOT = "mytheclipsebotreview[bot]"
 
 /** The `## PR Reviewer Guide` comment shape `findReviewComment` matches. */
@@ -160,6 +175,17 @@ type Options = {
 	/** `GET /repos/:r/commits/:s/check-runs` reply — set it to a non-200 to
 	 *  model an API that cannot answer the gate. */
 	checkRunsReply?: Route
+	/**
+	 * Sequential `GET .../check-runs` replies, consumed in call order with the
+	 * last one repeating — the CI counterpart of `pullReplySeq`.
+	 *
+	 * A single static reply cannot express the shape the fix loop produces: RED
+	 * going in (which is what offers the agent), then GREEN on the head the fix
+	 * pushed (which is what ends the loop). With a static red the loop correctly
+	 * keeps going — `MAX_FIX_ITERATIONS` runs in one tick — so a test that means
+	 * "one agent run, then done" has to model the suite recovering.
+	 */
+	checkRunsReplySeq?: Route[]
 	/** `GET /pulls/:n` (the re-validation + head re-fetch) reply. */
 	pullReply?: Route
 	/**
@@ -217,6 +243,8 @@ function harness(opts: Options = {}): Harness {
 	}
 	const merge = opts.merge ?? { status: 200, data: { sha: "c0ffee" } }
 	const checkRunsReply = opts.checkRunsReply
+	const checkRunsSeq = [...(opts.checkRunsReplySeq ?? [])]
+	let checkRunsCall = 0
 	const pullReply = opts.pullReply
 	const pullReplySeq = [...(opts.pullReplySeq ?? [])]
 	let pullCall = 0
@@ -241,8 +269,13 @@ function harness(opts: Options = {}): Harness {
 				return opts.commentPost ?? { status: 201, data: { id: 1 } }
 			}
 			if (/\/issues\/\d+\/comments(\?|$)/.test(path)) return { status: 200, data: comments }
-			if (/\/check-runs$/.test(path))
+			if (/\/check-runs$/.test(path)) {
+				// `checkRunsReplySeq` when the test needs CI to RECOVER after the
+				// fix's push; else the static reply.
+				if (checkRunsSeq.length)
+					return checkRunsSeq[Math.min(checkRunsCall++, checkRunsSeq.length - 1)]
 				return checkRunsReply ?? { status: 200, data: { check_runs: checkRuns } }
+			}
 			if (/\/git\/trees\/.*recursive/.test(path)) {
 				const tree = (opts.tree ?? ["package.json", "bun.lock"]).map((p) => ({ path: p }))
 				return { status: 200, data: { tree } }
@@ -440,6 +473,7 @@ describe("attempt tally — failures are recorded, never written off", () => {
 
 	test("a blocked safety gate counts the attempt and keeps retrying", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(BLOCKED_REVIEW)],
 			fixState: stateFor(1),
@@ -463,6 +497,7 @@ describe("attempt tally — failures are recorded, never written off", () => {
 		// hopeless, because "hopeless" is exactly what a fixable-but-blocked PR
 		// looks like before its bug is found. It must stay in the queue.
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(BLOCKED_REVIEW)],
 			fixState: stateFor(50),
@@ -702,6 +737,7 @@ describe("case 4 — an agent run that exhausts its BUDGET is retried, then stop
 	//   - the spend IS bounded, at `AI_FIX_BUDGET_CEILING` runs per head.
 	test("the timeout does not pin, and the agent stops being offered at the ceiling", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: false, snippet: "[INFRA] Claude Code timed out after 1800s" }],
@@ -739,6 +775,7 @@ describe("case 4 — an agent run that exhausts its BUDGET is retried, then stop
 
 	test("a NEW head sha resets the budget tally", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: false, snippet: "[INFRA] Claude Code timed out after 1800s" }],
@@ -764,6 +801,7 @@ describe("case 4 — an agent run that exhausts its BUDGET is retried, then stop
 
 	test("a genuinely permanent [INFRA] fault still pins", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: false, snippet: "[INFRA] Claude Code binary not found" }],
@@ -779,6 +817,7 @@ describe("case 4 — an agent run that exhausts its BUDGET is retried, then stop
 
 	test("a NEW head sha releases the skip and the agent runs again", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: false, snippet: "[INFRA] gateway down" }],
@@ -809,6 +848,7 @@ describe("case 4b — a TRANSIENT [INFRA] failure is retried, never pinned", () 
 
 	test("the agent runs again on the next tick and no skip is recorded", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: false, snippet: FREE_TIER_403 }],
@@ -818,14 +858,28 @@ describe("case 4b — a TRANSIENT [INFRA] failure is retried, never pinned", () 
 		expect(h.agentPosts).toHaveLength(1)
 		expect(first).toContain(`   ⏭️  AI fix skipped: ${FREE_TIER_403}`)
 		// The recorded state is the diagnostic attempt count — NOT a skip_reason.
+		//
+		// TWO, not one, and that is not this change's doing. A tick on a RED head
+		// fails two gates in sequence: the agent run (here) and then the CI gate
+		// at the end of `stepSafetyAndCi`, which counts `CI still red` as its own
+		// attempt. Both call `noteFailure`, so one tick on a red suite has always
+		// moved the tally by two. It only became visible here when this test was
+		// given the red CI that the AI fix now requires — before that it reached
+		// the agent through the harness's default green checks, the CI gate
+		// returned `false` without counting, and the tally moved by one.
+		//
+		// The counter is a diagnostic with no ceiling (nothing reads it to decide
+		// whether to give up — see `noteFailure`), so the exact value is not
+		// load-bearing; what this test pins is that it RISES and that no
+		// `skip_reason` is ever written.
 		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
-		expect((h.fixState[REPO][String(PR_NUM)] as any).attempts).toBe(1)
+		expect((h.fixState[REPO][String(PR_NUM)] as any).attempts).toBe(2)
 
 		// The whole point: the very next tick asks the agent again instead of
 		// honouring a skip that no code change could ever release.
 		const second = await runTick(h.deps)
 		expect(h.agentPosts).toHaveLength(2)
-		expect(second).toContain("   🔁 Transient infra failure — will retry next tick (attempt 2)")
+		expect(second).toContain("   🔁 Transient infra failure — will retry next tick (attempt 3)")
 		expect(second).not.toContain("Permanently skipped")
 		// Nothing is notified as a permanent skip, so the human is not told the PR
 		// is finished with.
@@ -833,11 +887,12 @@ describe("case 4b — a TRANSIENT [INFRA] failure is retried, never pinned", () 
 		// Still no skip_reason after the second failure — retrying is not the same
 		// as giving up, and the tally keeps rising for a human to see.
 		expect((h.fixState[REPO][String(PR_NUM)] as any).skip_reason).toBeUndefined()
-		expect((h.fixState[REPO][String(PR_NUM)] as any).attempts).toBe(2)
+		expect((h.fixState[REPO][String(PR_NUM)] as any).attempts).toBe(4)
 	})
 
 	test("a PERMANENT [INFRA] failure on the same tick still pins, unchanged", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: false, snippet: "[INFRA] Claude Code binary not found" }],
@@ -2026,6 +2081,76 @@ describe("prevention — a no-commit 'fix' does not lock out the agent", () => {
 	})
 })
 
+describe("a green, reviewed PR merges instead of being rewritten", () => {
+	// THE REGRESSION THIS PINS. `stepAiFix` used to run on every reviewed PR
+	// regardless of CI state, so a human PR that was already reviewed, green and
+	// mergeable still paid for a 30-minute agent run whose prompt is "improve
+	// code quality of ALL changed files" — and the agent PUSHED that rewrite
+	// onto the contributor's branch. The merge gate sat behind it.
+	//
+	// Measured on MythEclipse/GMW#6: reviewed 10:22, CI green at `f30321a0`,
+	// `mergeable: true`, and the worker spent 16+ minutes rewriting the branch
+	// while the whole fleet waited on the queue lock. Nothing was wrong with the
+	// PR except that the worker had not looked at its CI.
+	//
+	// The agent is now offered only when there is a failure to fix.
+
+	test("a human PR with green CI goes straight to approve + merge, no agent", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+		})
+
+		const out = await processPr(h.deps, ctx)
+
+		// The oracle: the agent was never asked.
+		expect(h.agentPosts).toHaveLength(0)
+		// And the PR landed.
+		expect(out.merged).toBe(true)
+		expect(approves(h.calls)).toBe(1)
+		expect(merges(h.calls)).toBe(1)
+		expect(h.lines).toContain(
+			"   ✅ CI already green (✅ 1 checks green) — no fix needed, going to the merge gate",
+		)
+	})
+
+	test("a RED CI still offers the agent a fix", async () => {
+		// The other half: this must not turn into "never fix anything".
+		//
+		// THREE runs, not one, and that is the fix-until-green loop working: the
+		// harness's CI is static, so after the agent's push the suite is still red
+		// and `shouldIterateAgain` spends another iteration — up to
+		// `MAX_FIX_ITERATIONS`. What this test pins is only that a red head still
+		// reaches the agent at all.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: RED_FOR_FIX,
+		})
+
+		await processPr(h.deps, ctx)
+
+		expect(h.agentPosts.length).toBeGreaterThan(0)
+		expect(h.lines.some((l) => l.includes("🔧 CI is red"))).toBe(true)
+	})
+
+	test("a PENDING CI does not buy an agent run", async () => {
+		// `checkCiPassed` answers `ok: false` for pending as well as red, and only
+		// the message separates them. Spending 30 minutes against a suite that has
+		// not finished is the same waste, so pending waits for the next tick.
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: [{ name: "build", status: "in_progress", conclusion: null }],
+		})
+
+		await processPr(h.deps, ctx)
+
+		expect(h.agentPosts).toHaveLength(0)
+		expect(h.lines.some((l) => l.includes("CI pending"))).toBe(true)
+	})
+})
+
 describe("prevention — a landed fix must not re-invite the agent forever", () => {
 	// hub#53, verbatim from the ops report:
 	//
@@ -2055,6 +2180,7 @@ describe("prevention — a landed fix must not re-invite the agent forever", () 
 
 	test("the recorded head is the PUSHED tip, not the head the agent started from", async () => {
 		const h = harness({
+			checkRuns: RED_FOR_FIX,
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: true, snippet: "Claude Code pushed 1 improvement commit(s)" }],
@@ -2076,6 +2202,17 @@ describe("prevention — a landed fix must not re-invite the agent forever", () 
 		// the stale record the second tick sees a head the state file has never
 		// heard of and runs the agent a SECOND time.
 		const h = harness({
+			// RED going in (that is what offers the agent), GREEN on the head the
+			// fix pushed (that is what ends the fix loop). A static red would make
+			// the loop spend every `MAX_FIX_ITERATIONS` run, so the test would be
+			// asserting the loop instead of the record it exists to pin.
+			checkRunsReplySeq: [
+				{ status: 200, data: { check_runs: RED_FOR_FIX } },
+				{
+					status: 200,
+					data: { check_runs: [{ name: "build", status: "completed", conclusion: "success" }] },
+				},
+			],
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: true, snippet: "Claude Code pushed 1 improvement commit(s)" }],
@@ -2099,6 +2236,17 @@ describe("prevention — a landed fix must not re-invite the agent forever", () 
 		// record must stay exactly what it was. `pushedSha` is unset here, which
 		// is what a clean-tree run produces.
 		const h = harness({
+			// RED going in (that is what offers the agent), GREEN on the head the
+			// fix pushed (that is what ends the fix loop). A static red would make
+			// the loop spend every `MAX_FIX_ITERATIONS` run, so the test would be
+			// asserting the loop instead of the record it exists to pin.
+			checkRunsReplySeq: [
+				{ status: 200, data: { check_runs: RED_FOR_FIX } },
+				{
+					status: 200,
+					data: { check_runs: [{ name: "build", status: "completed", conclusion: "success" }] },
+				},
+			],
 			prs: [makePr()],
 			comments: [reviewComment(SAFE_REVIEW)],
 			agent: [{ ok: true, snippet: "Claude Code found nothing to improve" }],
