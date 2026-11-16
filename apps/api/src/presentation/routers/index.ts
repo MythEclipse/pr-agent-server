@@ -52,7 +52,10 @@ export function buildRouter() {
 		},
 
 		queue: {
-			stats: adminProcedure.handler(({ context }) => context.queueStore.stats()),
+			// `queueStats()`, NOT `queueStore.stats()`: the store is Postgres in both
+			// backends, so reading it directly made the dashboard report zeros under
+			// QUEUE_BACKEND=memory while that queue was busy.
+			stats: adminProcedure.handler(({ context }) => context.queueStats()),
 		},
 	}
 }

@@ -84,6 +84,17 @@ export const reviewQueueJobs = pgTable(
 		state: text("state").$type<TQueueState>().notNull().default("pending"),
 		/** Incremented per execution attempt. */
 		attempts: integer("attempts").notNull().default(0),
+		/**
+		 * The commit this job was last requested for.
+		 *
+		 * THE RE-REVIEW TRIGGER. A `done` row used to be terminal forever, so a
+		 * push after a review was never reviewed again: the webhook deduped
+		 * against a row that had already finished. Recording the head lets
+		 * `enqueue` tell "the same commit, already reviewed" (dedupe) from "a
+		 * new commit on a reviewed PR" (re-arm to pending). Null when the
+		 * delivery carried no SHA.
+		 */
+		headSha: text("head_sha"),
 		/** A webhook arrived while this job was running — coalesced re-run. */
 		rerunRequested: boolean("rerun_requested").notNull().default(false),
 		/** Earliest time this job may run; the scheduler's ordering key. */

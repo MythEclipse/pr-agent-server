@@ -31,6 +31,26 @@ export interface GhComment {
 
 const MAX_FILES_ALLOWED_FULL = 50
 
+/**
+ * Page size for every list endpoint this provider walks.
+ *
+ * GitHub's default is 30, and the PR file list default was 30 too — `listFiles`
+ * used to ask for `per_page: 100` and stop there, so a PR with more than 100
+ * files was reviewed from a silent subset: no error, no notice, just a review
+ * that claimed to cover the whole diff. The same class of truncation applies to
+ * commits and issue comments.
+ */
+const LIST_PAGE_SIZE = 100
+
+/**
+ * Hard stop for the page walk (30 × 100 = 3000 items).
+ *
+ * GitHub caps a PR's file list at 3000 anyway, and a server that ignored `page`
+ * would otherwise spin forever returning the same full page. Reaching this cap
+ * means the list was truncated by GitHub, not by this loop.
+ */
+const MAX_LIST_PAGES = 30
+
 function matchesPersistentHeader(body: string, header: string): boolean {
 	if (body.startsWith(header)) return true
 	return body.split("\n").some((line) => {
@@ -65,6 +85,25 @@ export class GitHubProvider {
 	private async ensureToken(): Promise<void> {
 		const [owner, repo] = this.repo.split("/")
 		await this.authClient.installationToken(owner, repo)
+	}
+
+	/**
+	 * Walk a paginated list endpoint until a short page, so a list is never
+	 * silently truncated at the first 100 entries.
+	 *
+	 * `per_page` alone is not pagination: `listFiles({ per_page: 100 })` returns
+	 * ONE page, and a PR with 101 changed files was reviewed from 100 of them
+	 * with no indication that the rest existed. The caller sees the same array
+	 * shape as before; only the number of requests changed.
+	 */
+	private async listAll<T>(fetchPage: (page: number) => Promise<T[]>): Promise<T[]> {
+		const all: T[] = []
+		for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
+			const batch = await this.retry(() => fetchPage(page))
+			all.push(...batch)
+			if (batch.length < LIST_PAGE_SIZE) break
+		}
+		return all
 	}
 
 	async getPr(): Promise<PullRequestData> {
@@ -116,8 +155,10 @@ export class GitHubProvider {
 	async getCommits(): Promise<string[]> {
 		await this.ensureToken()
 		const [owner, repo] = this.repo.split("/")
-		const { data } = await this.retry(() =>
-			this.octokit.pulls.listCommits({ owner, repo, pull_number: this.prNumber, per_page: 100 }),
+		const data = await this.listAll((page) =>
+			this.octokit.pulls
+				.listCommits({ owner, repo, pull_number: this.prNumber, per_page: LIST_PAGE_SIZE, page })
+				.then((r) => r.data),
 		)
 		return data.map((c) => c.commit?.message ?? "")
 	}
@@ -176,8 +217,10 @@ export class GitHubProvider {
 		const mergeBaseSha = await this.getMergeBaseSha()
 		const [owner, repo] = this.repo.split("/")
 
-		const { data: files } = await this.retry(() =>
-			this.octokit.pulls.listFiles({ owner, repo, pull_number: this.prNumber, per_page: 100 }),
+		const files = await this.listAll((page) =>
+			this.octokit.pulls
+				.listFiles({ owner, repo, pull_number: this.prNumber, per_page: LIST_PAGE_SIZE, page })
+				.then((r) => r.data),
 		)
 
 		const diffFiles: FilePatchInfo[] = []
@@ -271,8 +314,16 @@ export class GitHubProvider {
 	async listIssueComments(): Promise<GhComment[]> {
 		await this.ensureToken()
 		const [owner, repo] = this.repo.split("/")
-		const { data } = await this.retry(() =>
-			this.octokit.issues.listComments({ owner, repo, issue_number: this.prNumber, per_page: 100 }),
+		const data = await this.listAll((page) =>
+			this.octokit.issues
+				.listComments({
+					owner,
+					repo,
+					issue_number: this.prNumber,
+					per_page: LIST_PAGE_SIZE,
+					page,
+				})
+				.then((r) => r.data),
 		)
 		return data.map((c) => ({
 			id: c.id,
@@ -299,13 +350,19 @@ export class GitHubProvider {
 	async getLabels(): Promise<string[]> {
 		await this.ensureToken()
 		const [owner, repo] = this.repo.split("/")
-		const { data } = await this.retry(() =>
-			this.octokit.issues.listLabelsOnIssue({
-				owner,
-				repo,
-				issue_number: this.prNumber,
-				per_page: 100,
-			}),
+		// Paged like every other list: a missing label is not cosmetic here —
+		// callers use this to decide whether the worker has already handled a PR,
+		// and a label past the first page read as absent.
+		const data = await this.listAll((page) =>
+			this.octokit.issues
+				.listLabelsOnIssue({
+					owner,
+					repo,
+					issue_number: this.prNumber,
+					per_page: LIST_PAGE_SIZE,
+					page,
+				})
+				.then((r) => r.data),
 		)
 		return data.map((l) => l.name)
 	}
@@ -356,7 +413,15 @@ export class GitHubProvider {
 
 	/** Persistent comment: find a previous comment containing `header` and
 	 *  update it in place; else create new. Cleans up any duplicate comments
-	 *  from prior runs to keep the PR timeline tidy. Mirrors pr_agent behavior. */
+	 *  from prior runs to keep the PR timeline tidy. Mirrors pr_agent behavior.
+	 *
+	 *  EVERY PUBLISHED BODY NAMES THE COMMIT IT REVIEWED, on both arms. The
+	 *  marker used to be added only when an existing comment was EDITED, so the
+	 *  first review on a PR carried no commit at all — and a consumer that has
+	 *  to decide "is this review of the head I am looking at?" could not tell a
+	 *  fresh review from a superseded one. The worker's `findReviewComment`
+	 *  refuses a review with no marker for exactly that reason, so a create
+	 *  without one would be re-triggered forever. */
 	async publishPersistentComment(
 		content: string,
 		initialHeader: string,
@@ -365,6 +430,17 @@ export class GitHubProvider {
 	): Promise<void> {
 		const comments = await this.listIssueComments()
 		const matching = comments.filter((c) => matchesPersistentHeader(c.body, initialHeader))
+		// `getLatestCommitUrl` returns the head SHA (not a URL, despite the name
+		// it inherited): the marker is a commit identity, and the worker matches
+		// it against the head it is processing.
+		const latestCommitUrl = await this.getLatestCommitUrl()
+		const updatedHeader = `${initialHeader}\n\n#### (${name.charAt(0).toUpperCase() + name.slice(1)} updated until commit ${latestCommitUrl})\n`
+		// S9: always publish the fresh content. If it lacks the header (e.g. a
+		// review with no findings renders without one) prepend the updated
+		// header, otherwise the next run could not find this comment.
+		const stamped = content.includes(initialHeader)
+			? content.replace(initialHeader, updatedHeader)
+			: `${updatedHeader}\n${content}`
 		if (matching.length > 0) {
 			const target = matching[matching.length - 1]
 			const duplicates = matching.slice(0, -1)
@@ -376,15 +452,7 @@ export class GitHubProvider {
 				}
 			}
 
-			const latestCommitUrl = await this.getLatestCommitUrl()
-			const updatedHeader = `${initialHeader}\n\n#### (${name.charAt(0).toUpperCase() + name.slice(1)} updated until commit ${latestCommitUrl})\n`
-			// S9: always publish the fresh content. If it lacks the header (e.g. a
-			// review with no findings renders without one) prepend the updated
-			// header, otherwise the next run could not find this comment.
-			const updated = content.includes(initialHeader)
-				? content.replace(initialHeader, updatedHeader)
-				: `${updatedHeader}\n${content}`
-			await this.editComment(target.id, updated)
+			await this.editComment(target.id, stamped)
 			if (finalUpdateMessage) {
 				await this.publishComment(
 					`**[Persistent ${name}](<${target.htmlUrl}>)** updated to latest commit [${latestCommitUrl}](${latestCommitUrl})`,
@@ -392,7 +460,7 @@ export class GitHubProvider {
 			}
 			return
 		}
-		await this.publishComment(content)
+		await this.publishComment(stamped)
 	}
 
 	async getLatestCommitUrl(): Promise<string> {

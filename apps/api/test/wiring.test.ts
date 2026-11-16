@@ -119,4 +119,19 @@ describe("composition root wiring", () => {
 		expect(src("src/infrastructure/config/private-key.ts")).toContain("private-key.pem")
 		expect(key).toContain("PRIVATE KEY")
 	})
+
+	// THE STATS ENDPOINT MUST DESCRIBE THE QUEUE THAT IS RUNNING.
+	//
+	// `context.queueStore` is the Postgres repository whatever QUEUE_BACKEND
+	// says, so reading it directly reported four zeros under the in-memory
+	// backend while that queue was busy — a failing job was invisible from the
+	// dashboard, which is the whole reason the counters exist.
+	test("the admin stats endpoint reads the running queue, not the DB store", () => {
+		const main = src("src/main.ts")
+		const router = src("src/presentation/routers/index.ts")
+		expect(main).toContain("const queueStats = async () => queue.stats()")
+		expect(main).toContain("queueStats,")
+		expect(router).toContain("context.queueStats()")
+		expect(router).not.toContain("context.queueStore.stats()")
+	})
 })

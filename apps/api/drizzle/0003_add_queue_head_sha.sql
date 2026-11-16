@@ -1,0 +1,1 @@
+ALTER TABLE "review_queue_jobs" ADD COLUMN "head_sha" text;

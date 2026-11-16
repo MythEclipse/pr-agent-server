@@ -88,7 +88,12 @@ export async function stepPinGuard(deps: WorkerDeps, c: Ctx): Promise<boolean> {
  * was just triggered and needs a cycle.
  */
 export async function stepReview(deps: WorkerDeps, c: Ctx): Promise<string | null> {
-	const found = await findReviewComment(deps.api, c.token, c.repo, c.prNum)
+	// THE HEAD SHA IS PART OF THE QUESTION. A guide published for an earlier
+	// commit is not a review of this one, and accepting it let the worker score
+	// and approve a diff nobody had looked at. `findReviewComment` refuses any
+	// review that does not name this head; the tick then re-triggers, which
+	// edits the persistent comment in place and stamps the marker.
+	const found = await findReviewComment(deps.api, c.token, c.repo, c.prNum, c.headSha)
 	if (found) {
 		deps.report.push("   📝 Review found")
 		return found
@@ -160,7 +165,13 @@ export async function stepReview(deps: WorkerDeps, c: Ctx): Promise<string | nul
  */
 export async function stepLockPrefix(deps: WorkerDeps, c: Ctx): Promise<void> {
 	const early = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
-	if (early.ok) return
+	// A RUNNING SUITE IS NOT A RED ONE. `ok: false` covers three different
+	// verdicts now (failed, pending, unreadable), and this arm's whole purpose is
+	// "CI is red, so pre-fix the lockfile and push". Pushing a lockfile commit
+	// while the checks are still running changes the head CI is judging and
+	// throws away the run in progress — so pending and unknown both leave it
+	// alone; the caller re-enters on the next tick and reads a settled verdict.
+	if (early.ok || early.pending || early.unknown) return
 
 	// The message naming a toolchain's own lockfile skips only that toolchain
 	// (Python 1973): re-resolving the file CI just complained about costs a clone
@@ -330,12 +341,12 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 		)
 		return
 	}
-	// PENDING is not RED. `checkCiPassed` answers `ok: false` for both, and only
-	// the message separates them — reading pending as red would launch the agent
-	// against a suite that has not finished, which is the same waste this block
-	// exists to stop. The downstream CI gate waits for pending too, so waiting
-	// here costs one tick and nothing else.
-	if (/^CI pending/.test(ciNow.msg)) {
+	// PENDING is not RED. `checkCiPassed` answers `ok: false` for both, and the
+	// explicit `pending` flag separates them — reading pending as red would
+	// launch the agent against a suite that has not finished, which is the same
+	// waste this block exists to stop. The downstream CI gate waits for pending
+	// too, so waiting here costs one tick and nothing else.
+	if (ciNow.pending) {
 		deps.report.push(`   ⏳ ${ciNow.msg} — waiting for it to settle before spending an agent run`)
 		return
 	}
@@ -412,7 +423,10 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 			const sha = movedSha(fresh, c.headSha)
 			if (sha) c.headSha = sha
 			const current = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
-			if (!current.ok && !current.unknown) {
+			// Same distinction as above: a suite that is still running is not a
+			// failure the agent failed to fix, and saying so sends the operator
+			// after a red build that does not exist.
+			if (!current.ok && !current.unknown && !current.pending) {
 				deps.report.push(`   ⚠️  CI is red and the agent could not fix it: ${current.msg}`)
 				deps.report.push("   ⏭️  Needs a human, or a wider change than this agent may make")
 			}

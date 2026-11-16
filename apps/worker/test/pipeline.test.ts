@@ -87,8 +87,18 @@ const RED_FOR_FIX = [{ name: "build", status: "completed", conclusion: "failure"
 
 const BOT = "mytheclipsebotreview[bot]"
 
-/** The `## PR Reviewer Guide` comment shape `findReviewComment` matches. */
-const reviewComment = (body: string) => ({ user: { login: BOT }, body })
+/**
+ * The `## PR Reviewer Guide` comment shape `findReviewComment` matches.
+ *
+ * The commit marker is part of the shape: the worker only accepts a review that
+ * NAMES the head it is processing, so a fixture without one is "no review" and
+ * every case here would take the trigger path instead of the pipeline. The
+ * second parameter exists so a test can model a review of an OLDER commit.
+ */
+const reviewComment = (body: string, sha: string = HEAD) => ({
+	user: { login: BOT },
+	body: `${body}\n\n#### (Review updated until commit ${sha})`,
+})
 
 /**
  * Python lines 1912-1923: a dependabot lockfile bump PR-Agent already assessed
@@ -269,7 +279,10 @@ function harness(opts: Options = {}): Harness {
 				return opts.commentPost ?? { status: 201, data: { id: 1 } }
 			}
 			if (/\/issues\/\d+\/comments(\?|$)/.test(path)) return { status: 200, data: comments }
-			if (/\/check-runs$/.test(path)) {
+			// Query-tolerant: `checkCiPassed` PAGES the check-run list
+			// (`?per_page=100&page=N`), so an anchored `$` would miss every call and
+			// the harness would answer 404.
+			if (/\/check-runs(\?|$)/.test(path)) {
 				// `checkRunsReplySeq` when the test needs CI to RECOVER after the
 				// fix's push; else the static reply.
 				if (checkRunsSeq.length)
@@ -1792,6 +1805,51 @@ describe("the lockfile pre-fix dispatch", () => {
 		expect(preFixing(h, "bun.lock")).toBe(true)
 	})
 
+	// A RUNNING SUITE IS NOT A RED ONE.
+	//
+	// `ok: false` covers three verdicts now — failed, pending, unreadable — and
+	// this step's entire purpose is "CI is red, so pre-fix the lockfile and
+	// PUSH". Pushing a commit while the checks are still running changes the head
+	// CI is judging and throws away the run in progress, so pending (and
+	// unreadable) must leave the tree alone.
+	test("a PENDING suite does not trigger a lockfile push", async () => {
+		const h = harness({
+			prs: [makePr({ ...LOCKFILE_BUMP })],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: [{ name: "typecheck", status: "in_progress", conclusion: null }],
+			tree: ["package.json", "bun.lock"],
+			dry: true,
+		})
+		await processPr(h.deps, {
+			token: "install-token",
+			repo: REPO,
+			pr: makePr({ ...LOCKFILE_BUMP }),
+		})
+
+		expect(preFixedAnything(h)).toBe(false)
+		expect(h.execCalls).toEqual([])
+	})
+
+	// Same distinction, unreadable arm: a 500 on the check-run read is "no
+	// verdict", not "red".
+	test("an UNREADABLE CI state does not trigger a lockfile push", async () => {
+		const h = harness({
+			prs: [makePr({ ...LOCKFILE_BUMP })],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRunsReply: { status: 500, data: {} },
+			tree: ["package.json", "bun.lock"],
+			dry: true,
+		})
+		await processPr(h.deps, {
+			token: "install-token",
+			repo: REPO,
+			pr: makePr({ ...LOCKFILE_BUMP }),
+		})
+
+		expect(preFixedAnything(h)).toBe(false)
+		expect(h.execCalls).toEqual([])
+	})
+
 	test("a repo with no bun.lock and no uv.lock is no longer assumed to be uv", async () => {
 		// The old code fell through to the uv arm for EVERY non-Bun repo, so an
 		// npm/pnpm/yarn repo had `uv lock` run in it. Nothing detected must mean
@@ -2214,7 +2272,13 @@ describe("prevention — a landed fix must not re-invite the agent forever", () 
 				},
 			],
 			prs: [makePr()],
-			comments: [reviewComment(SAFE_REVIEW)],
+			// TWO reviews, one per head: the tick-1 review names HEAD and the
+			// tick-2 review names the head the fix pushed. That is the real
+			// sequence — the API re-reviews after a push and edits the persistent
+			// comment — and it keeps this test about the fix RECORD rather than
+			// about the review gate (which, correctly, refuses a review of an
+			// older commit and would stop tick 2 before the agent gate).
+			comments: [reviewComment(SAFE_REVIEW), reviewComment(SAFE_REVIEW, PUSHED)],
 			agent: [{ ok: true, snippet: "Claude Code pushed 1 improvement commit(s)" }],
 			pushedSha: PUSHED,
 			pullReplySeq: [{ status: 200, data: makePr() }, movedReply],
@@ -2369,6 +2433,32 @@ describe("disposition — humans get closed, dependabot gets fixed", () => {
 		expect(h.lines.some((l) => l.includes("Waiting for green CI"))).toBe(true)
 	})
 
+	// PENDING IS NOT FAILING, HOWEVER OLD THE PR IS.
+	//
+	// `checkCiPassed` answers `ok: false` for a running suite as well as a red
+	// one, and this gate treated every `ok === false` as a verdict. Measured
+	// before the fix: `CI pending: test` on a 319-day-old PR printed
+	// `⛔ CI failing for 319.0d — closing stale PR` and closed it while its
+	// checks were still queued. Waiting is the only correct answer: a pending
+	// run carries no verdict to close on.
+	test("a HUMAN PR whose CI is still PENDING is never closed, however old", async () => {
+		const NOW_SEC = 1_700_000_000
+		const ancient = makePr({ created_at: iso((NOW_SEC - 319 * 86_400) * 1000) })
+		const h = harness({
+			prs: [ancient],
+			comments: [reviewComment(SAFE_REVIEW)],
+			checkRuns: [{ name: "test", status: "in_progress", conclusion: null }],
+			nowSec: NOW_SEC,
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: ancient })
+
+		expect(closes(h.calls)).toHaveLength(0)
+		expect(h.lines.some((l) => l.includes("closing stale PR"))).toBe(false)
+		expect(h.lines.some((l) => l.includes("CI pending: test"))).toBe(true)
+		expect(h.lines.some((l) => l.includes("not closing on pending checks"))).toBe(true)
+	})
+
 	test("dry run reports the close without making it", async () => {
 		const NOW_SEC = 1_700_000_000
 		const human = makePr({ created_at: iso((NOW_SEC - 5 * 86_400) * 1000) })
@@ -2384,6 +2474,45 @@ describe("disposition — humans get closed, dependabot gets fixed", () => {
 
 		expect(closes(h.calls)).toHaveLength(0)
 		expect(h.lines.some((l) => l.includes("dry run: would close"))).toBe(true)
+	})
+})
+
+describe("a review is only valid for the commit it names", () => {
+	// THE REVIEW GATE IS THE HEAD-SHA GATE.
+	//
+	// A guide published for commit A stayed the newest "PR Reviewer Guide" after
+	// the author pushed commit B. The worker scored A's diff, gave it a safety
+	// score and could approve — and the merge then landed B, which nobody had
+	// reviewed. The comment now carries the commit it reviewed, so the worker can
+	// refuse a review that is not about the head in front of it.
+	const OLD = `ffffffff${"c".repeat(32)}`
+
+	test("a review of an OLDER commit does not count — the review is re-triggered", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW, OLD)],
+		})
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr: makePr() })
+
+		// Triggered, not reviewed: no approval, no merge, and a webhook went out.
+		expect(out.triggered).toBe(true)
+		expect(approves(h.calls)).toBe(0)
+		expect(merges(h.calls)).toBe(0)
+		expect(h.lines).toContain("   📡 No review → triggering PR-Agent...")
+	})
+
+	test("a review stamped with the CURRENT head is used as-is", async () => {
+		const h = harness({
+			prs: [makePr()],
+			comments: [reviewComment(SAFE_REVIEW, HEAD)],
+		})
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr: makePr() })
+
+		expect(h.lines).toContain("   📝 Review found")
+		expect(out.triggered).toBe(false)
+		expect(out.merged).toBe(true)
 	})
 })
 

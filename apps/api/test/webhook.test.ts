@@ -85,6 +85,28 @@ describe("webhook", () => {
 		expect(jobs).toEqual([{ owner: "o", repo: "r", pr: 7 }])
 	})
 
+	// THE HEAD SHA IS WHAT MAKES A PUSH REVIEWABLE.
+	//
+	// The persistent queue treats a `done` row as terminal unless the delivery
+	// names a different commit. If this handler drops the SHA, a push after a
+	// review dedupes against the finished job and the new commit is never
+	// reviewed — which is exactly what production did.
+	test("passes the PR's head commit to the queue", async () => {
+		const jobs: ReviewJob[] = []
+		const body = JSON.stringify({
+			action: "synchronize",
+			pull_request: {
+				number: 12,
+				state: "open",
+				draft: false,
+				url: "https://api.github.com/repos/o/r/pulls/12",
+				head: { sha: "abc1234def5678" },
+			},
+		})
+		await handleWebhook(env, body, sign(body), "pull_request", fakeQueue(jobs))
+		expect(jobs).toEqual([{ owner: "o", repo: "r", pr: 12, headSha: "abc1234def5678" }])
+	})
+
 	test("a failing store answers 5xx so GitHub redelivers, and does not crash", async () => {
 		// The queue is async (QUEUE_BACKEND=db) and this call used to be
 		// fire-and-forget: a Postgres error became an unhandled rejection — fatal

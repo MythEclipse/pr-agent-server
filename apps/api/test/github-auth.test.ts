@@ -147,6 +147,24 @@ describe("publishPersistentComment header (S9)", () => {
 		expect(published.length).toBe(0)
 	})
 
+	test("stamps the commit on a FIRST publish too, not only on an edit", async () => {
+		// The marker used to be added only when an existing comment was EDITED,
+		// so the first review on a PR named no commit. A consumer deciding "is
+		// this review of the head I am looking at?" then had no way to tell — and
+		// the worker refuses a review that names nothing, which would re-trigger
+		// a review on every tick forever.
+		const { provider, published } = stubProvider([])
+		await provider.publishPersistentComment(
+			`${INITIAL_HEADER}\n\nfresh review body`,
+			INITIAL_HEADER,
+			"review",
+			false,
+		)
+		expect(published).toHaveLength(1)
+		expect(published[0].startsWith(INITIAL_HEADER)).toBe(true)
+		expect(published[0]).toContain(UPDATED_HEADER_NOTE)
+	})
+
 	test("cleans up older duplicate comments and updates the latest matching comment", async () => {
 		const staleDup = {
 			id: 10,

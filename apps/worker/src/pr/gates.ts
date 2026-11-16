@@ -281,10 +281,33 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 		c.out.skipped = true
 		return true
 	}
+	// PENDING IS NOT FAILED, and it must stop BEFORE the stale-close arm below.
+	//
+	// `checkCiPassed` answers `ok: false` both for a suite that failed and for
+	// one that has not finished, so this gate used to read a running suite as a
+	// red one. On a PR older than `STALE_CI_CLOSE_DAYS` that meant the worker
+	// CLOSED it with "⛔ Auto-closed … stale failing CI" while its checks were
+	// still queued — measured: `CI pending: test` then
+	// `⛔ CI failing for 319.0d — closing stale PR` in the same tick.
+	//
+	// A pending run carries no verdict at all, so there is nothing to close on.
+	// Not counted, for the same reason as `unknown`: waiting is the whole
+	// remedy, and a tally would only pin the SHA.
+	if (ci.pending) {
+		deps.report.push(
+			`   ⏳ ${ci.msg} — still running; waiting for the verdict, not closing on pending checks`,
+		)
+		c.out.skipped = true
+		return true
+	}
 	if (ci.ok) return false
 
 	// STALE-RED-CI DISPOSITION. MythEclipse's policy, 2026-10-16, and it INVERTS
 	// what this arm used to do.
+	//
+	// ONLY A FAILED SUITE REACHES HERE. `unknown` and `pending` both returned
+	// above, so the close below is always a verdict on evidence — not on a
+	// suite that has not spoken yet.
 	//
 	// A HUMAN PR that is broken, low-quality or harmful is DISPOSABLE: close it. A
 	// DEPENDABOT bump must never be closed automatically — closing one is a silent

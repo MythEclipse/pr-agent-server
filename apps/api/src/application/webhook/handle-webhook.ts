@@ -22,6 +22,8 @@ export interface IReviewQueuePort {
 		owner: string
 		repo: string
 		pr: number
+		/** The PR's head commit from the delivery, when it carries one. */
+		headSha?: string
 	}): "queued" | "deduped" | Promise<"queued" | "deduped">
 }
 
@@ -65,6 +67,7 @@ export async function handleWebhook(
 			url?: string
 			draft?: boolean
 			labels?: { name?: string }[]
+			head?: { sha?: string }
 		}
 		installation?: { id?: number }
 	}
@@ -111,8 +114,14 @@ export async function handleWebhook(
 	// delivery, so a store outage delays the review instead of erasing it. A 200
 	// here would tell GitHub the event was handled and nothing would ever retry it.
 	// The insert is a single round-trip, well inside the 10s webhook budget.
+	// The commit this delivery is about. A push after a review is NEW WORK, and
+	// the persistent queue can only see that if it is told which commit arrived:
+	// a `done` row is otherwise terminal, so the second commit on a PR was never
+	// reviewed in production. Absent on some payload shapes — the queue then
+	// falls back to deduping, which is the old behaviour.
+	const headSha = typeof pr.head?.sha === "string" ? pr.head.sha : undefined
 	try {
-		await queue.enqueue({ owner, repo, pr: pr.number })
+		await queue.enqueue({ owner, repo, pr: pr.number, headSha })
 	} catch (err) {
 		console.error(`[webhook] enqueue failed for ${owner}/${repo}#${pr.number}:`, err)
 		return { status: 500, body: { error: "enqueue failed" } }

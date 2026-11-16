@@ -108,8 +108,10 @@ export async function waitForCiSettled(
 			: await checkCiPassed(api, token, repo, sha)
 
 		// A red CI is final. So is green. Only "pending" (and a read we could not
-		// perform) is worth another look.
-		const pending = !last.ok && !last.unknown && last.msg.startsWith("CI pending")
+		// perform) is worth another look. The flag, not the message text: the
+		// message is prose and a reword would silently turn the wait into a
+		// single poll.
+		const pending = !last.ok && !last.unknown && last.pending === true
 		if (!pending) return { ci: last, polls, timedOut: false }
 		if (now() >= deadline) return { ci: last, polls, timedOut: true }
 

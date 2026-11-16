@@ -6,7 +6,7 @@
 import type { TAppRole } from "../../application/shared/authorization.ts"
 import { unauthorized } from "../../application/shared/errors.ts"
 import type { UseCases } from "../../application/use-cases.ts"
-import type { QueueRepository } from "../../domain/review/queue-repository.ts"
+import type { QueueRepository, TQueueStats } from "../../domain/review/queue-repository.ts"
 import type { ReviewRepository } from "../../domain/review/review-repository.ts"
 
 export interface TSession {
@@ -23,6 +23,16 @@ export interface ORPCContext {
 	useCases: UseCases
 	reviews: ReviewRepository
 	queueStore: QueueRepository
+	/**
+	 * Counters for the queue that is ACTUALLY running.
+	 *
+	 * `queueStore` is always the Postgres repository, whatever `QUEUE_BACKEND`
+	 * says, so reading it directly reported four zeros under the in-memory
+	 * backend while that queue was busy — and a failing job there was invisible
+	 * from the dashboard. A function, not a value, because both backends compute
+	 * it on demand (and one of them is async).
+	 */
+	queueStats: () => Promise<TQueueStats>
 }
 
 /** Build a context from the request headers plus whatever deps are wired. */
@@ -32,6 +42,7 @@ export async function buildContext(
 		useCases: UseCases
 		reviews: ReviewRepository
 		queueStore: QueueRepository
+		queueStats: () => Promise<TQueueStats>
 		resolveSession: (headers: Headers) => Promise<TSession | null>
 	},
 ): Promise<ORPCContext> {
@@ -49,6 +60,7 @@ export async function buildContext(
 		useCases: deps.useCases,
 		reviews: deps.reviews,
 		queueStore: deps.queueStore,
+		queueStats: deps.queueStats,
 	}
 }
 

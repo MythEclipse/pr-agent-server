@@ -3,7 +3,12 @@ import { createHmac } from "node:crypto"
 import { describe, expect, test } from "vitest"
 import { checkCiPassed, closeStaleCiPr } from "../src/pr/ci.ts"
 import { closeToolchainPr, toolchainPinViolation } from "../src/pr/pins.ts"
-import { findReviewComment, findTrivialNoReviewMarker, triggerReview } from "../src/pr/review.ts"
+import {
+	findReviewComment,
+	findTrivialNoReviewMarker,
+	reviewHeadShaOf,
+	triggerReview,
+} from "../src/pr/review.ts"
 import { analyzeReviewSafety } from "../src/pr/safety.ts"
 import type { GhAppClient, GhClient } from "../src/pr/scan.ts"
 import { gatherOpenPrs } from "../src/pr/scan.ts"
@@ -501,7 +506,10 @@ describe("ci gate — messages and guard", () => {
 			"o/r",
 			"sha",
 		)
-		expect(r).toEqual({ ok: false, msg: "CI pending: typecheck" })
+		// `pending` is flagged, not just messaged: `ok: false` alone cannot tell a
+		// running suite from a failed one, and the stale-CI gate closed a PR on
+		// that ambiguity.
+		expect(r).toEqual({ ok: false, pending: true, msg: "CI pending: typecheck" })
 	})
 	test("a failure outranks a pending run", async () => {
 		const r = await checkCiPassed(
@@ -630,11 +638,132 @@ describe("ci gate — messages and guard", () => {
 		expect(calls).toEqual([
 			{
 				method: "GET",
-				path: "/repos/o/r/commits/abc123/check-runs",
+				// PAGED: one page of 30 would hide a failing shard of a matrix
+				// workflow, and the gate would read it as green.
+				path: "/repos/o/r/commits/abc123/check-runs?per_page=100&page=1",
 				token: "tok",
 				json: undefined,
 			},
 		])
+	})
+
+	// A FAILING SHARD PAST THE FIRST PAGE IS STILL A FAILURE.
+	//
+	// The list endpoint returns 30 runs by default. `test (1)` … `test (100)`
+	// succeed on page 1 and `test (100)` — the only red one — sits on page 2.
+	// Reading one page reported `✅ 100 checks green` and the worker merged on a
+	// red suite; nothing in the response said the list was truncated.
+	test("reads EVERY page — a failure on page 2 fails the gate", async () => {
+		const page1 = Array.from({ length: 100 }, (_, i) => ({
+			name: `test (${i})`,
+			status: "completed",
+			conclusion: "success",
+		}))
+		const { api, calls } = recorder((_call, n) => ({
+			status: 200,
+			data: {
+				total_count: 101,
+				check_runs:
+					n === 1 ? page1 : [{ name: "test (100)", status: "completed", conclusion: "failure" }],
+			},
+		}))
+
+		const r = await checkCiPassed(api, "tok", "o/r", "abc123")
+
+		expect(r.ok).toBe(false)
+		expect(r.msg).toContain("CI FAILED: test (100)")
+		expect(calls.map((c) => c.path)).toEqual([
+			"/repos/o/r/commits/abc123/check-runs?per_page=100&page=1",
+			"/repos/o/r/commits/abc123/check-runs?per_page=100&page=2",
+		])
+	})
+
+	test("a short page ends the walk — no second request", async () => {
+		const { api, calls } = recorder(() => ({
+			status: 200,
+			data: { check_runs: [{ name: "a", status: "completed", conclusion: "success" }] },
+		}))
+		await checkCiPassed(api, "tok", "o/r", "abc123")
+		expect(calls).toHaveLength(1)
+	})
+
+	test("a failure read on page 1 is not lost when page 2 errors", async () => {
+		// A partial list that already contains a failure is still a failure.
+		// Discarding it would report green — the exact mistake paging exists to
+		// prevent.
+		const page1 = Array.from({ length: 100 }, (_, i) => ({
+			name: `test (${i})`,
+			status: "completed",
+			conclusion: i === 7 ? "failure" : "success",
+		}))
+		const { api } = recorder((_call, n) =>
+			n === 1 ? { status: 200, data: { check_runs: page1 } } : { status: 500, data: {} },
+		)
+		const r = await checkCiPassed(api, "tok", "o/r", "abc123")
+		expect(r.ok).toBe(false)
+		expect(r.msg).toContain("CI FAILED")
+	})
+
+	// AN UNREAD PAGE IS NOT A GREEN PAGE.
+	//
+	// Paging made a state reachable that a single request could not produce:
+	// page 1 full of green runs, page 2 answering 500. Every run that WAS read is
+	// healthy, so the gate fell through to `✅ N checks green` — a verdict about
+	// the half nobody read — and `gates.ts` walks straight through `ok` into the
+	// merge. Measured before this fix: `{"ok":true,"msg":"✅ 100 checks green"}`
+	// with the second page answering 500.
+	test("an incomplete walk is UNKNOWN, never green", async () => {
+		const page1 = Array.from({ length: 100 }, (_, i) => ({
+			name: `test (${i})`,
+			status: "completed",
+			conclusion: "success",
+		}))
+		const { api } = recorder((_call, n) =>
+			n === 1
+				? { status: 200, data: { total_count: 101, check_runs: page1 } }
+				: { status: 500, data: {} },
+		)
+
+		const r = await checkCiPassed(api, "tok", "o/r", "abc123")
+
+		expect(r.ok).toBe(false)
+		expect(r.unknown).toBe(true)
+		expect(r.msg).toContain("partially read")
+		// And the merge gate must not read it as green either.
+		expect(r.pending).toBeFalsy()
+	})
+
+	test("a transport failure on page 2 is UNKNOWN too, not green", async () => {
+		const page1 = Array.from({ length: 100 }, (_, i) => ({
+			name: `test (${i})`,
+			status: "completed",
+			conclusion: "success",
+		}))
+		// The Python-era client reports a transport failure as `status: 0`.
+		const { api } = recorder((_call, n) =>
+			n === 1 ? { status: 200, data: { check_runs: page1 } } : { status: 0, data: {} },
+		)
+		const r = await checkCiPassed(api, "tok", "o/r", "abc123")
+		expect(r.ok).toBe(false)
+		expect(r.unknown).toBe(true)
+	})
+
+	test("hitting the page cap without a total_count is UNKNOWN, not green", async () => {
+		// Every page is full and GitHub never says how many runs exist, so the cap
+		// — not GitHub — ended the walk. Only `total_count` can prove the list was
+		// nevertheless whole.
+		const full = Array.from({ length: 100 }, (_, i) => ({
+			name: `test (${i})`,
+			status: "completed",
+			conclusion: "success",
+		}))
+		const { api, calls } = recorder(() => ({ status: 200, data: { check_runs: full } }))
+
+		const r = await checkCiPassed(api, "tok", "o/r", "abc123")
+
+		expect(calls).toHaveLength(10) // MAX_CHECK_PAGES
+		expect(r.ok).toBe(false)
+		expect(r.unknown).toBe(true)
 	})
 })
 
@@ -700,7 +829,15 @@ describe("closeToolchainPr", () => {
 })
 
 describe("findReviewComment", () => {
-	const guide = "## PR Reviewer Guide 🔍\n🔒 No security concerns identified"
+	// A 40-character head, and an 8-character abbreviation of it: GitHub prose
+	// shortens SHAs, the API does not, so both spellings have to match.
+	const HEAD = `3187254e${"b".repeat(32)}`
+	const SHORT = HEAD.slice(0, 8)
+	/** The marker the publisher stamps on every review it writes. */
+	const stamp = (sha: string) => `\n\n#### (Review updated until commit ${sha})`
+	const guide = `## PR Reviewer Guide 🔍\n🔒 No security concerns identified${stamp(HEAD)}`
+	const commentsPath = (page: number) => `/repos/o/r/issues/7/comments?per_page=100&page=${page}`
+
 	test("returns the bot comment body containing the guide", async () => {
 		const { api, calls } = recorder(() => ({
 			status: 200,
@@ -709,10 +846,10 @@ describe("findReviewComment", () => {
 				{ user: { login: "mytheclipsebotreview[bot]" }, body: guide },
 			],
 		}))
-		expect(await findReviewComment(api, "tok", "o/r", 7)).toBe(guide)
-		expect(calls).toEqual([
-			{ method: "GET", path: "/repos/o/r/issues/7/comments", token: "tok", json: undefined },
-		])
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBe(guide)
+		// PAGED, not the 30-comment default: the newest review is at the END of
+		// a long comment list, so a single unpaged read could not see it.
+		expect(calls).toEqual([{ method: "GET", path: commentsPath(1), token: "tok", json: undefined }])
 	})
 	test("matches a login CONTAINING the bot login", async () => {
 		// Python line 326: `if BOT_LOGIN in login` — a substring test, not equality.
@@ -720,29 +857,46 @@ describe("findReviewComment", () => {
 			status: 200,
 			data: [{ user: { login: "prefix-mytheclipsebotreview-suffix" }, body: guide }],
 		}))
-		expect(await findReviewComment(api, "tok", "o/r", 7)).toBe(guide)
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBe(guide)
 	})
 	test("a bot comment without the guide is skipped, and null is the default", async () => {
 		const { api } = recorder(() => ({
 			status: 200,
 			data: [{ user: { login: "mytheclipsebotreview[bot]" }, body: "PR Code Suggestions" }],
 		}))
-		expect(await findReviewComment(api, "tok", "o/r", 7)).toBeNull()
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
 	})
 	test("another author's guide does not count", async () => {
 		const { api } = recorder(() => ({
 			status: 200,
 			data: [{ user: { login: "somebody-else" }, body: guide }],
 		}))
-		expect(await findReviewComment(api, "tok", "o/r", 7)).toBeNull()
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
 	})
 	test("a non-array response is null", async () => {
 		const { api } = recorder(() => ({ status: 200, data: { message: "Not Found" } }))
-		expect(await findReviewComment(api, "tok", "o/r", 7)).toBeNull()
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
 	})
 	test("a comment with no user or body does not throw", async () => {
 		const { api } = recorder(() => ({ status: 200, data: [{}, { user: {} }] }))
-		expect(await findReviewComment(api, "tok", "o/r", 7)).toBeNull()
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
+	})
+
+	// THE COMMENT WALK IS BOUNDED.
+	//
+	// Every other paginator in this change is capped, and this one — the one that
+	// runs on every PR on every tick — was `for (;;)` until a short page. A proxy
+	// or a stub that ignores `?page=` answers a full page forever, so the failure
+	// mode was not a slow tick but a WEDGED worker.
+	test("an endpoint that ignores ?page cannot hang the walk", async () => {
+		const fullPage = Array.from({ length: 100 }, () => ({
+			user: { login: "dependabot[bot]" },
+			body: "bump stuff",
+		}))
+		const { api, calls } = recorder(() => ({ status: 200, data: fullPage }))
+
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
+		expect(calls).toHaveLength(30) // MAX_COMMENT_PAGES
 	})
 
 	// THE SUPERSEDED REVIEW MUST NOT WIN.
@@ -753,12 +907,9 @@ describe("findReviewComment", () => {
 	// Returning the first match scored the STALE body and blocked the PR at
 	// 0/10 on ten consecutive ticks, each of them re-reading the same old copy.
 	test("returns the LATEST review, not the superseded one", async () => {
-		const stale =
-			"## PR Reviewer Guide 🔍\n\n<table><tr><td>🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nYes - TLS certificate trust issue\n\n</td></tr></table>"
-		const current =
-			"## PR Reviewer Guide 🔍\n\n#### (Review updated until commit 3187254e)\n\n<table><tr><td>🔒&nbsp;<strong>No security concerns identified</strong></td></tr></table>"
-		const marker =
-			"**[Persistent review](<https://x>)** updated to latest commit [3187254e](3187254e)"
+		const stale = `## PR Reviewer Guide 🔍\n\n<table><tr><td>🔒&nbsp;<strong>Security concerns</strong><br><br>\n\nYes - TLS certificate trust issue\n\n</td></tr></table>${stamp(HEAD)}`
+		const current = `## PR Reviewer Guide 🔍\n\n#### (Review updated until commit ${HEAD})\n\n<table><tr><td>🔒&nbsp;<strong>No security concerns identified</strong></td></tr></table>`
+		const marker = `**[Persistent review](<https://x>)** updated to latest commit [${SHORT}](${SHORT})`
 		const { api } = recorder(() => ({
 			status: 200,
 			data: [
@@ -768,10 +919,116 @@ describe("findReviewComment", () => {
 				{ user: { login: "mytheclipsebotreview[bot]" }, body: current },
 			],
 		}))
-		const got = await findReviewComment(api, "tok", "o/r", 7)
+		const got = await findReviewComment(api, "tok", "o/r", 7, HEAD)
 		expect(got).toBe(current)
 		// The marker alone is never a review.
 		expect(got).not.toBe(marker)
+	})
+
+	// A REVIEW OF ANOTHER COMMIT IS NOT A REVIEW OF THIS ONE.
+	//
+	// The bug this pins: a guide published for commit A stayed the "latest"
+	// review after the author pushed commit B, so the worker scored A's diff,
+	// approved it, and the merge that followed landed B — code nobody read.
+	test("a review stamped with an OLD commit is refused", async () => {
+		const OLD = `ffffffff${"c".repeat(32)}`
+		const oldReview = `## PR Reviewer Guide 🔍\n🔒 No security concerns identified${stamp(OLD)}`
+		const { api } = recorder(() => ({
+			status: 200,
+			data: [{ user: { login: "mytheclipsebotreview[bot]" }, body: oldReview }],
+		}))
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
+	})
+
+	test("a review with NO commit marker is refused", async () => {
+		// Legacy comments (and any publisher that forgets the marker) make no
+		// claim about a commit, so they are not evidence about this head. The
+		// tick re-triggers, and the fresh review edits the same comment in place
+		// with the marker attached — which is how a legacy PR self-heals.
+		const { api } = recorder(() => ({
+			status: 200,
+			data: [
+				{
+					user: { login: "mytheclipsebotreview[bot]" },
+					body: "## PR Reviewer Guide 🔍\n🔒 No security concerns identified",
+				},
+			],
+		}))
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
+	})
+
+	test("an abbreviated marker SHA matches the full head SHA", async () => {
+		const abbreviated = `## PR Reviewer Guide 🔍\n🔒 No security concerns identified${stamp(SHORT)}`
+		const { api } = recorder(() => ({
+			status: 200,
+			data: [{ user: { login: "mytheclipsebotreview[bot]" }, body: abbreviated }],
+		}))
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBe(abbreviated)
+	})
+
+	test("a marker naming a DIFFERENT commit is not a prefix match", async () => {
+		const other = `3187254f${"b".repeat(32)}`
+		const { api } = recorder(() => ({
+			status: 200,
+			data: [
+				{
+					user: { login: "mytheclipsebotreview[bot]" },
+					body: `## PR Reviewer Guide 🔍\n🔒 No security concerns identified${stamp(other)}`,
+				},
+			],
+		}))
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBeNull()
+	})
+
+	// A FULL PAGE OF COMMENTS MUST NOT HIDE THE REVIEW.
+	//
+	// The newest review is the LAST comment on the PR, so on a busy PR it lives
+	// on the final page. Reading one page (GitHub's default is 30) meant the
+	// worker never saw it, re-triggered a review every tick, and could match an
+	// old review from the visible prefix instead.
+	test("walks past the first page to find the current review", async () => {
+		const filler = Array.from({ length: 99 }, (_, i) => ({
+			user: { login: "alice" },
+			body: `comment ${i}`,
+		}))
+		const staleBody = `## PR Reviewer Guide 🔍\n🔒 Security concerns${stamp(`eeeeeeee${"d".repeat(32)}`)}`
+		const currentBody = `## PR Reviewer Guide 🔍\n🔒 No security concerns identified${stamp(HEAD)}`
+		const bot = (body: string) => ({ user: { login: "mytheclipsebotreview[bot]" }, body })
+		const { api, calls } = recorder((_call, n) => ({
+			status: 200,
+			// Page 1 is exactly full, so the review on page 2 is only reachable by
+			// asking for it.
+			data: n === 1 ? [...filler, bot(staleBody)] : [bot(currentBody)],
+		}))
+		expect(await findReviewComment(api, "tok", "o/r", 7, HEAD)).toBe(currentBody)
+		expect(calls.map((c) => c.path)).toEqual([commentsPath(1), commentsPath(2)])
+	})
+})
+
+describe("reviewHeadShaOf", () => {
+	test("reads the commit out of the publisher's marker", () => {
+		const sha = `abc1234${"e".repeat(33)}`
+		expect(
+			reviewHeadShaOf(`## PR Reviewer Guide 🔍\n\n#### (Review updated until commit ${sha})`),
+		).toBe(sha)
+	})
+	test("accepts a commit URL as the marker value", () => {
+		expect(
+			reviewHeadShaOf(
+				"#### (Review updated until commit https://github.com/o/r/commit/abc1234def)",
+			),
+		).toBe("abc1234def")
+	})
+	test("accepts the other tools' marker wording", () => {
+		expect(reviewHeadShaOf("#### (Describe updated until commit abc1234def)")).toBe("abc1234def")
+	})
+	test("is null when the body names no commit", () => {
+		expect(
+			reviewHeadShaOf("## PR Reviewer Guide 🔍\n🔒 No security concerns identified"),
+		).toBeNull()
+	})
+	test("is null for a value that is not a SHA", () => {
+		expect(reviewHeadShaOf("#### (Review updated until commit latest)")).toBeNull()
 	})
 })
 
@@ -1017,7 +1274,9 @@ describe("triggerReview", () => {
 		const api: GhAppClient = {
 			async request(method, path, o) {
 				calls.push({ method, path, token: o?.token })
-				if (path === "/app/installations") return { status: 200, data: opts.installs ?? [] } as any
+				// PAGED now: both lists are walked page by page.
+				if (path.startsWith("/app/installations"))
+					return { status: 200, data: opts.installs ?? [] } as any
 				if (path.startsWith("/installation/repositories")) {
 					// Only installation 77 owns the target repo, so the walk must pass
 					// over 1 and match on 77.
@@ -1115,9 +1374,9 @@ describe("triggerReview", () => {
 		// so `/installation/repositories` is fetched TWICE (Python lines 423-428
 		// break on match, they do not skip ahead).
 		expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
-			"GET /app/installations",
-			"GET /installation/repositories?per_page=100",
-			"GET /installation/repositories?per_page=100",
+			"GET /app/installations?per_page=100&page=1",
+			"GET /installation/repositories?per_page=100&page=1",
+			"GET /installation/repositories?per_page=100&page=1",
 		])
 		expect(calls.map((c) => c.token)).toEqual([undefined, "itok-1", "itok-77"])
 		// Signature recomputed over the payload that now carries id 77.
@@ -1126,10 +1385,36 @@ describe("triggerReview", () => {
 		expect(fetches[0].init.headers["x-hub-signature-256"]).toBe(expectedSig(payload))
 	})
 
+	test("finds the repo on a LATER page of the installation's repository list", async () => {
+		// An installation with more than a page of repos used to resolve to id 0,
+		// so every review for the target repo lost its installation token and ran
+		// degraded — silently, because the failure mode is "id 0, keep going".
+		const page1 = Array.from({ length: 100 }, (_, i) => ({ full_name: `o/other-${i}` }))
+		const api: GhAppClient = {
+			request: async (_method, path) => {
+				if (path.startsWith("/app/installations")) return { status: 200, data: [{ id: 5 }] } as any
+				if (path.endsWith("page=1")) return { status: 200, data: { repositories: page1 } } as any
+				return { status: 200, data: { repositories: [{ full_name: REPO }] } } as any
+			},
+			installationToken: async () => "itok",
+		}
+		const { fetchImpl, calls } = fakeFetch()
+		await triggerReview(
+			{ api, fetchImpl, webhookSecret: SECRET, webhookUrl: "https://hook.test/hook", nowSec: NOW },
+			REPO,
+			PR,
+			"t",
+			"s",
+			"h",
+			"b",
+		)
+		expect(JSON.parse(calls[0].init.body).installation.id).toBe(5)
+	})
+
 	test("a failed installation lookup degrades to id 0 and still posts", async () => {
 		const api: GhAppClient = {
 			request: async (_method, path) => {
-				if (path === "/app/installations") return { status: 200, data: [{ id: 1 }] } as any
+				if (path.startsWith("/app/installations")) return { status: 200, data: [{ id: 1 }] } as any
 				throw new Error("boom")
 			},
 			installationToken: async () => "itok",

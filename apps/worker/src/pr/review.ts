@@ -77,7 +77,94 @@ const loginOf = (c: any): string => (typeof c?.user?.login === "string" ? c.user
 const bodyOf = (c: any): string => (typeof c?.body === "string" ? c.body : "")
 
 /**
- * The bot's review body for `pr`, or null. Python lines 320-330.
+ * Page size for the issue-comment walk. GitHub's default is 30, which is smaller
+ * than a busy PR's comment list — see `findReviewComment`.
+ */
+const COMMENT_PAGE_SIZE = 100
+
+/**
+ * Hard stop for that walk. 30 pages is 3000 comments — GitHub's own ceiling for
+ * a PR's issue comments — and, more importantly, a bound: a proxy or a stub that
+ * ignores `?page=` answers a full page forever, and this loop used to be
+ * `for (;;)` with no cap. `findReviewComment` runs on every PR on every tick, so
+ * the failure mode was not a slow tick but a WEDGED worker. Every other
+ * paginator here is bounded for the same reason.
+ */
+const MAX_COMMENT_PAGES = 30
+
+/**
+ * Every issue comment on `pr`, oldest first, walking pages until a short one.
+ *
+ * A malformed (non-array) page ends the walk with whatever was collected, which
+ * reproduces the old "a non-array response is not a review" behaviour for the
+ * first page without discarding pages already read.
+ */
+async function listAllComments(
+	api: GhClient,
+	token: string,
+	repo: string,
+	pr: number,
+): Promise<any[]> {
+	const all: any[] = []
+	for (let page = 1; page <= MAX_COMMENT_PAGES; page += 1) {
+		const { data } = await api.request(
+			"GET",
+			`/repos/${repo}/issues/${pr}/comments?per_page=${COMMENT_PAGE_SIZE}&page=${page}`,
+			{ token },
+		)
+		if (!Array.isArray(data)) break
+		all.push(...data)
+		if (data.length < COMMENT_PAGE_SIZE) break
+	}
+	return all
+}
+
+/**
+ * The commit a review comment claims to have reviewed, or null.
+ *
+ * The publisher writes `#### (Review updated until commit <sha>)` right under the
+ * guide header (`publishPersistentComment`; the non-persistent path appends the
+ * same line). The value is the head SHA, but a commit URL is accepted too
+ * because the marker is named "commit" and the two spellings have both existed.
+ * A `Describe updated until commit …` marker matches as well — the leading word
+ * is whatever the tool is called, and only the SHA is load-bearing.
+ */
+const REVIEW_HEADER_RE = /#{2,4}\s*\(\s*(?:[A-Za-z]+\s+)?updated until commit\s+([^)\s]+)\s*\)/i
+const SHA_TAIL_RE = /([0-9a-f]{7,40})\s*$/i
+
+export function reviewHeadShaOf(body: string): string | null {
+	const marker = REVIEW_HEADER_RE.exec(body)
+	if (!marker) return null
+	// A commit URL is accepted (the marker is named "commit"), and a URL may carry
+	// a query or fragment — `…/commit/<sha>?diff=split`. The SHA is the tail of
+	// the PATH, so anything after `?`/`#` is not part of the identity.
+	const value = marker[1].replace(/[?#].*$/, "")
+	const tail = SHA_TAIL_RE.exec(value)
+	return tail ? tail[1].toLowerCase() : null
+}
+
+/**
+ * Does the recorded SHA name the same commit as `headSha`?
+ *
+ * Prefix comparison in BOTH directions: GitHub shortens SHAs in prose (7-12
+ * characters) while the API reports 40, so neither form is guaranteed to be the
+ * longer one. A mismatch of fewer than 7 characters is not treated as a match —
+ * GitHub's own minimum abbreviation is 7, and a 4-character prefix is a
+ * collision risk rather than an identification.
+ */
+const shaNamesCommit = (recorded: string, headSha: string): boolean => {
+	const a = recorded.toLowerCase()
+	const b = headSha.toLowerCase()
+	if (!a || !b) return false
+	if (a === b) return true
+	const shorter = a.length <= b.length ? a : b
+	const longer = a.length <= b.length ? b : a
+	return shorter.length >= 7 && longer.startsWith(shorter)
+}
+
+/**
+ * The bot's review body for `pr` AT `headSha`, or null. Python lines 320-330,
+ * hardened.
  *
  * SCAN FORWARD, DO NOT STOP AT THE FIRST MATCHING AUTHOR. This used to return
  * the first bot comment that contained the guide, and the worker runs every
@@ -91,21 +178,31 @@ const bodyOf = (c: any): string => (typeof c?.body === "string" ? c.body : "")
  * run, a later run rewrote it to `No security concerns identified`, and the
  * worker kept parsing the stale copy and blocking at 0/10 for ten ticks.
  *
- * The current review is the LAST bot-authored body carrying the guide, which is
- * the comment the persistent write leaves behind at the highest position. The
- * update marker is excluded only because it is not a review, not because the
- * order guarantees it counts.
+ * THE COMMENT MUST NAME THE COMMIT IT REVIEWED, and that commit must be the
+ * head being processed. Scanning for the latest guide alone was not enough: a
+ * review published for commit A stayed the "latest" review after the author
+ * pushed commit B, so the worker scored A's diff, approved it, and could merge
+ * B on the strength of it. The publisher stamps
+ * `#### (Review updated until commit <sha>)` on every review it writes
+ * (`publishPersistentComment`, and the non-persistent path), so the claim is
+ * checkable; a review that does not name a commit is not evidence about this
+ * one. Rejecting it re-triggers a review, which edits the same comment in place
+ * and stamps the marker — so a legacy markerless comment self-heals on the next
+ * tick instead of being trusted forever.
+ *
+ * The scan walks EVERY page of issue comments. It used to read GitHub's default
+ * first page (30 comments) oldest-first, so on a busy PR the newest review was
+ * simply not in the response and the worker re-triggered — or, worse, matched an
+ * old review from the visible prefix.
  */
 export async function findReviewComment(
 	api: GhClient,
 	token: string,
 	repo: string,
 	pr: number,
+	headSha: string,
 ): Promise<string | null> {
-	const { data: comments } = await api.request("GET", `/repos/${repo}/issues/${pr}/comments`, {
-		token,
-	})
-	if (!Array.isArray(comments)) return null // Python lines 322-323
+	const comments = await listAllComments(api, token, repo, pr)
 	let found: string | null = null
 	for (const c of comments) {
 		// SUBSTRING test, as Python line 326: GitHub's App login is
@@ -115,7 +212,12 @@ export async function findReviewComment(
 		// `in` is a substring test. `includes` is the equivalent.
 		if (loginOf(c).includes(BOT_LOGIN)) {
 			const body = bodyOf(c)
-			if (body.includes("PR Reviewer Guide")) found = body
+			if (!body.includes("PR Reviewer Guide")) continue
+			const reviewed = reviewHeadShaOf(body)
+			// No marker, or a marker naming another commit: this is not a review
+			// of the head being processed. Keep scanning — a later comment may be.
+			if (!reviewed || !shaNamesCommit(reviewed, headSha)) continue
+			found = body
 		}
 	}
 	return found
@@ -134,6 +236,14 @@ export async function findReviewComment(
  * BOTH markers are required, and the PAIR is what distinguishes "nothing to
  * review" from "the reviewer ran and found nothing to fix"; a comment
  * containing only the heading is a review in progress, not a verdict.
+ *
+ * KNOWN RESIDUAL RISK: unlike a guide, this marker carries no commit, so it
+ * cannot be tied to the head being processed. It is only consulted for a PR the
+ * worker already classified as trivial from its TITLE and author, and such a PR
+ * that has gained a real commit is a different change — but the check would not
+ * notice. Left as-is deliberately: PR-Agent writes this comment without a
+ * marker, so requiring one would re-trigger a review on every trivial PR
+ * forever, which is the comment spam this function exists to stop.
  */
 export async function findTrivialNoReviewMarker(
 	api: GhClient,
@@ -141,10 +251,7 @@ export async function findTrivialNoReviewMarker(
 	repo: string,
 	pr: number,
 ): Promise<boolean> {
-	const { data: comments } = await api.request("GET", `/repos/${repo}/issues/${pr}/comments`, {
-		token,
-	})
-	if (!Array.isArray(comments)) return false // Python lines 340-341
+	const comments = await listAllComments(api, token, repo, pr)
 	for (const c of comments) {
 		if (loginOf(c).includes(BOT_LOGIN)) {
 			const body = bodyOf(c)
@@ -156,6 +263,10 @@ export async function findTrivialNoReviewMarker(
 	return false
 }
 
+/** Page size and hard stop for the installation walk below. */
+const INSTALL_PAGE_SIZE = 100
+const MAX_INSTALL_PAGES = 20
+
 /**
  * Best-effort installation id for `repo` — Python lines 418-430.
  *
@@ -164,28 +275,49 @@ export async function findTrivialNoReviewMarker(
  * or missing `installation.id` costs PR-Agent its installation token, so the
  * review is degraded, whereas a RAISED exception would abort the tick. Any
  * failure here means id 0, and the webhook is still sent.
+ *
+ * BOTH lists are paged. They used to be single reads — `/app/installations`
+ * (30 by default) and `/installation/repositories?per_page=100` — so an app
+ * installed on more than a page of accounts, or a target repo past the first
+ * hundred, resolved to id 0 and every review for it silently lost its
+ * installation token. A short page ends each walk, and the caps stop a server
+ * that ignores `page` from spinning.
  */
 async function resolveInstallId(api: GhAppClient, repo: string): Promise<number> {
 	try {
-		const { data: installs } = await api.request("GET", "/app/installations")
-		if (!Array.isArray(installs)) return 0
-		for (const inst of installs) {
-			const id = (inst as { id?: number })?.id
-			if (typeof id !== "number") continue
-			const token = await api.installationToken(id)
-			const { data: repos } = await api.request("GET", "/installation/repositories?per_page=100", {
-				token,
-			})
-			// Python line 425 guards the dict before `.get`, and filters non-dict
-			// entries; both are reproduced so a malformed entry cannot throw here.
-			const list =
-				repos !== null && typeof repos === "object" && Array.isArray((repos as any).repositories)
-					? (repos as any).repositories
-					: []
-			const fulls = (list as any[])
-				.filter((r: any) => r !== null && typeof r === "object")
-				.map((r: any) => r.full_name)
-			if (fulls.includes(repo)) return id
+		for (let page = 1; page <= MAX_INSTALL_PAGES; page++) {
+			const { data: installs } = await api.request(
+				"GET",
+				`/app/installations?per_page=${INSTALL_PAGE_SIZE}&page=${page}`,
+			)
+			if (!Array.isArray(installs)) return 0
+			if (!installs.length) break
+			for (const inst of installs) {
+				const id = (inst as { id?: number })?.id
+				if (typeof id !== "number") continue
+				const token = await api.installationToken(id)
+				for (let rp = 1; rp <= MAX_INSTALL_PAGES; rp++) {
+					const { data: repos } = await api.request(
+						"GET",
+						`/installation/repositories?per_page=${INSTALL_PAGE_SIZE}&page=${rp}`,
+						{ token },
+					)
+					// Python line 425 guards the dict before `.get`, and filters non-dict
+					// entries; both are reproduced so a malformed entry cannot throw here.
+					const list =
+						repos !== null &&
+						typeof repos === "object" &&
+						Array.isArray((repos as any).repositories)
+							? (repos as any).repositories
+							: []
+					const fulls = (list as any[])
+						.filter((r: any) => r !== null && typeof r === "object")
+						.map((r: any) => r.full_name)
+					if (fulls.includes(repo)) return id
+					if (list.length < INSTALL_PAGE_SIZE) break
+				}
+			}
+			if (installs.length < INSTALL_PAGE_SIZE) break
 		}
 	} catch {
 		return 0 // Python lines 429-430

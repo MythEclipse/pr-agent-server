@@ -72,7 +72,7 @@ export type PrCounts = { merged: number; triggered: number; fixed: number; skipp
 const COUNTERS: (keyof PrCounts)[] = ["merged", "triggered", "fixed", "skipped"]
 
 type DependabotCiStatus = {
-	state: "not-dependabot" | "green" | "red" | "unknown"
+	state: "not-dependabot" | "green" | "red" | "pending" | "unknown"
 	message?: string
 }
 
@@ -81,6 +81,10 @@ async function dependabotCiStatus(deps: WorkerDeps, c: Ctx): Promise<DependabotC
 
 	const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
 	if (ci.ok) return { state: "green", message: ci.msg }
+	// A RUNNING suite is neither green nor red. Reporting it as red printed
+	// "🔧 Dependabot CI is red — offering Claude Code a fix" and cleared
+	// `already` for a bump whose checks had simply not finished.
+	if (ci.pending) return { state: "pending", message: ci.msg }
 	return { state: ci.unknown ? "unknown" : "red", message: ci.msg }
 }
 

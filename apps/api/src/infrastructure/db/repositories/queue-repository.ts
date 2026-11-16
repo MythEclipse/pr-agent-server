@@ -1,8 +1,11 @@
 // Drizzle adapter for QueueRepository.
 //
-// Two behaviours carry over from the in-memory ReviewQueue and must not drift:
+// Three behaviours carry over from the in-memory ReviewQueue and must not drift:
 //   - enqueue() on an existing key does not insert a duplicate; it flags
 //     rerunRequested so a running job re-runs once it settles.
+//   - enqueue() RE-ARMS a finished job when the delivery names a new head
+//     commit, because a push after a review is new work. The same commit (or a
+//     delivery with no SHA) is still deduped.
 //   - a job that fails is still completed, so one bad PR cannot wedge the
 //     queue (the in-memory queue logs and moves on; so does this).
 
@@ -39,6 +42,7 @@ const toJob = (row: typeof reviewQueueJobs.$inferSelect): TQueueJob => ({
 	pr: row.pr,
 	state: row.state,
 	attempts: row.attempts,
+	headSha: row.headSha,
 	rerunRequested: row.rerunRequested,
 	runAfter: row.runAfter,
 	lastError: row.lastError,
@@ -57,6 +61,29 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 			const key = queueKeyOf(input.owner, input.repo, input.pr)
 			const now = new Date()
 
+			// THE PRIOR STATE, READ BEFORE THE UPSERT — for the verdict only.
+			//
+			// `RETURNING` cannot see the row as it was. That was tolerable while a
+			// re-request on a live row always set `rerun_requested`, because the
+			// post-update shape then identified what the statement had done. It is
+			// not tolerable now: a same-commit duplicate is a no-op, so
+			// `state = 'pending' AND rerun_requested = false` is produced by BOTH
+			// "re-armed, work to do" and "duplicate delivery, nothing to do", and
+			// the two must not report the same verdict.
+			//
+			// The upsert below is still the single atomic source of truth for the
+			// state transition; this read only answers "did this delivery create
+			// work?". If a concurrent enqueue races it, the worst outcome is a
+			// mislabelled verdict — never a wrong state.
+			const prior =
+				(
+					await db
+						.select({ state: reviewQueueJobs.state })
+						.from(reviewQueueJobs)
+						.where(eq(reviewQueueJobs.key, key))
+						.limit(1)
+				)[0] ?? null
+
 			// `.returning(...)` MUST come BEFORE `.onConflictDoUpdate(...)`, not
 			// after it. Drizzle resolves a projected `returning` against the
 			// insert's own value map, and a column that is not in it (this
@@ -66,7 +93,15 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 			// type error outright. Measured: 7 red tests.
 			const inserted = await db
 				.insert(reviewQueueJobs)
-				.values({ ...input, key, state: "pending", runAfter: now })
+				.values({
+					...input,
+					key,
+					state: "pending",
+					runAfter: now,
+					// Explicit, so a caller that omits the SHA cannot leave the
+					// column undefined on the insert path.
+					headSha: input.headSha ?? null,
+				})
 				.returning({
 					id: reviewQueueJobs.id,
 					key: reviewQueueJobs.key,
@@ -75,6 +110,7 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 					pr: reviewQueueJobs.pr,
 					state: reviewQueueJobs.state,
 					attempts: reviewQueueJobs.attempts,
+					headSha: reviewQueueJobs.headSha,
 					rerunRequested: reviewQueueJobs.rerunRequested,
 					runAfter: reviewQueueJobs.runAfter,
 					lastError: reviewQueueJobs.lastError,
@@ -86,38 +122,128 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 					xmax: sql<number>`xmax`,
 				})
 				.onConflictDoUpdate({
-					// Only a live job can absorb a re-request; a `done` row is left
-					// alone so the recorded outcome stays accurate and an
-					// already-reviewed PR is not reviewed twice.
+					// A RE-REQUEST ONLY RE-ARMS A TERMINAL ROW WHEN THERE IS NEW
+					// WORK. Three cases, and the third is the one that was
+					// missing:
 					//
-					// A `failed` row MUST be re-armed, though, and not left alone: the
-					// comment's "terminal row is left alone" rule was written as if
-					// `failed` meant "decided". It does not — it means a review threw.
-					// Leaving it terminal meant a PR whose review failed could never be
-					// reviewed again, no matter how many times the webhook fired or how
-					// many times the cause was fixed: `claimDue` only selects `pending`,
-					// so the row was dead forever. That is what made the YAML parse bug
-					// unrecoverable — after fixing it, PR #7 still refused to enqueue.
+					//   - `failed`: re-arm. The comment's old "terminal row is
+					//     left alone" rule was written as if `failed` meant
+					//     "decided". It does not — it means a review threw.
+					//     Leaving it terminal meant a PR whose review failed
+					//     could never be reviewed again, no matter how often the
+					//     webhook fired or the cause was fixed: `claimDue` only
+					//     selects `pending`, so the row was dead forever. That is
+					//     what made the YAML parse bug unrecoverable.
+					//
+					//   - `done` + a DIFFERENT head SHA: re-arm. A `done` row was
+					//     terminal for every delivery, so a push after a review
+					//     was never reviewed: the webhook deduped against a row
+					//     that had already finished, and only the in-memory queue
+					//     (which keeps no history) re-ran. Production is the DB
+					//     backend, so a PR's second commit could go unreviewed
+					//     forever while development looked fine.
+					//
+					//   - `done` + the SAME head SHA (or no SHA on the delivery):
+					//     leave it. That is the original intent — an
+					//     already-reviewed commit is not reviewed twice, and a
+					//     redelivered webhook costs nothing.
 					//
 					// Raw SQL on purpose: interpolating a Drizzle column into a
 					// `sql` template turns it into a *bound parameter*, which is
 					// illegal in this position — Drizzle emitted "do update set
-					// returning" and dropped the clause entirely. The column names
-					// below are literals matching this file's own schema.
+					// returning" and dropped the clause entirely. The column
+					// names below are literals matching this file's own schema.
 					target: reviewQueueJobs.key,
 					set: {
-						state: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' THEN 'pending' ELSE "review_queue_jobs"."state" END)`,
+						state: sql`(
+							CASE
+								WHEN "review_queue_jobs"."state" = 'failed' THEN 'pending'
+								WHEN "review_queue_jobs"."state" = 'done'
+									AND excluded."head_sha" IS NOT NULL
+									AND "review_queue_jobs"."head_sha" IS DISTINCT FROM excluded."head_sha"
+									THEN 'pending'
+								ELSE "review_queue_jobs"."state"
+							END
+						)`,
 						// The old error described a run that has not been retried; keeping
 						// it would make a job that is pending look failed in every report.
-						lastError: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' THEN NULL ELSE "review_queue_jobs"."last_error" END)`,
-						// Re-queue it for NOW when it is RE-ARMED (failed), and also when a
-						// re-request lands on a `pending` row whose deadline is still in the
-						// future. Accepting such a webhook and then leaving the old deadline
-						// made the delivery a no-op: `triggered: true`, row untouched.
-						runAfter: sql`(CASE WHEN "review_queue_jobs"."state" = 'failed' OR ("review_queue_jobs"."state" = 'pending' AND "review_queue_jobs"."run_after" > now()) THEN now() ELSE "review_queue_jobs"."run_after" END)`,
+						lastError: sql`(
+							CASE
+								WHEN "review_queue_jobs"."state" = 'failed' THEN NULL
+								WHEN "review_queue_jobs"."state" = 'done'
+									AND excluded."head_sha" IS NOT NULL
+									AND "review_queue_jobs"."head_sha" IS DISTINCT FROM excluded."head_sha"
+									THEN NULL
+								ELSE "review_queue_jobs"."last_error"
+							END
+						)`,
+						// Re-queue it for NOW when it is RE-ARMED (failed, or a done row
+						// with a new commit), and also when a re-request lands on a
+						// `pending` row whose deadline is still in the future. Accepting
+						// such a webhook and then leaving the old deadline made the
+						// delivery a no-op: `triggered: true`, row untouched.
+						runAfter: sql`(
+							CASE
+								WHEN "review_queue_jobs"."state" = 'failed' THEN now()
+								WHEN "review_queue_jobs"."state" = 'done'
+									AND excluded."head_sha" IS NOT NULL
+									AND "review_queue_jobs"."head_sha" IS DISTINCT FROM excluded."head_sha"
+									THEN now()
+								WHEN "review_queue_jobs"."state" = 'pending'
+									AND "review_queue_jobs"."run_after" > now()
+									THEN now()
+								ELSE "review_queue_jobs"."run_after"
+							END
+						)`,
+						// The newest delivery is the fresher fact: a re-request during a
+						// run must be judged against the commit it named.
+						headSha: sql`COALESCE(excluded."head_sha", "review_queue_jobs"."head_sha")`,
+						// `attempts` counts attempts at the CURRENT unit of work, so a
+						// re-arm restarts it. Left alone it climbed monotonically across
+						// every commit a PR ever pushed (probed: 1→6 over six commits),
+						// which would turn any future retry ceiling (`attempts < N`) into
+						// a permanent wedge on a long-lived PR — exactly the "row is dead
+						// forever" trap the `failed` arm above exists to undo.
+						attempts: sql`(
+							CASE
+								WHEN "review_queue_jobs"."state" = 'failed' THEN 0
+								WHEN "review_queue_jobs"."state" = 'done'
+									AND excluded."head_sha" IS NOT NULL
+									AND "review_queue_jobs"."head_sha" IS DISTINCT FROM excluded."head_sha"
+									THEN 0
+								ELSE "review_queue_jobs"."attempts"
+							END
+						)`,
+						// A re-request only earns a SECOND RUN when one could otherwise
+						// be lost: the job is `running` (its review already read the
+						// head, so a push now is invisible to it) and the delivery names
+						// a different commit. Two bugs in one arm:
+						//
+						//   - It was unconditional, so a redelivered webhook (GitHub
+						//     retries; the worker re-sends the same head on every tick
+						//     until a review appears) queued a second full LLM review of
+						//     an identical commit — the exact cost the `head_sha` column
+						//     exists to remove — while the response said `deduped: true`.
+						//
+						//   - It also fired for `pending`, where it is useless AND
+						//     harmful: that row has not started, so its review reads the
+						//     head as it is when it runs (`head_sha` is coalesced to the
+						//     newest delivery above) and nothing can be missed. Flagging
+						//     it made `complete()` re-arm the row afterwards, so a
+						//     duplicate delivery bought a second review of the commit the
+						//     first run had just finished.
+						//
+						// `NULL` on either side keeps the flag for a `running` row: with
+						// no SHA there is no way to prove it is the same work, and
+						// dropping it could lose a real push.
 						rerunRequested: sql`(
 							CASE
-								WHEN "review_queue_jobs"."state" IN ('pending', 'running')
+								WHEN "review_queue_jobs"."state" = 'running'
+									AND (
+										excluded."head_sha" IS NULL
+										OR "review_queue_jobs"."head_sha" IS NULL
+										OR "review_queue_jobs"."head_sha" IS DISTINCT FROM excluded."head_sha"
+									)
 									THEN true
 								ELSE "review_queue_jobs"."rerun_requested"
 							END
@@ -127,7 +253,7 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 
 			const row = inserted[0]
 			if (!row) throw new Error("enqueue returned no row")
-			// WHAT THE CONFLICT CLAUSE ITSELF DID, never the row's age.
+			// WHAT THE CONFLICT CLAUSE DID, never the row's age.
 			//
 			// The verdict used to be `existed && !reArmed`, where `existed` was
 			// `createdAt < now`: a JS clock compared against a timestamp the
@@ -141,12 +267,28 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 			//
 			// `xmax = 0` is the engine's own answer to "did this statement
 			// insert, or did it conflict and update?", decided inside the same
-			// statement. The conflict clause sets `state` to exactly `'pending'`
-			// and clears `rerun_requested` only on the arms that are NOT live
-			// re-requests, so those two fields are what the clause reported.
+			// statement — so the insert case needs no inference at all.
 			const insertedFresh = Number((row as { xmax?: number }).xmax ?? 0) === 0
-			const reArmed = row.state === "pending" && !row.rerunRequested
-			return { job: toJob(row), deduped: !insertedFresh && !reArmed }
+			if (insertedFresh) return { job: toJob(row), deduped: false }
+
+			// A delivery counts as NEW WORK when the statement either moved a
+			// terminal row back to `pending` (so it is claimable again) or flagged a
+			// coalesced re-run on a running one. Reading both signals off the row
+			// the statement returned is what keeps the verdict honest: it used to
+			// answer `deduped: true` for a delivery that `complete()` then re-ran,
+			// i.e. the exact opposite of what happened.
+			//
+			// `prior === null` only happens if a concurrent enqueue inserted the row
+			// between the read and the upsert; the transition itself is still
+			// correct, and the worst outcome is a mislabelled verdict.
+			const reArmed =
+				prior !== null &&
+				prior.state !== "pending" &&
+				prior.state !== "running" &&
+				row.state === "pending"
+			const flaggedRerun = row.rerunRequested === true
+
+			return { job: toJob(row), deduped: !reArmed && !flaggedRerun }
 		},
 
 		async claimDue(limit: number): Promise<TQueueJob[]> {

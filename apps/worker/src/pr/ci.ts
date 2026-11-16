@@ -28,8 +28,14 @@ export const STALE_CI_CLOSE_DAYS = 2
  * separates "CI is red" from "we could not read CI", which the Python collapsed
  * into one `ok` and which the caller must branch on — `unknown` waits, red
  * closes a stale Dependabot PR.
+ *
+ * `pending` is the port's SECOND addition, for the same reason. `ok: false`
+ * covers two opposite facts: a suite that FAILED and a suite that has not
+ * FINISHED. A caller that only reads `ok` therefore cannot tell them apart, and
+ * the stale-CI gate did exactly that — it closed a human PR as "stale failing
+ * CI" while its checks were still running. Pending waits; failed may close.
  */
-export type CiResult = { ok: boolean; msg: string; unknown?: boolean }
+export type CiResult = { ok: boolean; msg: string; unknown?: boolean; pending?: boolean }
 
 /**
  * Python's `(status, comment_status)` pair from `close_stale_ci_pr` (line 580).
@@ -107,6 +113,71 @@ const FAILED_CONCLUSIONS = new Set([
 	"startup_failure",
 ])
 
+/** Page size and hard stop for the check-run walk. */
+const CHECK_PAGE_SIZE = 100
+const MAX_CHECK_PAGES = 10
+
+/**
+ * EVERY check run on a head, not just the first page.
+ *
+ * `GET /commits/{sha}/check-runs` returns 30 runs by default. A matrix workflow
+ * (`test (18)`, `test (20)`, …) exceeds that routinely, and the runs come back
+ * ordered — so a failing shard past run 30 was simply not in the list this gate
+ * judged. The gate saw zero failures, answered `✅ N checks green`, and the
+ * worker merged a commit whose CI was red. Nothing in the response said the list
+ * was truncated; `total_count` is the only hint, and it was ignored.
+ *
+ * A non-200 on the FIRST page is handed back to the caller, because the
+ * `unknown` arm depends on distinguishing "could not read the gate" from "no
+ * checks". A non-200 on a LATER page returns what was read so far: a partial
+ * list that already contains a failure is still a failure, and discarding it
+ * would report green — the exact mistake this helper exists to prevent.
+ *
+ * `complete` is what keeps the rest of that promise. Paging made a NEW state
+ * reachable: page 1 full of green runs, page 2 answering 500 (or the page cap
+ * being hit). The runs then look entirely healthy while the list was never
+ * finished, so `ok: true` would be a guess about the half nobody read — and the
+ * merge gate walks straight through `ok`. Callers must treat `complete: false`
+ * as "no verdict", never as green.
+ */
+export async function listCheckRuns(
+	api: GhClient,
+	token: string,
+	repo: string,
+	sha: string,
+): Promise<{ status: number; runs: any[]; complete: boolean }> {
+	const runs: any[] = []
+	let status = 200
+	// The last `total_count` GitHub reported, so a cap-limited walk can still be
+	// proven complete (or not).
+	let lastTotal: number | null = null
+	for (let page = 1; page <= MAX_CHECK_PAGES; page++) {
+		const res = await api.request(
+			"GET",
+			`/repos/${repo}/commits/${sha}/check-runs?per_page=${CHECK_PAGE_SIZE}&page=${page}`,
+			{ token },
+		)
+		status = res.status
+		if (status !== 200) return { status, runs, complete: false }
+		const body = res.data as { check_runs?: unknown; total_count?: unknown } | null
+		const pageRuns =
+			body !== null && typeof body === "object" && Array.isArray(body.check_runs)
+				? (body.check_runs as any[])
+				: []
+		runs.push(...pageRuns)
+		// A short page is the last page: GitHub answers a page past the end with
+		// `[]`, and the loop must not treat that as "more to come".
+		if (pageRuns.length < CHECK_PAGE_SIZE) return { status, runs, complete: true }
+		const total = typeof body?.total_count === "number" ? body.total_count : null
+		lastTotal = total
+		if (total !== null && runs.length >= total) return { status, runs, complete: true }
+	}
+	// The CAP ended this walk, not GitHub. Only `total_count` can prove the list
+	// is nevertheless whole; without it, it is partial by definition.
+	const total = typeof lastTotal === "number" ? lastTotal : null
+	return { status, runs, complete: total !== null && runs.length >= total }
+}
+
 /**
  * Python `check_ci_passed(token, repo_full, sha)` (lines 395-406).
  *
@@ -133,13 +204,7 @@ export async function checkCiPassed(
 	repo: string,
 	sha: string,
 ): Promise<CiResult> {
-	const { status, data } = await api.request("GET", `/repos/${repo}/commits/${sha}/check-runs`, {
-		token,
-	})
-	const all =
-		data !== null && typeof data === "object" && Array.isArray((data as any).check_runs)
-			? ((data as any).check_runs as any[])
-			: []
+	const { status, runs: all, complete } = await listCheckRuns(api, token, repo, sha)
 	// Filtered BEFORE anything counts them, exactly like the workflow's own
 	// `SELF_CHECK_NAME` filter — see `SELF_CHECK_NAMES`. `total`, `failed` and
 	// `pending` must all describe the repo's real CI, or a merge job that refused
@@ -182,8 +247,27 @@ export async function checkCiPassed(
 		(c) => c?.status === "completed" && FAILED_CONCLUSIONS.has(c?.conclusion),
 	)
 	if (failed.length) return { ok: false, msg: `CI FAILED: ${joinNames(failed)}` }
+	// A FAILURE OUTRANKS A PENDING RUN (checked above), and pending is flagged
+	// rather than merely messaged: `ok: false` alone made a still-running suite
+	// indistinguishable from a red one to every caller, which is how a PR was
+	// auto-closed as "stale failing CI" while its tests were still running.
 	const pending = checks.filter((c) => c?.status !== "completed")
-	if (pending.length) return { ok: false, msg: `CI pending: ${joinNames(pending)}` }
+	if (pending.length) return { ok: false, pending: true, msg: `CI pending: ${joinNames(pending)}` }
+
+	// GREEN ONLY IF THE LIST WAS READ TO THE END.
+	//
+	// Paging introduced a state a single read could not produce: page 1 full of
+	// green runs, page 2 answering 500/403 (or the page cap hit). Every run that
+	// WAS read is healthy, so the code above falls through to `ok: true` — a
+	// verdict about the half of the suite nobody read. `gates.ts` walks straight
+	// through `ok` into the merge, which is the one outcome this module exists to
+	// prevent. `unknown` is the honest answer: no failure seen, no verdict either.
+	if (!complete)
+		return {
+			ok: false,
+			unknown: true,
+			msg: `⚠️ CI partially read (${checks.length} checks seen) — not merging on an incomplete list`,
+		}
 
 	return { ok: true, msg: `✅ ${checks.length} checks green` } // line 406
 }
@@ -220,15 +304,22 @@ export async function checkCiWithSuiteRequirement(
 	// Only a GREEN verdict is suspicious this way.
 	if (!result.ok || expectedChecks.length === 0) return result
 
-	const { status, data } = await api.request("GET", `/repos/${repo}/commits/${sha}/check-runs`, {
-		token,
-	})
-	if (status !== 200) return result
-	const checks =
-		data !== null && typeof data === "object" && Array.isArray((data as any).check_runs)
-			? ((data as any).check_runs as any[])
-			: []
-	const names = new Set(checks.filter((c) => !isSelfCheck(c)).map((c) => String(c?.name ?? "")))
+	// EVERY run, for the same reason as `checkCiPassed`: the expected job may sit
+	// past the first page of a matrix workflow, and reading only the first page
+	// would report "No real CI ran" on a head that ran the whole suite.
+	//
+	// An INCOMPLETE read is not a green read either. Returning `result` here would
+	// hand back the green verdict this function exists to double-check, on a list
+	// that was never finished — so the requirement is unverifiable and the answer
+	// is `unknown`.
+	const { status, runs, complete } = await listCheckRuns(api, token, repo, sha)
+	if (status !== 200 || !complete)
+		return {
+			ok: false,
+			unknown: true,
+			msg: `⚠️ Could not confirm a real CI run on this head (check list incomplete) — not merging`,
+		}
+	const names = new Set(runs.filter((c) => !isSelfCheck(c)).map((c) => String(c?.name ?? "")))
 	if (expectedChecks.some((name) => names.has(name))) return result
 
 	return {

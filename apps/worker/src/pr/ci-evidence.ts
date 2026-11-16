@@ -19,6 +19,7 @@
 // with it, and "we could not read GitHub's annotations" is not a reason to skip a
 // review.
 
+import { listCheckRuns } from "./ci.ts"
 import type { GhClient } from "./scan.ts"
 
 /** One failing job, reduced to what a prompt can use. */
@@ -96,13 +97,16 @@ export async function collectCiFailures(
 	// network blip into a thrown error that failed the entire agent run, which is
 	// the opposite of the "best-effort" contract this module states.
 	try {
-		const res = await api.request("GET", `/repos/${repo}/commits/${sha}/check-runs`, { token })
-		if (res.status !== 200) return []
-
-		const data = res.data as { check_runs?: unknown } | null
-		const runs = Array.isArray(data?.check_runs)
-			? (data.check_runs as Record<string, unknown>[])
-			: []
+		// EVERY check run, not the first page of 30. A matrix workflow easily
+		// exceeds a page, and a failing job past it would leave the agent's prompt
+		// claiming there is no CI evidence at all.
+		//
+		// A FAILED PAGE IS NOT A REASON TO THROW THE READ AWAY. `status !== 200`
+		// used to return `[]`, discarding runs already in hand — so a red job read
+		// from page 1 vanished from the prompt because page 2 timed out. Partial
+		// evidence is still evidence; only an EMPTY read means "nothing to show".
+		const { status, runs } = await listCheckRuns(api, token, repo, sha)
+		if (status !== 200 && runs.length === 0) return []
 
 		const failing = runs
 			.filter((r) => r.status === "completed" && RED.has(strOf(r.conclusion)))

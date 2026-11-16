@@ -6,7 +6,7 @@
 // lives in Postgres rather than in a Set that a crash erases.
 
 import type { ReviewJob } from "../../application/queue/review-queue.ts"
-import type { QueueRepository } from "../../domain/review/queue-repository.ts"
+import type { QueueRepository, TQueueStats } from "../../domain/review/queue-repository.ts"
 
 export interface IDbReviewQueue {
 	enqueue(job: ReviewJob): Promise<"queued" | "deduped">
@@ -14,6 +14,8 @@ export interface IDbReviewQueue {
 	start(): Promise<void>
 	/** Resolves when nothing is in flight. */
 	drain(): Promise<void>
+	/** Row counts, the same four the in-memory queue reports. */
+	stats(): Promise<TQueueStats>
 	readonly backend: "db"
 }
 
@@ -104,7 +106,15 @@ export function makeDbReviewQueue(opts: DbReviewQueueOptions): IDbReviewQueue {
 	return {
 		backend: "db",
 		async enqueue(job: ReviewJob) {
-			const { deduped } = await store.enqueue({ owner: job.owner, repo: job.repo, pr: job.pr })
+			const { deduped } = await store.enqueue({
+				owner: job.owner,
+				repo: job.repo,
+				pr: job.pr,
+				// The commit the delivery is about. `enqueue` needs it to tell a
+				// re-request for work already done from new work on a finished
+				// PR — see the conflict clause in the repository.
+				headSha: job.headSha ?? null,
+			})
 			if (!deduped) void pump()
 			return deduped ? ("deduped" as const) : ("queued" as const)
 		},
@@ -114,6 +124,16 @@ export function makeDbReviewQueue(opts: DbReviewQueueOptions): IDbReviewQueue {
 				log(`[queue] requeued ${requeued} job(s) interrupted by a restart`)
 			}
 			void loop()
+		},
+		/**
+		 * The same four counters the in-memory queue reports, so the admin
+		 * endpoint describes whichever backend is mounted. Without this the
+		 * endpoint had to reach for the DB store directly, and under
+		 * QUEUE_BACKEND=memory it reported four zeros while the memory queue was
+		 * busy — a failing job was simply not visible anywhere.
+		 */
+		async stats() {
+			return store.stats()
 		},
 		async drain() {
 			// WAIT FOR THE ROWS, NOT FOR `inFlight`.

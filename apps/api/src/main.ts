@@ -206,6 +206,12 @@ export async function startApp(options: StartOptions = {}) {
 	startLegacyRoutes(app, { queue })
 	if (env.QUEUE_BACKEND === "db") await (queue as { start(): Promise<void> }).start()
 
+	// The admin stats endpoint must describe the queue that is RUNNING. The
+	// Postgres store is mounted either way, so reading it directly made
+	// QUEUE_BACKEND=memory report four zeros while that queue was busy — and a
+	// failing job there was invisible from the dashboard.
+	const queueStats = async () => queue.stats()
+
 	// 4c. oRPC, registered last so it never shadows a legacy path. The context
 	// is built per request at the call site, which is where the session cookie
 	// is actually readable.
@@ -247,6 +253,7 @@ export async function startApp(options: StartOptions = {}) {
 			useCases,
 			reviews,
 			queueStore,
+			queueStats,
 			resolveSession,
 		})
 		// oRPC matches procedures relative to its mount point, so hand it the
@@ -277,6 +284,7 @@ export async function startApp(options: StartOptions = {}) {
 				useCases,
 				reviews,
 				queueStore,
+				queueStats,
 				resolveSession,
 			}),
 		})

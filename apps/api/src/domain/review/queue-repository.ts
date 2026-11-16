@@ -16,6 +16,8 @@ export interface TQueueJob {
 	pr: number
 	state: TQueueState
 	attempts: number
+	/** The commit this job was last requested for; null when unknown. */
+	headSha: string | null
 	rerunRequested: boolean
 	runAfter: Date
 	lastError: string | null
@@ -27,6 +29,16 @@ export interface TEnqueueInput {
 	owner: string
 	repo: string
 	pr: number
+	/**
+	 * The PR's head commit, when the delivery carries one.
+	 *
+	 * Load-bearing for the DONE row: a job that already finished must be
+	 * re-armed when a NEW commit arrives, and left alone when the same commit
+	 * arrives again. Without it the only options were "never re-review" (a push
+	 * after a review was silently dropped) or "always re-review" (every
+	 * redelivery of one webhook buys a second LLM review).
+	 */
+	headSha?: string | null
 }
 
 export interface TQueueStats {

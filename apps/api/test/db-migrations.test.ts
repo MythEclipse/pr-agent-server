@@ -53,6 +53,24 @@ describe("committed migrations", () => {
 			await store.close()
 		}
 	})
+
+	test("review_queue_jobs carries the head_sha the re-review gate reads", async () => {
+		// Without this column a push after a review cannot be distinguished from a
+		// redelivery of the same webhook, so the second commit is never reviewed.
+		// A migration that forgets it would leave the code reading a column that
+		// does not exist — at runtime, in production only.
+		const store = await createTestDb()
+		try {
+			const columns = await store.db.execute(
+				"select column_name from information_schema.columns where table_name = 'review_queue_jobs'",
+			)
+			const names = (rowsOf(columns) as { column_name: string }[]).map((r) => r.column_name)
+			expect(names).toContain("head_sha")
+			expect(names).not.toContain("headSha")
+		} finally {
+			await store.close()
+		}
+	})
 })
 
 /** PGlite returns rows directly; drizzle-orm/pglite returns { rows }. */

@@ -133,4 +133,35 @@ describe("ReviewQueue", () => {
 		await q.drain()
 		expect(ran).toEqual([2])
 	})
+
+	// THE TWO BACKENDS MUST REPORT THE SAME FOUR NUMBERS.
+	//
+	// Postgres records a failing review as a `failed` row (and a later webhook
+	// re-arms it); this queue used to log the error and drop the job, leaving
+	// nothing to observe — so a failing review was visible in production and
+	// invisible in development. The retry behaviour was already equivalent (a
+	// settled key is released here, re-armed there); this is the observability
+	// half.
+	test("stats() counts pending/running and settled runs like the DB backend", async () => {
+		let release: () => void = () => {}
+		const q = new ReviewQueue({
+			run: async (j) => {
+				if (j.pr === 99) throw new Error("boom")
+				await new Promise<void>((r) => {
+					release = r
+				})
+			},
+		})
+		q.enqueue({ owner: "o", repo: "r", pr: 1 })
+		expect(q.stats()).toEqual({ pending: 0, running: 1, done: 0, failed: 0 })
+		await tick()
+		release()
+		await q.drain()
+		expect(q.stats()).toEqual({ pending: 0, running: 0, done: 1, failed: 0 })
+
+		// A failure is COUNTED, not just logged.
+		q.enqueue({ owner: "o", repo: "r", pr: 99 })
+		await q.drain()
+		expect(q.stats()).toMatchObject({ failed: 1, done: 1, pending: 0, running: 0 })
+	})
 })

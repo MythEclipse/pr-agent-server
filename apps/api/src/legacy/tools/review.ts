@@ -228,7 +228,15 @@ export async function runReview(
 					r.finalUpdateMessage,
 				)
 			} else {
-				await provider.publishComment(withFacts)
+				// A NON-PERSISTENT REVIEW STILL NAMES ITS COMMIT. The worker
+				// decides whether a review is of the head it is processing by
+				// reading this marker; a review without one is refused and
+				// re-triggered, which with `PR_AGENT_PERSISTENT_COMMENT=false`
+				// would buy a fresh LLM review on every tick forever.
+				// `pr.head.sha` is the commit the prompt was built from.
+				await provider.publishComment(
+					`${withFacts}\n\n#### (Review updated until commit ${pr.head.sha})`,
+				)
 			}
 		}
 	}

@@ -57,6 +57,42 @@ describe("db queue — dedupe", () => {
 		await expect(queue.stats()).resolves.toMatchObject({ running: 1 })
 	})
 
+	// A DUPLICATE FOR THE COMMIT ALREADY BEING REVIEWED IS NOT NEW WORK.
+	//
+	// The `rerun_requested` arm fired for ANY delivery that landed on a live row,
+	// so GitHub's redelivery — and the worker's own re-trigger, which fires every
+	// tick until a review comment appears — bought a second full LLM review of an
+	// identical commit. Probed before this fix: enqueue(A) → claim → enqueue(A)
+	// answered `deduped: true` and `complete()` then returned `rerun: true`.
+	test("a duplicate delivery for the SAME commit mid-run does not buy a second review", async () => {
+		const SHA = "d".repeat(40)
+		await queue.enqueue({ owner: "o", repo: "r", pr: 40, headSha: SHA })
+		await queue.claimDue(1)
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 40, headSha: SHA })
+		expect(again.deduped).toBe(true)
+		expect(again.job.rerunRequested).toBe(false)
+
+		const settled = await queue.complete("o/r#40")
+		expect(settled.rerun).toBe(false)
+		await expect(queue.stats()).resolves.toMatchObject({ done: 1, pending: 0 })
+	})
+
+	test("a PUSH that lands mid-run still buys exactly one re-review", async () => {
+		const FIRST = "e".repeat(40)
+		const SECOND = "f".repeat(40)
+		await queue.enqueue({ owner: "o", repo: "r", pr: 41, headSha: FIRST })
+		await queue.claimDue(1)
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 41, headSha: SECOND })
+		expect(again.deduped).toBe(false)
+		expect(again.job.rerunRequested).toBe(true)
+		expect(again.job.headSha).toBe(SECOND)
+
+		const settled = await queue.complete("o/r#41")
+		expect(settled.rerun).toBe(true)
+	})
+
 	test("complete() reports no rerun when nothing landed mid-flight", async () => {
 		await queue.enqueue({ owner: "o", repo: "r", pr: 8 })
 		const [claimed] = await queue.claimDue(1)
@@ -75,7 +111,11 @@ describe("db queue — dedupe", () => {
 		await queue.claimDue(1)
 
 		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 9 })
-		expect(again.deduped).toBe(true)
+		// NOT deduped, because it is not a no-op: the flag below makes `complete()`
+		// re-arm the row, so a second review WILL run. It used to answer
+		// `deduped: true` while doing exactly that — the caller was told the
+		// opposite of what happened.
+		expect(again.deduped).toBe(false)
 		expect(again.job.rerunRequested).toBe(true)
 
 		const settled = await queue.complete("o/r#9")
@@ -137,21 +177,97 @@ describe("db queue — dedupe", () => {
 
 		const claimed = await queue.claimDue(1)
 		expect(claimed.map((j) => j.pr)).toEqual([7])
-		expect(claimed[0]?.attempts).toBe(2)
+		// 1, not 2: `attempts` counts attempts at the CURRENT unit of work, and a
+		// re-arm starts a new one. It used to climb across every commit a PR ever
+		// pushed (probed: 1→6 over six commits), which would turn any retry
+		// ceiling into a permanent wedge on a long-lived PR.
+		expect(claimed[0]?.attempts).toBe(1)
 	})
 
-	test("re-enqueueing a DONE job stays deduped — a reviewed PR is not reviewed twice", async () => {
-		await queue.enqueue({ owner: "o", repo: "r", pr: 8 })
+	test("re-enqueueing a DONE job for the SAME commit stays deduped — a reviewed commit is not reviewed twice", async () => {
+		const SHA = "a".repeat(40)
+		await queue.enqueue({ owner: "o", repo: "r", pr: 8, headSha: SHA })
 		const [job] = await queue.claimDue(1)
 		await queue.complete(job?.key ?? "")
 		await expect(queue.stats()).resolves.toMatchObject({ done: 1 })
 
-		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 8 })
+		// A redelivered webhook (GitHub retries, the worker re-sends the same
+		// head) must cost nothing.
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 8, headSha: SHA })
 		expect(again.deduped).toBe(true)
 		expect(again.job.state).toBe("done")
 		// A re-armed row is old by definition, so `createdAt < now` must not be the
 		// dedupe test — it would read a retry as deduped and silently drop it.
 		await expect(queue.claimDue(1)).resolves.toHaveLength(0)
+	})
+
+	// A PUSH AFTER A REVIEW IS NEW WORK.
+	//
+	// The `done` row used to be terminal for EVERY delivery, so the second commit
+	// on a PR was never reviewed: `claimDue` only selects `pending`, and the
+	// conflict clause left the finished row alone. The in-memory queue re-ran
+	// (it keeps no history), which is why development looked fine while
+	// production — the DB backend — silently dropped every follow-up push.
+	// Recording the head commit is what makes the two cases distinguishable.
+	test("re-enqueueing a DONE job for a NEW commit re-arms it so the push is reviewed", async () => {
+		const FIRST = "a".repeat(40)
+		const SECOND = "b".repeat(40)
+		await queue.enqueue({ owner: "o", repo: "r", pr: 8, headSha: FIRST })
+		const [job] = await queue.claimDue(1)
+		await queue.complete(job?.key ?? "")
+		await expect(queue.stats()).resolves.toMatchObject({ done: 1 })
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 8, headSha: SECOND })
+		expect(again.deduped).toBe(false)
+		expect(again.job.state).toBe("pending")
+		// The row must name the commit it is now queued for, or the NEXT delivery
+		// would look like the same commit again and dedupe.
+		expect(again.job.headSha).toBe(SECOND)
+		// Claimable right now, not after a poll.
+		expect(again.job.runAfter.getTime()).toBeLessThanOrEqual(Date.now() + 1000)
+
+		const claimed = await queue.claimDue(1)
+		expect(claimed.map((j) => j.pr)).toEqual([8])
+		// A new commit is a new unit of work, so the counter restarts.
+		expect(claimed[0]?.attempts).toBe(1)
+	})
+
+	test("the row records the NEWEST commit, so the next delivery is judged against it", async () => {
+		// The re-arm updates `head_sha` to the commit it is queued for. If it kept
+		// the old value, the delivery after that would look like "the same
+		// commit" again and be deduped — one re-review, then silence.
+		const FIRST = "a".repeat(40)
+		const SECOND = "b".repeat(40)
+		await queue.enqueue({ owner: "o", repo: "r", pr: 33, headSha: FIRST })
+		const [first] = await queue.claimDue(1)
+		await queue.complete(first?.key ?? "")
+
+		const rearmed = await queue.enqueue({ owner: "o", repo: "r", pr: 33, headSha: SECOND })
+		expect(rearmed.job.headSha).toBe(SECOND)
+		const [second] = await queue.claimDue(1)
+		await queue.complete(second?.key ?? "")
+
+		// A third commit is new work again.
+		const third = await queue.enqueue({ owner: "o", repo: "r", pr: 33, headSha: "c".repeat(40) })
+		expect(third.deduped).toBe(false)
+		expect(third.job.state).toBe("pending")
+		expect(third.job.lastError).toBeNull()
+	})
+
+	test("a delivery that names NO commit cannot prove there is new work, so it dedupes", async () => {
+		// Backwards compatible by construction: without a SHA the queue keeps the
+		// old rule. Guessing "new work" here would buy a second LLM review for
+		// every redelivery of a webhook that carries no head.
+		const SHA = "a".repeat(40)
+		await queue.enqueue({ owner: "o", repo: "r", pr: 34, headSha: SHA })
+		const [job] = await queue.claimDue(1)
+		await queue.complete(job?.key ?? "")
+
+		const again = await queue.enqueue({ owner: "o", repo: "r", pr: 34 })
+		expect(again.deduped).toBe(true)
+		expect(again.job.state).toBe("done")
+		// The recorded head is not erased by a delivery that does not name one.
+		expect(again.job.headSha).toBe(SHA)
 	})
 
 	// THE DEDUPE VERDICT MUST NOT BE INFERRED FROM A CLOCK COMPARISON.
@@ -199,36 +315,41 @@ describe("db queue — dedupe", () => {
 		await expect(queue.claimDue(1)).resolves.toHaveLength(1)
 	})
 
-	// A REQUESTED RE-RUN THAT NEVER RUNS IS A SILENT DROP.
+	// A RE-REQUEST ON A PENDING ROW NEEDS NO FLAG: the run has not started, so it
+	// has not read the head yet. Flagging it made `complete()` re-arm the row
+	// afterwards, and the duplicate delivery bought a SECOND review of the very
+	// commit the first run had just finished — while the row's `head_sha` had
+	// already been coalesced to the newest delivery, so the second run could not
+	// even see anything new.
 	//
-	// The flag used to be cleared by every `complete()`, on every arm, including
-	// the failing one. A webhook that arrived before the row was claimed — the
-	// ordinary case, since a delivery usually precedes the next poll — was
-	// therefore erased by the completion of the FIRST run, and `triggered:true`
-	// bought nothing.
-	test("a re-request recorded while the job was still pending survives the run", async () => {
+	// The flag still exists for the case it is for: a re-request that lands while
+	// the review is RUNNING, whose head was already read (see the `running` test
+	// above and the burst test below).
+	test("a re-request on a still-pending row coalesces into that run", async () => {
 		await queue.enqueue({ owner: "o", repo: "r", pr: 31 })
 		const mid = await queue.enqueue({ owner: "o", repo: "r", pr: 31 })
-		expect(mid.job.rerunRequested).toBe(true)
+		expect(mid.job.rerunRequested).toBe(false)
 
 		const [claimed] = await queue.claimDue(1)
 		const settled = await queue.complete(claimed?.key ?? "o/r#31")
-		expect(settled.rerun).toBe(true)
-		await expect(queue.stats()).resolves.toMatchObject({ pending: 1, done: 0 })
+		expect(settled.rerun).toBe(false)
+		await expect(queue.stats()).resolves.toMatchObject({ pending: 0, done: 1 })
 	})
 
-	test("a re-request recorded before a FAILING run is kept, not erased with the error", async () => {
+	test("a re-request that lands MID-RUN survives a failing run", async () => {
+		// The interesting ordering is the one where the flag is already set when
+		// the run fails: `complete()` used to clear it on EVERY arm, including the
+		// failing one, so a push that arrived during the review died with the
+		// error. The row stays `failed` and the flag rides it until `enqueue`
+		// re-arms the row to `pending`, which is the recovery path for a thrown
+		// review.
 		await queue.enqueue({ owner: "o", repo: "r", pr: 32 })
+		await queue.claimDue(1)
 		await queue.enqueue({ owner: "o", repo: "r", pr: 32 })
-		const [claimed] = await queue.claimDue(1)
-		const settled = await queue.complete(claimed?.key ?? "o/r#32", "boom")
+		const settled = await queue.complete("o/r#32", "boom")
 		expect(settled.rerun).toBe(false)
 		await expect(queue.stats()).resolves.toMatchObject({ failed: 1 })
 
-		// The flag is still SET, which is the whole point: every `complete()` used
-		// to clear it, so this request died with the error. The row is `failed`
-		// and the request rides it until `enqueue` re-arms it to `pending`, which
-		// is the recovery path for a thrown review.
 		const row = await store.db.execute(
 			sql`select state, rerun_requested from review_queue_jobs where key = ${"o/r#32"}`,
 		)

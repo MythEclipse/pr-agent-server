@@ -22,7 +22,9 @@ import type { GhClient } from "../src/pr/scan.ts"
 function stubApi(routes: Record<string, { status: number; data: unknown }>): GhClient {
 	return {
 		async request(_method: string, path: string) {
-			const hit = routes[path]
+			// Query strings are stripped before the lookup: the check-run list is
+			// read PAGED (`?per_page=100&page=N`), and the fixtures describe paths.
+			const hit = routes[path] ?? routes[path.replace(/\?.*$/, "")]
 			// An unmatched path is a 404 rather than a throw: the module's contract is
 			// "best-effort, never throws", so the stub must not be stricter than the
 			// thing it stands in for.
@@ -64,6 +66,33 @@ describe("collectCiFailures", () => {
 		expect(got).toHaveLength(1)
 		expect(got[0]?.name).toBe("api:test")
 		expect(got[0]?.annotations[0]).toMatchObject({ path: "src/a.ts", line: 42 })
+	})
+
+	it("keeps the failures it already read when a later page fails", async () => {
+		// `status !== 200` used to return `[]`, discarding runs already in hand: a
+		// red job read from page 1 vanished from the prompt because page 2 timed
+		// out, and the agent was told there was no CI evidence at all. Partial
+		// evidence is still evidence.
+		const fullPage = Array.from({ length: 100 }, (_, i) => ({
+			id: i,
+			name: `test (${i})`,
+			status: "completed",
+			conclusion: i === 3 ? "failure" : "success",
+		}))
+		const api = {
+			async request(_method: string, path: string) {
+				// Parse the page number, do NOT substring-match it: every URL here
+				// carries `per_page=100`, which contains `page=1`.
+				const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? "0")
+				if (page === 1) return { status: 200, data: { check_runs: fullPage } }
+				if (page === 2) return { status: 500, data: null }
+				return { status: 404, data: null }
+			},
+		} as unknown as GhClient
+
+		const got = await collectCiFailures(api, "t", "o/r", "abc")
+
+		expect(got.map((f) => f.name)).toEqual(["test (3)"])
 	})
 
 	it("ignores notice and warning annotations", async () => {
