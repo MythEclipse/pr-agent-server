@@ -1,3 +1,10 @@
+# [1.12.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.11...v1.12.0) (2026-11-16)
+
+
+### Features
+
+* **worker:** make --fix-vulns actually fix, for every owned repo ([645072e](https://github.com/MythEclipse/pr-agent-server/commit/645072e62ec5b6c07cb5f315730b350b93b50cb1))
+
 ## [1.11.11](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.10...v1.11.11) (2026-11-16)
 
 
