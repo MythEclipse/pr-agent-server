@@ -1,3 +1,10 @@
+## [1.12.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.3...v1.12.4) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker:** never move a direct dependency backwards ([a62bf9a](https://github.com/MythEclipse/pr-agent-server/commit/a62bf9a748bd9eeabaeaa2579629dbd25d2f3d33))
+
 ## [1.12.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.2...v1.12.3) (2026-11-16)
 
 
