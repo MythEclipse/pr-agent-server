@@ -173,7 +173,28 @@ export function planVulnFixes(repo: string, alerts: readonly DependabotAlert[]):
 }
 
 /** The update command for a plan, or the reason it needs a human. */
-export type FixCommand = { argv: string[] } | { manual: string }
+export type FixCommand =
+	| {
+			argv: string[]
+			/**
+			 * A second form to try when the first is refused for a reason the flag
+			 * can fix — today only npm's `ERESOLVE`.
+			 *
+			 * MEASURED: BotWa's `axios` bump dies with `ERESOLVE could not resolve
+			 * … baileys@6.17.16 … jimp@1.6.1` — a peer conflict between two
+			 * packages that have nothing to do with the advisory. That is the repo's
+			 * pre-existing state, not something this bump created, and without the
+			 * flag 88 fixable alerts on that repo stay unfixable. `--legacy-peer-deps`
+			 * is npm's own documented escape hatch for exactly that.
+			 *
+			 * WHY THIS IS SAFE TO TRY: the resulting lockfile still has to install in
+			 * CI (`npm ci`) before the PR can merge. A lockfile that only resolves
+			 * with the flag turns CI red and the PR never lands, which is the correct
+			 * outcome — the alternative (no PR at all) hides the advisory forever.
+			 */
+			fallback?: string[]
+	  }
+	| { manual: string }
 
 const basename = (p: string): string => p.slice(p.lastIndexOf("/") + 1)
 
@@ -199,18 +220,18 @@ export function fixCommandFor(plan: VulnFixPlan, opts: { yarnBerry?: boolean } =
 	const ver = plan.patchedVersion
 	switch (file) {
 		case "package-lock.json":
-		case "npm-shrinkwrap.json":
-			return {
-				argv: [
-					"npm",
-					"install",
-					"--package-lock-only",
-					"--ignore-scripts",
-					"--no-audit",
-					"--no-fund",
-					`${pkg}@${ver}`,
-				],
-			}
+		case "npm-shrinkwrap.json": {
+			const argv = [
+				"npm",
+				"install",
+				"--package-lock-only",
+				"--ignore-scripts",
+				"--no-audit",
+				"--no-fund",
+				`${pkg}@${ver}`,
+			]
+			return { argv, fallback: [...argv, "--legacy-peer-deps"] }
+		}
 		case "pnpm-lock.yaml":
 			return { argv: ["pnpm", "update", `${pkg}@${ver}`, "--lockfile-only", "--ignore-scripts"] }
 		case "yarn.lock":
@@ -272,7 +293,10 @@ export function dependabotUrl(repo: string): string {
  * — the answer is one click away on the Dependabot page, and a body that only
  * says "bump x" moves that lookup onto the reviewer.
  */
-export function buildVulnPrBody(plan: VulnFixPlan): string {
+export function buildVulnPrBody(
+	plan: VulnFixPlan,
+	opts: { legacyPeerDeps?: boolean } = {},
+): string {
 	const advisories = plan.ghsaIds.length ? plan.ghsaIds.join(", ") : "security advisory"
 	const links = plan.alertNumbers
 		.map((n) => `- [alert #${n}](${alertUrl(plan.repo, n)})`)
@@ -288,8 +312,15 @@ export function buildVulnPrBody(plan: VulnFixPlan): string {
 		`the advisory had a published patched version, but no PR had been opened for it, so the ` +
 		`worker applied the update itself. The lockfile is the only file this PR should touch; ` +
 		`CI and the normal review gate decide whether it merges.\n\n` +
+		(opts.legacyPeerDeps
+			? `\n**Resolved with \`--legacy-peer-deps\`.** npm refused the bump with ` +
+				`\`ERESOLVE\` — a peer conflict this repo already had, between packages ` +
+				`unrelated to the advisory. The flag is npm's documented escape hatch; CI ` +
+				`still has to install this lockfile before the PR can merge, so a resolution ` +
+				`that does not really work fails there rather than here.\n`
+			: "") +
 		`Re-run locally with:\n\n\`\`\`\ncd ${plan.directory === "/" ? "." : plan.directory}\n` +
-		`${commandLine}\n\`\`\``
+		`${opts.legacyPeerDeps ? `${commandLine} --legacy-peer-deps` : commandLine}\n\`\`\``
 	)
 }
 
@@ -408,11 +439,50 @@ async function applyPlan(
 	}
 	const cwd = plan.directory === "/" ? workdir : `${workdir}${plan.directory}`
 	const [program, ...args] = command.argv
-	const updated = exec([program ?? "", ...args], cwd, UPDATE_TIMEOUT_SEC)
+	let updated = exec([program ?? "", ...args], cwd, UPDATE_TIMEOUT_SEC)
+	let usedFallback = false
 	if (updated.code !== 0) {
-		workdirs.remove(workdir)
-		const why = reportable((updated.stderr || updated.stdout || "").trim())
-		return { ok: false, detail: `${program} exited ${updated.code}: ${head(why, 300)}` }
+		const why = `${updated.stderr}${updated.stdout}`
+		// 124 is `runProc`'s timeout sentinel (index.ts), not an exit code any of
+		// these tools use. A big workspace can legitimately spend minutes
+		// resolving, so this is a budget report rather than a diagnosis.
+		if (updated.code === 124) {
+			workdirs.remove(workdir)
+			return {
+				ok: false,
+				detail: `${program} timed out after ${UPDATE_TIMEOUT_SEC}s — left for the next run`,
+			}
+		}
+		// 127 IS NOT A LOCKFILE PROBLEM. It means the ecosystem's tool is not
+		// installed on the host running the worker — `composer`, `cargo`, `bundle`.
+		// Saying "composer exited 127" sends the reader to the repo when the fix is
+		// an install on the worker box, so it is named as what it is.
+		if (updated.code === 127 || /ENOENT/.test(why)) {
+			workdirs.remove(workdir)
+			return {
+				ok: false,
+				detail: `${program} is not installed on this host — the ${plan.ecosystem} fix needs that tool`,
+			}
+		}
+		// One retry, only for the peer-conflict flag. Anything else is the repo's
+		// own problem and retrying it just doubles the run time.
+		if (command.fallback && /ERESOLVE|peer dep/i.test(why)) {
+			const [fprogram, ...fargs] = command.fallback
+			updated = exec([fprogram ?? "", ...fargs], cwd, UPDATE_TIMEOUT_SEC)
+			usedFallback = updated.code === 0
+			if (!usedFallback) {
+				workdirs.remove(workdir)
+				const failWhy = reportable((updated.stderr || updated.stdout || "").trim())
+				return {
+					ok: false,
+					detail: `${fprogram} exited ${updated.code} (with --legacy-peer-deps): ${head(failWhy, 300)}`,
+				}
+			}
+		} else {
+			workdirs.remove(workdir)
+			const failWhy = reportable((updated.stderr || updated.stdout || "").trim())
+			return { ok: false, detail: `${program} exited ${updated.code}: ${head(failWhy, 300)}` }
+		}
 	}
 
 	// A FIX WITH NO DIFF IS NOT A FIX. The update command can exit 0 and change
@@ -451,7 +521,7 @@ async function applyPlan(
 			title: `fix(deps): bump ${plan.packageName} to ${plan.patchedVersion} (security)`,
 			head: branch,
 			base: opts.defaultBranch,
-			body: buildVulnPrBody(plan),
+			body: buildVulnPrBody(plan, { legacyPeerDeps: usedFallback }),
 		},
 	})
 	workdirs.remove(workdir)

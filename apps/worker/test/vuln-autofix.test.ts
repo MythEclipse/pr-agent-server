@@ -211,6 +211,16 @@ describe("fixCommandFor", () => {
 				"--no-fund",
 				"lodash@4.17.21",
 			],
+			fallback: [
+				"npm",
+				"install",
+				"--package-lock-only",
+				"--ignore-scripts",
+				"--no-audit",
+				"--no-fund",
+				"lodash@4.17.21",
+				"--legacy-peer-deps",
+			],
 		})
 		expect(fixCommandFor(plan("pnpm-lock.yaml"))).toEqual({
 			argv: ["pnpm", "update", "lodash@4.17.21", "--lockfile-only", "--ignore-scripts"],
@@ -301,6 +311,8 @@ function harness(opts: {
 	pushOk?: boolean
 	prStatus?: number
 	defaultBranch?: string
+	/** Queued results for successive `exec` calls; the last one repeats. */
+	execResults?: GitResult[]
 }) {
 	const requests: Recorded[] = []
 	const gitCalls: string[][] = []
@@ -340,6 +352,9 @@ function harness(opts: {
 	}
 	const exec = (args: string[]): GitResult => {
 		execCalls.push(args)
+		const queued = opts.execResults
+		if (queued?.length)
+			return queued.length > 1 ? (queued.shift() as GitResult) : (queued[0] as GitResult)
 		return { code: 0, stdout: "", stderr: "" }
 	}
 	const lines: string[] = []
@@ -458,6 +473,60 @@ describe("runVulnAutofix", () => {
 
 		expect(summary.opened).toBe(2)
 		expect(h.lines.join("\n")).toContain("left for the next run")
+	})
+
+	it("an npm peer conflict is retried once with --legacy-peer-deps", async () => {
+		// MEASURED: BotWa's `axios` bump dies with `ERESOLVE could not resolve …
+		// baileys@6.17.16 … jimp@1.6.1` — a pre-existing peer conflict between two
+		// packages unrelated to the advisory. Without the retry, 88 fixable alerts
+		// on that repo stay unfixable.
+		const h = harness({
+			alerts: [alert({ number: 1 })],
+			execResults: [
+				{ code: 1, stdout: "", stderr: "npm error code ERESOLVE\nnpm error could not resolve" },
+				{ code: 0, stdout: "", stderr: "" },
+			],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(1)
+		expect(h.execCalls[1]).toContain("--legacy-peer-deps")
+		const pr = h.requests.find((r) => r.method === "POST")
+		// The reviewer is told the resolution needed a flag, and CI still has to
+		// install it — that is the safety net, not this code.
+		expect(JSON.stringify(pr?.json)).toContain("legacy-peer-deps")
+	})
+
+	it("a missing tool is reported as a HOST problem, not a lockfile one", async () => {
+		// `composer` is not installed on every host that runs the worker. "composer
+		// exited 127" sends the reader to the repo; the fix is an install here.
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "composer", name: "phpunit/phpunit" },
+						manifest_path: "composer.lock",
+					},
+				}),
+			],
+			execResults: [{ code: 127, stdout: "", stderr: "Error: spawnSync composer ENOENT" }],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.failed).toBe(1)
+		expect(h.lines.join("\n")).toContain("not installed on this host")
+	})
+
+	it("a timeout is reported as a budget, not as a broken tool", async () => {
+		const h = harness({
+			alerts: [alert({ number: 1 })],
+			execResults: [{ code: 124, stdout: "", stderr: "timeout after 900s" }],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.failed).toBe(1)
+		expect(h.lines.join("\n")).toContain("timed out after 900s")
 	})
 
 	it("a failed push is a failure, and no PR is attempted", async () => {
