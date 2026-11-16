@@ -1,3 +1,10 @@
+## [1.11.11](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.10...v1.11.11) (2026-11-16)
+
+
+### Bug Fixes
+
+* **ci:** push the release commit before semantic-release pushes its tag ([c993f69](https://github.com/MythEclipse/pr-agent-server/commit/c993f6986d093b2b61f62955b85a37b3bf7e98a2))
+
 ## [1.11.10](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.9...v1.11.10) (2026-11-16)
 
 
