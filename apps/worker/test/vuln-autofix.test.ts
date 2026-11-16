@@ -404,10 +404,11 @@ describe("runVulnAutofix", () => {
 		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
 
 		expect(summary.opened).toBe(0)
-		expect(summary.failed).toBe(1)
+		expect(summary.failed).toBe(0)
+		expect(summary.manual).toBe(1)
 		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
 		expect(h.requests.some((r) => r.method === "POST")).toBe(false)
-		expect(h.lines.join("\n")).toContain("no change")
+		expect(h.lines.join("\n")).toContain("resolved nothing")
 	})
 
 	it("a package that already has an open PR is skipped, not re-cloned", async () => {
@@ -495,6 +496,28 @@ describe("runVulnAutofix", () => {
 		// The reviewer is told the resolution needed a flag, and CI still has to
 		// install it — that is the safety net, not this code.
 		expect(JSON.stringify(pr?.json)).toContain("legacy-peer-deps")
+	})
+
+	it("a pnpm transitive dependency is MANUAL, not a retried failure", async () => {
+		// MEASURED on Pemrograman-web-1's `minimatch`: pnpm refuses to pin a
+		// version for a transitive dependency, and there is no lockfile-scoped way
+		// around it. Reported as a human decision, not as a broken run.
+		const h = harness({
+			alerts: [alert({ number: 1 })],
+			execResults: [
+				{
+					code: 1,
+					stdout: "",
+					stderr:
+						'ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP  "minimatch" (requested "11.0.1") is not a direct dependency',
+				},
+			],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.manual).toBe(1)
+		expect(summary.failed).toBe(0)
+		expect(h.lines.join("\n")).toContain("TRANSITIVE dependency")
 	})
 
 	it("a missing tool is reported as a HOST problem, not a lockfile one", async () => {

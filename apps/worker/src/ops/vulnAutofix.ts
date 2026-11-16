@@ -407,7 +407,7 @@ async function applyPlan(
 	deps: VulnAutofixDeps,
 	plan: VulnFixPlan,
 	opts: { token: string; defaultBranch: string },
-): Promise<{ ok: boolean; prUrl?: string; detail: string }> {
+): Promise<{ ok: boolean; prUrl?: string; detail: string; manual?: boolean }> {
 	const { run, exec, workdirs, api } = deps
 	const branch = vulnBranchName(plan)
 	// `_vuln_` INFIX: the lockfix/autofix clones under TMP_BASE are swept by
@@ -464,6 +464,21 @@ async function applyPlan(
 				detail: `${program} is not installed on this host — the ${plan.ecosystem} fix needs that tool`,
 			}
 		}
+		// PNPM WILL NOT PIN A TRANSITIVE DEPENDENCY, and says so:
+		// `ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP — "<pkg>" (requested "X") is not a
+		// direct dependency`. Measured on Pemrograman-web-1's `minimatch`. There is
+		// no lockfile-scoped way around it (`pnpm.overrides` would have to stay in
+		// package.json for CI's `--frozen-lockfile` to accept the result, which
+		// changes the repo's contract), so this is reported as MANUAL with the
+		// reason instead of being retried into the same wall.
+		if (/ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP/.test(why)) {
+			workdirs.remove(workdir)
+			return {
+				ok: false,
+				manual: true,
+				detail: `${plan.packageName} is a TRANSITIVE dependency — pnpm will not pin a version for it (needs a pnpm.overrides entry, which is a human's call)`,
+			}
+		}
 		// One retry, only for the peer-conflict flag. Anything else is the repo's
 		// own problem and retrying it just doubles the run time.
 		if (command.fallback && /ERESOLVE|peer dep/i.test(why)) {
@@ -493,7 +508,14 @@ async function applyPlan(
 	const status = run(["status", "--porcelain"], workdir, 60)
 	if (status.code !== 0 || status.stdout.trim() === "") {
 		workdirs.remove(workdir)
-		return { ok: false, detail: `update produced no change (${program} exited 0)` }
+		// `pnpm` exits 0 having resolved nothing when the package is transitive and
+		// the parent's range already pins the version it keeps — measured on GMW's
+		// `esbuild`. Naming both possibilities saves the reader a re-run.
+		return {
+			ok: false,
+			manual: true,
+			detail: `the package manager resolved nothing (${program} exited 0): already at the patched version, or pinned by a parent's range`,
+		}
 	}
 
 	const message = `fix(deps): bump ${plan.packageName} to ${plan.patchedVersion} for ${plan.ghsaIds.join(", ") || "security advisory"}`
@@ -630,6 +652,14 @@ export async function runVulnAutofix(
 				perRepo.opened += 1
 				say(
 					`   ✅ ${repo}: ${plan.packageName} -> ${plan.patchedVersion} (${plan.alertNumbers.length} alert(s)) ${res.prUrl ?? res.detail}`,
+				)
+			} else if (res.manual) {
+				// NOT a failure: the tooling answered "a human has to decide". Counting
+				// it as a failure would make a healthy nightly run look broken and
+				// teach the reader to ignore the number.
+				summary.manual += 1
+				say(
+					`   ℹ️  ${repo}: ${plan.packageName} -> ${plan.patchedVersion} needs a human — ${res.detail}`,
 				)
 			} else {
 				summary.failed += 1
