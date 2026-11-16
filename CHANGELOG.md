@@ -1,3 +1,10 @@
+## [1.12.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.5...v1.12.6) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker:** the peer-conflict retry must keep the override route ([353bb5f](https://github.com/MythEclipse/pr-agent-server/commit/353bb5fbb510f885f7f506fe2a47c5e6bc025f72))
+
 ## [1.12.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.4...v1.12.5) (2026-11-16)
 
 
