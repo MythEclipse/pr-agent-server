@@ -95,9 +95,11 @@ async function dependabotCiStatus(deps: WorkerDeps, c: Ctx): Promise<DependabotC
  * reaches `deps.report` by the time this returns — the Python's BUFFER
  * discipline — and the four booleans say which counters that PR moved.
  *
- * `already` is read ONCE (1940) and threaded to both resolve sites: the Python
- * reuses that one local, so a fix already recorded must not buy a second agent
- * run at this SHA.
+ * `already` is read ONCE (1940) and threaded to `stepAiFix` only. It is
+ * deliberately NOT passed to the conflict resolver any more: `already` records
+ * the AI-FIX phase, and a clean-tree no-op there says nothing about whether the
+ * branch still conflicts. Using it as the resolver's gate is what deadlocked
+ * MythEclipse/BotWa#29 and #27 — see `resolveConflict`.
  */
 export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResult> {
 	const { token, repo, pr } = open
@@ -140,7 +142,7 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 			`   🤖 Dependabot CI green (${dependabotStatus.message}) — merging without AI review`,
 		)
 		c.score = "N/A"
-		c.out.merged = await stepMerge(deps, c, true)
+		c.out.merged = await stepMerge(deps, c)
 		if (!c.out.merged) c.out.skipped = true
 		return c.out
 	}
@@ -176,11 +178,11 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 	// the Python treats that as "not a conflict" (line 2066).
 	if (c.mergeable === false) {
 		deps.report.push("   🔴 Merge conflicts")
-		await resolveConflict(deps, c, already, "   🔄 Head SHA updated (conflict fix pushed)", true)
+		await resolveConflict(deps, c, "   🔄 Head SHA updated (conflict fix pushed)", true)
 		c.out.skipped = true
 		return c.out
 	}
-	c.out.merged = await stepMerge(deps, c, already)
+	c.out.merged = await stepMerge(deps, c)
 	// Python: every non-merged arm falls into skipped_count.
 	if (!c.out.merged) c.out.skipped = true
 	return c.out

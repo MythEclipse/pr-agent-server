@@ -7,6 +7,8 @@ import {
 	alreadyFixed,
 	attemptCount,
 	bumpAttempt,
+	bumpConflictRun,
+	conflictRunCount,
 	type FixState,
 	getSkipReason,
 	loadFixState,
@@ -18,6 +20,60 @@ import {
 	rebaseStepAt,
 	wasSkipNotified,
 } from "../src/state.ts"
+
+// ── The conflict tally — the BotWa#29/#27 deadlock ──────────────────────────
+//
+// A conflict run that pushes nothing must never be recorded as a FIX. It used
+// to be: `runAiFix` returns `ok: true` for a clean tree, the resolver read that
+// as "resolved", and `markFixed` pinned the head. Since a no-op run moves no
+// head, `alreadyFixed` then answered TRUE forever and the agent was never
+// offered again. These tests pin the replacement: a separate tally keyed on its
+// own sha, so a failure can never masquerade as a success.
+describe("conflict tally — a no-push run is counted, never claimed as a fix", () => {
+	const REPO = "MythEclipse/BotWa"
+	const PR = 29
+	const SHA = "ba83a599c79e7f7f3bf1937879c2d5a541a8474c"
+
+	test("counts no-push runs at one head", () => {
+		const s = {}
+		expect(conflictRunCount(s, REPO, PR, SHA)).toBe(0)
+		expect(bumpConflictRun(s, REPO, PR, SHA)).toBe(1)
+		expect(bumpConflictRun(s, REPO, PR, SHA)).toBe(2)
+		expect(conflictRunCount(s, REPO, PR, SHA)).toBe(2)
+	})
+
+	test("it does NOT set `sha`, so `alreadyFixed` stays false", () => {
+		// THE WHOLE BUG IN ONE ASSERTION. If this ever becomes true, the agent is
+		// locked out of a head that no no-op run can move — the BotWa deadlock.
+		const s = {}
+		bumpConflictRun(s, REPO, PR, SHA)
+		expect(alreadyFixed(s, REPO, PR, SHA)).toBe(false)
+		expect(prEntry(s, REPO, PR).sha).toBeUndefined()
+	})
+
+	test("a new head resets the tally", () => {
+		const s = {}
+		bumpConflictRun(s, REPO, PR, SHA)
+		bumpConflictRun(s, REPO, PR, SHA)
+		expect(bumpConflictRun(s, REPO, PR, "bbbb2222")).toBe(1)
+		expect(conflictRunCount(s, REPO, PR, SHA)).toBe(0)
+		expect(conflictRunCount(s, REPO, PR, "bbbb2222")).toBe(1)
+	})
+
+	test("a landed fix clears it, so a later conflict starts fresh", () => {
+		const s = {}
+		bumpConflictRun(s, REPO, PR, SHA)
+		markFixed(s, REPO, PR, "cccc3333", 2)
+		expect(conflictRunCount(s, REPO, PR, "cccc3333")).toBe(0)
+	})
+
+	test("a skip clears it too", () => {
+		const s = {}
+		bumpConflictRun(s, REPO, PR, SHA)
+		markSkip(s, REPO, PR, SHA, "gone: merge returned 404 (Not Found)")
+		expect(conflictRunCount(s, REPO, PR, SHA)).toBe(0)
+	})
+})
 
 describe("attempt tally — a diagnostic, never a deadline", () => {
 	const REPO = "asepharyana/GMW"

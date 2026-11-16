@@ -125,6 +125,39 @@ export interface PrEntry {
 	 */
 	rebase_requested_sha?: string
 	rebase_step?: string
+	/**
+	 * Conflict-resolution runs at `conflict_sha` that ended WITHOUT pushing a
+	 * commit — i.e. runs that resolved nothing.
+	 *
+	 * WHY THIS TALLY EXISTS AT ALL. The resolver's success arm used to fire on
+	 * `ok` alone, and `runAiFix` returns `ok: true` for a CLEAN TREE — the agent
+	 * ran, found nothing to change, and pushed nothing. That is the honest answer
+	 * for a quality pass and a NON-answer for a conflict: the branch is exactly
+	 * as dirty as it was. Recording it as `markFixed` pinned the head SHA, and
+	 * because nothing about a no-op run moves a head, every later tick printed
+	 *
+	 *   ⏭️  Already fixed at this SHA — skip AI fix
+	 *   🔴 Merge conflicts (mergeable_state: dirty) — resolving before approving
+	 *   ⏭️  Skipping (conflict, already attempted at this SHA)
+	 *
+	 * forever. Measured on MythEclipse/BotWa#29 and #27 (2026-11-16): both had
+	 * `fix_commits: 0` recorded at their live head, so `already` was true at a
+	 * SHA that could never change, and the resolver's `!already` gate meant the
+	 * agent was never asked again. The report claimed "already attempted" about a
+	 * run that had in fact attempted nothing.
+	 *
+	 * SO THE NO-PUSH RUN IS COUNTED HERE INSTEAD OF CLAIMED AS A FIX. It has a
+	 * ceiling (a run is up to `AI_FIX_TIMEOUT`) and, past the ceiling, the
+	 * resolver escalates to a human rather than pinning — see
+	 * `CONFLICT_ATTEMPT_CEILING`.
+	 *
+	 * Keyed on its own `conflict_sha`, never on `sha`, for the same reason as
+	 * `attempt_sha`: `sha` is what `alreadyFixed` reads as "fixed here", so
+	 * writing a tally into it is how a failure gets mistaken for a success.
+	 */
+	conflict_runs?: number
+	/** The head the `conflict_runs` tally belongs to — separate from `sha`. */
+	conflict_sha?: string
 	[key: string]: unknown
 }
 
@@ -209,6 +242,44 @@ export function budgetRunCount(
 	const entry = prEntry(state, repo, pr)
 	if (entry.budget_sha !== headSha) return 0
 	const n = Number(entry.budget_runs ?? 0)
+	return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * Record a conflict-resolution run at `headSha` that pushed NOTHING, and return
+ * the running count.
+ *
+ * This is the counterweight to the resolver's old success arm, which treated a
+ * clean-tree `ok: true` as "resolved" and called `markFixed`. See the
+ * `conflict_runs` field for the live loop that produced.
+ *
+ * Idempotent per SHA in the same way as `bumpAttempt`: a different head resets
+ * to 1, because the previous head's failures say nothing about this one.
+ */
+export function bumpConflictRun(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): number {
+	const entry = prEntry(state, repo, pr)
+	const prior = entry.conflict_sha === headSha ? Number(entry.conflict_runs ?? 0) : 0
+	const next = (Number.isFinite(prior) ? prior : 0) + 1
+	entry.conflict_sha = headSha
+	entry.conflict_runs = next
+	return next
+}
+
+/** How many no-push conflict runs this head has already paid for. */
+export function conflictRunCount(
+	state: FixState,
+	repo: string,
+	pr: number | string,
+	headSha: string,
+): number {
+	const entry = prEntry(state, repo, pr)
+	if (entry.conflict_sha !== headSha) return 0
+	const n = Number(entry.conflict_runs ?? 0)
 	return Number.isFinite(n) ? n : 0
 }
 
@@ -454,6 +525,11 @@ export function markFixed(
 	// the last one in a spent budget.
 	delete entry.budget_runs
 	delete entry.budget_sha
+	// A landed fix also answers the conflict question at this head, so the
+	// no-push conflict tally goes too. Leaving it would let a LATER conflict on
+	// a fresh head inherit a spent ceiling.
+	delete entry.conflict_runs
+	delete entry.conflict_sha
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }
@@ -486,6 +562,8 @@ export function markSkip(
 	// failure would escalate straight back to a pin with no fresh attempts.
 	delete entry.attempts
 	delete entry.attempt_sha
+	delete entry.conflict_runs
+	delete entry.conflict_sha
 	if (file !== undefined) saveFixState(file, state)
 	return entry
 }

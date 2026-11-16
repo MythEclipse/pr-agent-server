@@ -81,6 +81,41 @@ export const AI_FIX_RETRY_CEILING = 3
  * budget was spent, so the operator can see why the agent stopped.
  */
 export const AI_FIX_BUDGET_CEILING = 3
+
+/**
+ * How many conflict-resolution runs at ONE head SHA may end WITHOUT pushing a
+ * commit before the resolver stops spending the agent and escalates.
+ *
+ * A FOURTH bound, and it exists because the other three all miss this case:
+ *
+ *   - `AI_FIX_BUDGET_CEILING` counts runs that exhausted their own allowance.
+ *     A conflict run that finishes and pushes nothing did not exhaust anything.
+ *   - `AI_FIX_RETRY_CEILING` bounds re-offers after a no-commit fix, but it is
+ *     never reached from the resolver.
+ *   - `attempts` has no ceiling at all, by design.
+ *
+ * THE BUG THIS BOUNDS. `runAiFix` returns `ok: true` for a CLEAN TREE, and the
+ * resolver read `ok` alone as "the conflict is resolved". So a run that resolved
+ * nothing was recorded with `markFixed` at the head it started from — pinning a
+ * SHA that no no-op run can ever move. Measured on MythEclipse/BotWa#29 and #27
+ * (2026-11-16), both stuck on:
+ *
+ *   ⏭️  Already fixed at this SHA — skip AI fix
+ *   🔴 Merge conflicts (mergeable_state: dirty) — resolving before approving
+ *   ⏭️  Skipping (conflict, already attempted at this SHA)
+ *
+ * The state file said `fix_commits: 0` — the resolver had never once attempted
+ * a resolution, yet the report claimed it had already been attempted.
+ *
+ * WHY A CEILING AND NOT A PIN. The remedy must not be the bug: a `skip_reason`
+ * is enforced "until head SHA changes", which is the permanent stall being
+ * fixed. Past this ceiling the resolver reports that the conflict needs a human
+ * and leaves the PR open and counted, so a base-branch fix or a maintainer push
+ * still releases it. Two runs is the budget because a conflict is deterministic:
+ * if the same tree and the same base did not resolve twice, a third identical
+ * run will not either.
+ */
+export const CONFLICT_ATTEMPT_CEILING = 2
 /** Python line 1866, `pr.get("title", "untitled")[:60]`. */
 const TITLE_CAP = 60
 /** Python line 2051, the `86400` in the dependabot age arithmetic. */

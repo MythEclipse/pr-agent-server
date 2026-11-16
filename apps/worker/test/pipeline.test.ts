@@ -214,6 +214,15 @@ type Options = {
 	pushedSha?: string
 	/** `POST /repos/:r/issues/:n/comments` reply — the rebase request's write. */
 	commentPost?: Route
+	/**
+	 * What `git rev-list --count` reports after the agent ran — i.e. how many
+	 * commits the agent actually produced. Defaults to 1 ("it committed").
+	 *
+	 * Set it to 0 to model the CLEAN-TREE case: `runAiFix` returns `ok: true`
+	 * with `commits: 0`, which is the shape that used to be recorded as a
+	 * successful conflict resolution and pinned the head SHA.
+	 */
+	agentCommits?: number
 	/** `--dry`: start the deps in dry mode, so the effects are suppressed. */
 	dry?: boolean
 	/** Model a host with no owner PAT: `fetchGhToken()` answers `""`. */
@@ -334,7 +343,7 @@ function harness(opts: Options = {}): Harness {
 			case "diff":
 				return { code: 0, stdout: "src/parser.ts\n", stderr: "" }
 			case "rev-list":
-				return { code: 0, stdout: "1\n", stderr: "" }
+				return { code: 0, stdout: `${opts.agentCommits ?? 1}\n`, stderr: "" }
 			case "rev-parse":
 				// The pushed tip `runAiFix` reads back after a successful push.
 				return { code: 0, stdout: opts.pushedSha ? `${opts.pushedSha}\n` : "", stderr: "" }
@@ -1541,6 +1550,262 @@ describe("a conflicted Dependabot bump requests a rebase instead of the agent", 
 		expect(commentsPosted(h.calls)).toHaveLength(0)
 		expect(h.agentPosts).toHaveLength(1)
 		expect(h.lines).toContain("   🤖 Resolving merge conflict with Claude Code...")
+	})
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE CLEAN-TREE CONFLICT DEADLOCK — MythEclipse/BotWa#29 and #27, 2026-11-16
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The report, verbatim, on EVERY tick:
+//
+//   ⏭️  Already fixed at this SHA — skip AI fix
+//   🔴 Merge conflicts (mergeable_state: dirty) — resolving before approving
+//   ⏭️  Skipping (conflict, already attempted at this SHA)
+//
+// THE CAUSE. `runAiFix` returns `ok: true` for a CLEAN TREE — the agent ran,
+// found nothing to change, and pushed nothing. The resolver tested `ok` alone,
+// called it "Conflict resolved", and recorded `markFixed` at the head the agent
+// STARTED from. Since a no-op run moves no head, the record stayed valid at a
+// SHA that could never change, and `alreadyFixed` was therefore TRUE forever.
+// The resolver's gate was `AI_FIX_ENABLED && !already`, so the agent was never
+// offered again and the report claimed "already attempted" about a run that had
+// attempted nothing. Both PRs' state entries read `fix_commits: 0`.
+//
+// These tests pin BOTH halves of the fix: a no-push run must not be claimed as
+// a resolution, and the loop it caused must terminate.
+describe("a conflict run that pushes nothing is not a resolution", () => {
+	/** A conflicted PR whose agent run ends with a clean tree (`commits: 0`). */
+	const cleanTree = (over: Record<string, any> = {}) => {
+		const pr = makePr({ ...LOCKFILE_BUMP, user: { login: "alice" }, mergeable: false })
+		return {
+			pr,
+			h: harness({
+				prs: [pr],
+				comments: [NO_CODE_MARKER],
+				// The clean-tree shape `runAiFix` returns for `ok: true`.
+				agent: [{ ok: true, snippet: "nothing to change" }],
+				agentCommits: 0,
+				...over,
+			}),
+		}
+	}
+
+	test("it is NOT recorded as fixed — the head must stay re-examinable", async () => {
+		const { pr, h } = cleanTree()
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		// Not a fix: nothing landed, so the `fixed` counter must not move.
+		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
+		expect(merges(h.calls)).toBe(0)
+		// THE PIN. `markFixed` would write `sha`, which is what `alreadyFixed`
+		// reads as "done at this head" — the exact record that deadlocked BotWa.
+		expect(h.fixState[REPO][String(PR_NUM)].sha).toBeUndefined()
+		// The run is COUNTED instead, keyed on its own field.
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_runs).toBe(1)
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_sha).toBe(HEAD)
+		// And the report says what happened rather than claiming a resolution.
+		// The summary is `runAiFix`'s own wording for the clean-tree arm.
+		expect(h.lines).toContain(
+			"   ⏭️  Agent pushed no conflict fix: Claude Code found nothing to improve — no changes needed (nothing to change)",
+		)
+		expect(h.lines.some((l) => l.includes("✨ Conflict resolved"))).toBe(false)
+	})
+
+	test("the dead-end line is gone — it says what is actually true", async () => {
+		const { pr, h } = cleanTree()
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		// The reported line claimed an attempt that never happened.
+		expect(h.lines).not.toContain("   ⏭️  Skipping (conflict, already attempted at this SHA)")
+		// The agent WAS asked, and the budget is reported.
+		expect(h.agentPosts).toHaveLength(1)
+		expect(h.lines).toContain("   🤖 Resolving merge conflict with Claude Code...")
+		expect(h.lines).toContain(
+			"   🔁 Conflict still unresolved (1/2 at this SHA — retrying next tick)",
+		)
+	})
+
+	// THE LOOP ITSELF. One tick is not the bug; the bug is that tick repeating
+	// forever. Two more ticks against the SAME state must reach a terminal,
+	// honest outcome instead of re-printing the same skip.
+	test("it terminates after the ceiling instead of looping forever", async () => {
+		const { pr, h } = cleanTree()
+
+		// Tick 1 — the agent is offered.
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+		expect(h.agentPosts).toHaveLength(1)
+
+		// Tick 2 — offered once more (the ceiling is 2).
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+		expect(h.agentPosts).toHaveLength(2)
+
+		// Tick 3 — the ceiling is spent, so the agent is NOT paid for again and
+		// the PR is escalated to a human instead of pinned.
+		const linesBefore = h.lines.length
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+		expect(h.agentPosts).toHaveLength(2)
+		expect(out.skipped).toBe(true)
+		expect(h.lines.slice(linesBefore)).toContain(
+			"   ⏭️  Conflict unresolved after 2 agent run(s) at this SHA — needs a human",
+		)
+
+		// NOT a skip_reason: a pin is enforced "until head SHA changes", which is
+		// the permanent stall this whole fix exists to remove. The PR must stay
+		// eligible the moment the conflict clears by any other means.
+		expect(h.fixState[REPO][String(PR_NUM)].skip_reason).toBeUndefined()
+		expect(h.fixState[REPO][String(PR_NUM)].sha).toBeUndefined()
+	})
+
+	test("a new head releases the ceiling — new work is not the old head's spend", async () => {
+		const { pr, h } = cleanTree()
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+		expect(h.agentPosts).toHaveLength(2)
+		// The ceiling is spent at HEAD.
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_sha).toBe(HEAD)
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_runs).toBe(2)
+
+		// The base moved (or a maintainer pushed): a DIFFERENT head. The state is
+		// left exactly as it was — that is the point, since the tally is keyed on
+		// its own `conflict_sha` and a moved head simply stops matching it.
+		const moved = "b".repeat(40)
+		const fresh = makePr({
+			...LOCKFILE_BUMP,
+			user: { login: "alice" },
+			mergeable: false,
+			head: { sha: moved, ref: "f" },
+		})
+		// `checkPrStillValid` re-reads the PR before offering the agent, so the
+		// route table must agree that the head really is `moved`. The original
+		// method is captured FIRST — spreading `deps.api` and calling through it
+		// would call the wrapper again and recurse.
+		const inner = h.deps.api.request.bind(h.deps.api)
+		h.deps.api = {
+			...h.deps.api,
+			async request(method: string, path: string, o: any = {}) {
+				if (/\/pulls\/\d+$/.test(path) && method === "GET") {
+					return {
+						status: 200,
+						data: {
+							state: "open",
+							merged: false,
+							head: { sha: moved, ref: "f" },
+							mergeable: false,
+							mergeable_state: "dirty",
+						},
+					}
+				}
+				return inner(method, path, o)
+			},
+		}
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: fresh })
+
+		// Offered again: the spent ceiling belonged to the OLD sha.
+		expect(h.agentPosts).toHaveLength(3)
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_sha).toBe(moved)
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_runs).toBe(1)
+	})
+
+	// THE ACTUAL PRODUCTION RECORD. Copied from `/tmp/pr-queue-fix-state.json`
+	// on the box that produced the report — BotWa#29 exactly as it was stored
+	// while the queue printed the dead-end line every five minutes.
+	//
+	// Note `sha === head` AND `fix_commits: 0`: that combination is a
+	// no-op run recorded as a completed fix, which is precisely what pinned
+	// the PR. The fix must not honour that stale record as "done" — the agent
+	// has to be offered again.
+	test("the live BotWa#29 record un-sticks instead of being honoured as done", async () => {
+		const pr = makePr({
+			...LOCKFILE_BUMP,
+			user: { login: "MythEclipse" },
+			mergeable: false,
+			head: { sha: HEAD, ref: "fix/vuln-minimatch-11.0.1" },
+		})
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			agent: [{ ok: true, snippet: "nothing to change" }],
+			agentCommits: 0,
+			pullReply: {
+				status: 200,
+				data: {
+					state: "open",
+					merged: false,
+					head: { sha: HEAD, ref: "fix/vuln-minimatch-11.0.1" },
+					mergeable: false,
+					mergeable_state: "dirty",
+				},
+			},
+			fixState: {
+				[REPO]: {
+					[String(PR_NUM)]: {
+						sha: HEAD,
+						fix_commits: 0,
+						notified: false,
+						attempt_sha: HEAD,
+						attempts: 1,
+					},
+				},
+			},
+		})
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		// The agent is offered, which is the whole point: the old code printed
+		// `⏭️ Already fixed at this SHA — skip AI fix` and stopped here.
+		expect(h.agentPosts).toHaveLength(1)
+		expect(h.lines).toContain("   🤖 Resolving merge conflict with Claude Code...")
+		expect(h.lines).not.toContain("   ⏭️  Skipping (conflict, already attempted at this SHA)")
+		expect(out.skipped).toBe(true)
+		expect(out.fixed).toBe(false)
+	})
+
+	// A PARTIAL FIX MUST NOT RESET THE CEILING. The agent can push a commit that
+	// resolves one file and leaves another in conflict — which moves the head,
+	// and the tally is keyed on the head. Without charging the new head, that
+	// shape buys a fresh ceiling on every push: one 30-minute run per head,
+	// forever. This is the same class of bug as the one being fixed, one layer
+	// down, so it gets its own test.
+	test("a push that leaves the branch conflicting charges the NEW head", async () => {
+		const pushed = "d".repeat(40)
+		const pr = makePr({ ...LOCKFILE_BUMP, user: { login: "alice" }, mergeable: false })
+		const h = harness({
+			prs: [pr],
+			comments: [NO_CODE_MARKER],
+			agent: [{ ok: true, snippet: "resolved one file" }],
+			agentCommits: 1,
+			pushedSha: pushed,
+			// The pre-flight read (head unchanged), then the post-push re-fetch
+			// that reports the new head STILL dirty.
+			pullReplySeq: [
+				{
+					status: 200,
+					data: { state: "open", merged: false, head: { sha: HEAD }, mergeable: false },
+				},
+				{
+					status: 200,
+					data: {
+						state: "open",
+						merged: false,
+						head: { sha: pushed, ref: "f" },
+						mergeable: false,
+						mergeable_state: "dirty",
+					},
+				},
+			],
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr })
+
+		expect(h.lines).toContain(
+			"   ⚠️  Branch still conflicts after the push — the next tick re-examines it",
+		)
+		// Charged against the head the push CREATED, not the one it started from.
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_sha).toBe(pushed)
+		expect(h.fixState[REPO][String(PR_NUM)].conflict_runs).toBe(1)
 	})
 })
 

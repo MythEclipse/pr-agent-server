@@ -8,6 +8,10 @@
  * parameters. It is exported because its two call sites are in different files:
  * `stepMerge` below, and `processPr` in `./pipeline`.
  *
+ * NOTE: the resolver no longer takes an `already` argument. The Python's
+ * `!already` gate conflated "the AI fix already ran here" with "this conflict
+ * was already attempted", which deadlocked the queue — see `resolveConflict`.
+ *
  * `stepSafetyAndCi` and `stepMerge` are here because every one of their arms
  * ENDS the PR's turn — the safety block's `score` is carried out through `Ctx`
  * and the two dry-run arms are the ones that report what they would have done.
@@ -15,9 +19,10 @@
  */
 
 import {
-	alreadyFixed,
 	bumpAttempt,
 	bumpBudgetRun,
+	bumpConflictRun,
+	conflictRunCount,
 	markFixed,
 	markRebaseStep,
 	markSkip,
@@ -29,6 +34,7 @@ import {
 	AI_FIX_BUDGET_CEILING,
 	AI_FIX_ENABLED,
 	ageDays,
+	CONFLICT_ATTEMPT_CEILING,
 	type Ctx,
 	isBudgetExhaustion,
 	isInfra,
@@ -65,17 +71,40 @@ import { analyzeReviewSafety } from "./safety.ts"
  *
  * Always ends the PR's turn — success, failure and give-up all `continue` — so
  * it returns nothing and the caller counts the outcomes.
+ *
+ * THE `already` PARAMETER IS GONE, AND THAT IS THE FIX. It used to gate the
+ * agent on `!already`, where `already` is `alreadyFixed(...)` — "a fix was
+ * recorded at this head". That is a statement about the AI-FIX phase, not about
+ * a conflict, and conflating the two deadlocked the queue:
+ *
+ *   - `runAiFix` returns `ok: true` for a CLEAN TREE (it ran, found nothing,
+ *     pushed nothing). The resolver read `ok` as "conflict resolved" and called
+ *     `markFixed` — pinning the head it started from, which no no-op run can
+ *     ever move.
+ *   - On the next tick `already` was therefore TRUE at a SHA that could never
+ *     change, so `!already` was false, the agent was never offered, and the
+ *     resolver printed "already attempted at this SHA" about a run that had
+ *     attempted nothing. Forever.
+ *
+ * Measured on MythEclipse/BotWa#29 and #27 (2026-11-16), both carrying
+ * `fix_commits: 0` in the state file at their live head.
+ *
+ * The gate is now `conflictRunCount < CONFLICT_ATTEMPT_CEILING`, which counts
+ * the thing it claims to count: no-push conflict runs at this SHA. A head that
+ * MOVES resets it, because a moved head is new work.
  */
 export async function resolveConflict(
 	deps: WorkerDeps,
 	c: Ctx,
-	already: boolean,
 	onFixed: string,
 	recheck: boolean,
 ): Promise<void> {
-	const giveUp = recheck
-		? "   ⏭️  Skipping (conflict, already attempted at this SHA)"
-		: "   ⏭️  Skipping (409 conflict, already attempted)"
+	// The only way to reach the end of this function is `AI_FIX_ENABLED === false`,
+	// because every other arm returns. It is deliberately NOT worded as "already
+	// attempted": nothing was attempted, and that false claim is what made the
+	// BotWa#29/#27 report unreadable for days.
+	const giveUp =
+		"   ⏭️  Conflict resolution is disabled (AI_FIX_ENABLED=false) — leaving this to a human"
 
 	// ── DEPENDABOT FIRST: ask Dependabot to rebase, do NOT spend the agent ───
 	//
@@ -183,7 +212,25 @@ export async function resolveConflict(
 		return
 	}
 
-	if (AI_FIX_ENABLED && !already) {
+	// THE CEILING, READ BEFORE THE AGENT IS OFFERED. `conflictRunCount` counts
+	// no-push conflict runs at THIS head, which is the only quantity that says
+	// whether re-asking is new information. It is deliberately not `alreadyFixed`:
+	// that records the AI-FIX phase, and a clean-tree no-op there says nothing
+	// about whether the branch still conflicts. See the doc comment above.
+	const conflictRuns = conflictRunCount(c.fixState, c.repo, c.prNum, c.headSha)
+	if (conflictRuns >= CONFLICT_ATTEMPT_CEILING) {
+		// NOT a `skip_reason`. A pin is enforced "until head SHA changes", and the
+		// whole point of this arm is that a deterministic conflict may need a
+		// human — while a base-branch fix or a maintainer push must still release
+		// it. So the PR stays open, stays counted, and stays mergeable the moment
+		// the conflict clears by any other means.
+		deps.report.push(
+			`   ⏭️  Conflict unresolved after ${conflictRuns} agent run(s) at this SHA — needs a human`,
+		)
+		return
+	}
+
+	if (AI_FIX_ENABLED) {
 		if (deps.dry) {
 			deps.report.push("   🧪 dry run: would ask the agent to resolve the merge conflict")
 			return
@@ -192,7 +239,7 @@ export async function resolveConflict(
 		if (valid) {
 			deps.report.push("   🤖 Resolving merge conflict with Claude Code...")
 			killOrphanedAgent(deps.procs, c.repo, c.prNum)
-			const { ok, summary, tipSha } = await runAiFix(
+			const { ok, summary, tipSha, commits } = await runAiFix(
 				subDeps(deps),
 				c.repo,
 				c.prNum,
@@ -202,21 +249,64 @@ export async function resolveConflict(
 				c.baseRef,
 				c.token,
 			)
-			if (ok) {
+			// A CONFLICT IS ONLY RESOLVED BY A PUSH. `ok` alone is not enough:
+			// `runAiFix` returns `ok: true` for a clean tree — the agent ran and
+			// changed nothing — which for a quality pass is a fine answer and for
+			// a conflict is no answer at all. Treating it as success is what
+			// pinned BotWa#29 and #27 at a head no no-op run could move.
+			if (ok && commits > 0) {
 				deps.report.push(`   ✨ Conflict resolved: ${summary}`)
 				// The pushed tip, not the pre-push head — the same rule as
 				// `stepAiFix`, and for the same reason: a record naming the head the
 				// agent started from is invalidated by the resolve's own push, and
 				// the next tick then offers the agent the branch all over again.
-				markFixed(c.fixState, c.repo, c.prNum, tipSha || c.headSha)
+				markFixed(c.fixState, c.repo, c.prNum, tipSha || c.headSha, commits)
 				persist(deps, c.fixState)
 				c.out.fixed = true
 				if (recheck) {
-					const sha = movedSha(await refetchHead(deps, c), c.headSha)
+					const fresh = await refetchHead(deps, c)
+					const sha = movedSha(fresh, c.headSha)
 					if (sha) deps.report.push(onFixed)
+					// VERIFY THE CLAIM BEFORE MAKING IT. A push is evidence the agent
+					// CHANGED something, not that the branch now merges — it can
+					// resolve one file and leave another in conflict. `mergeable` is
+					// `null` while GitHub recomputes, which is why only a definitive
+					// `false` is reported; anything else is left to the next tick's
+					// mergeable gate, which is where that question belongs.
+					if (fresh?.mergeable === false) {
+						deps.report.push(
+							"   ⚠️  Branch still conflicts after the push — the next tick re-examines it",
+						)
+						// CHARGE THE NEW HEAD. The ceiling is keyed on `conflict_sha`,
+						// so the agent's own push would otherwise RESET it — and a run
+						// that keeps pushing partial fixes while leaving the branch
+						// unmergeable would then loop forever, one 30-minute run per
+						// head. Recording the run against the head the push created
+						// makes the ceiling survive the push it caused, which is the
+						// only way it bounds this shape. Not a pin: the count still
+						// clears when a human pushes, when the base moves, or when the
+						// conflict finally clears.
+						bumpConflictRun(c.fixState, c.repo, c.prNum, sha ?? c.headSha)
+						persist(deps, c.fixState)
+					}
 				} else {
 					deps.report.push(onFixed)
 				}
+				return
+			}
+			if (ok) {
+				// Ran, pushed nothing. Counted against the ceiling rather than
+				// claimed as a fix, so the next tick either asks again (budget
+				// remains) or escalates to a human (budget spent).
+				const runs = bumpConflictRun(c.fixState, c.repo, c.prNum, c.headSha)
+				persist(deps, c.fixState)
+				deps.report.push(`   ⏭️  Agent pushed no conflict fix: ${summary}`)
+				const left = CONFLICT_ATTEMPT_CEILING - runs
+				deps.report.push(
+					left > 0
+						? `   🔁 Conflict still unresolved (${runs}/${CONFLICT_ATTEMPT_CEILING} at this SHA — retrying next tick)`
+						: `   ⏭️  Conflict still unresolved after ${runs} run(s) — needs a human, not another identical run`,
+				)
 				return
 			}
 			deps.report.push(`   ⏭️  Conflict fix failed: ${summary}`)
@@ -247,6 +337,12 @@ export async function resolveConflict(
 			await reportSkipNotice(deps, c, why)
 			return
 		}
+		// The PR moved (or was closed) between the scan and this point, so the
+		// head this decision was made against no longer exists. Say that rather
+		// than claiming an attempt that never ran — the next tick starts from the
+		// real head and asks the agent there.
+		deps.report.push("   ⏭️  PR changed before the conflict could be resolved — next tick retries")
+		return
 	}
 	deps.report.push(giveUp)
 }
@@ -421,13 +517,7 @@ async function mergeableGate(deps: WorkerDeps, c: Ctx): Promise<boolean> {
 		deps.report.push(
 			`   🔴 Merge conflicts${state ? ` (mergeable_state: ${state})` : ""} — resolving before approving`,
 		)
-		await resolveConflict(
-			deps,
-			c,
-			alreadyFixed(c.fixState, c.repo, c.prNum, c.headSha),
-			"   🔄 Head SHA updated (conflict fix pushed)",
-			true,
-		)
+		await resolveConflict(deps, c, "   🔄 Head SHA updated (conflict fix pushed)", true)
 		return true
 	}
 
@@ -446,7 +536,7 @@ async function mergeableGate(deps: WorkerDeps, c: Ctx): Promise<boolean> {
 }
 
 /** True when the PR merged. */
-export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Promise<boolean> {
+export async function stepMerge(deps: WorkerDeps, c: Ctx): Promise<boolean> {
 	const url = `https://github.com/${c.repo}/pull/${c.prNum}`
 
 	// BEFORE the approval, not after the merge attempt: an approval is a public,
@@ -528,7 +618,7 @@ export async function stepMerge(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 		// GitHub said mergeable and then refused — a stale `mergeable` read. Same
 		// one-attempt resolve as the 2066 gate, and equally not retried.
 		deps.report.push("   ⚠️  Merge conflict")
-		await resolveConflict(deps, c, already, "   🔄 Will re-merge next tick after CI settles", false)
+		await resolveConflict(deps, c, "   🔄 Will re-merge next tick after CI settles", false)
 		return false
 	}
 	// An outage is not a refusal: the next tick retries it, so calling this a
