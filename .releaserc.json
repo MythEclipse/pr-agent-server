@@ -46,6 +46,7 @@
 		[
 			"@semantic-release/exec",
 			{
+				"prepareCmd": "git push origin HEAD:main && sleep 8",
 				"successCmd": "echo \"version=${nextRelease.version}\" >> \"$GITHUB_OUTPUT\""
 			}
 		]

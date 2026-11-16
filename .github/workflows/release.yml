@@ -82,6 +82,26 @@ jobs:
       # published, and writes the version to GITHUB_OUTPUT. The image jobs read
       # that one value, so no second place derives a version and the two can
       # never disagree about what v1.4.2 means.
+      #
+      # THE BRANCH IS PUSHED BY `prepareCmd`, AND THE RELEASE DEPENDS ON IT.
+      #
+      # @semantic-release/git only COMMITS the changelog/package.json bump; it
+      # does not push. semantic-release then runs `git push --tags`, and the tag
+      # it just created points at a commit that exists only on the runner — so
+      # GitHub rejected the push with `! [remote rejected] v1.11.10 -> v1.11.10
+      # (missing necessary objects)` and the whole release job failed while CI
+      # and the deploy had already gone green. The exec plugin's `prepareCmd`
+      # (`git push origin HEAD:main`) runs AFTER the git plugin's commit — plugin
+      # order is step order — so the commit is on the branch by the time the tag
+      # push happens. Pushing with GITHUB_TOKEN deliberately triggers no workflow
+      # runs, which is what keeps a release commit from re-running CI on itself.
+      #
+      # The `sleep 8` covers the SECOND half of that failure. The branch push and
+      # the tag push are two back-to-back pushes, and GitHub's receive-pack can
+      # answer the second one with the same `missing necessary objects` error
+      # while the commit from the first is still being made visible — the commit
+      # was on `main` the whole time, the tag push just lost the race. A few
+      # seconds is what turns that from a failed release into a no-op push.
       - name: Run semantic-release
         id: publish
         env:
@@ -89,7 +109,12 @@ jobs:
         run: |
           set -Eeuo pipefail
           semantic-release
-          echo "release version: ${version:-<none — this push needs no release>}"
+          # Read the version back OUT of $GITHUB_OUTPUT. The old line printed
+          # `${version:-<none>}`, a shell variable nothing ever sets, so every
+          # release logged "<none — this push needs no release>" even when it had
+          # just published one.
+          published=$(grep -oP '(?<=^version=).*' "$GITHUB_OUTPUT" | tail -n 1 || true)
+          echo "release version: ${published:-<none — this push needs no release>}"
 
   prepare:
     name: Resolve images
