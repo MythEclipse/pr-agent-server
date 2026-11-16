@@ -566,7 +566,9 @@ async function applyPlan(
 			// rewrites every line of package.json — measured on BotWa, whose four-space
 			// file came back as tabs — and a reviewer cannot see the two lines that
 			// matter through a whole-file diff. The indent is read from the file.
-			const indent = /\n([ 	]+)"/.exec(raw)?.[1] ?? "	"
+			// `[^\S\n]` is "whitespace except a newline" — the same class without a
+			// literal control character, which the linter rejects in a regex.
+			const indent = /\n([^\S\n]+)"/.exec(raw)?.[1] ?? "	"
 			workdirs.writeFile(pkgPath, `${JSON.stringify(manifest, null, indent)}\n`)
 			overrideWritten = true
 			// The override drives resolution, so the command takes no package argument.
