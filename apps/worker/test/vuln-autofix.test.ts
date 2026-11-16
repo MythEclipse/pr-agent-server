@@ -536,6 +536,11 @@ describe("runVulnAutofix", () => {
 			h.deps.workdirs.readFile("/tmp/pr-queue-work/_vuln_o_r_brace-expansion-1.1.21/package.json"),
 		)
 		expect(written.overrides).toEqual({ "brace-expansion": "1.1.21" })
+		// The file's own indentation survives: a re-serialised whole file hides the
+		// two lines that matter (measured on BotWa, four spaces in, tabs out).
+		expect(
+			h.deps.workdirs.readFile("/tmp/pr-queue-work/_vuln_o_r_brace-expansion-1.1.21/package.json"),
+		).toContain('\n	"name"')
 		// The dependency list is untouched — that is the whole point.
 		expect(written.dependencies).toEqual({ minimatch: "^3.1.2" })
 		expect(JSON.stringify(h.requests.find((r) => r.method === "POST")?.json)).toContain(
