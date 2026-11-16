@@ -1,3 +1,10 @@
+## [1.12.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.2...v1.12.3) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker:** pin a TRANSITIVE npm advisory with overrides, not by promoting it ([b186ab1](https://github.com/MythEclipse/pr-agent-server/commit/b186ab153909aa9a80ada345d92031d8e31f8d72))
+
 ## [1.12.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.1...v1.12.2) (2026-11-16)
 
 
