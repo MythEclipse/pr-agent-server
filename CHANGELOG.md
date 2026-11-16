@@ -1,3 +1,10 @@
+## [1.11.10](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.9...v1.11.10) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker,api:** harden review, queue and CI gates found by audit ([1847e26](https://github.com/MythEclipse/pr-agent-server/commit/1847e263b03768f8ec448a5939547b1acc09a857))
+
 ## [1.11.9](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.8...v1.11.9) (2026-11-16)
 
 ## [1.11.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.7...v1.11.8) (2026-11-15)
