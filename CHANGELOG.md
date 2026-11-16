@@ -1,3 +1,10 @@
+## [1.12.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.0...v1.12.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker:** retry an npm peer conflict, and name a missing tool as a host problem ([1f93626](https://github.com/MythEclipse/pr-agent-server/commit/1f936267d593a12cf71d3e5417bd52817b666963))
+
 # [1.12.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.11.11...v1.12.0) (2026-11-16)
 
 
