@@ -1,5 +1,7 @@
 import { acquireWithWait, LOCK_FILE } from "../lock.ts"
+import { listAllOwnedRepos } from "../ops/repoList.ts"
 import { dependabotTemplateBody, runSyncHooks } from "../ops/syncHooks.ts"
+import { dependabotUrl, runVulnAutofix } from "../ops/vulnAutofix.ts"
 import {
 	derivableLanes,
 	hasPatch,
@@ -13,12 +15,19 @@ import type { WorkerCliContext } from "./context.ts"
 import { syncHooksExitCode } from "./sync.ts"
 
 /**
- * `--fix-vulns`: make the open advisories ACTIONABLE, then report the coverage.
+ * `--fix-vulns`: make the open advisories ACTIONABLE, then ACTUALLY FIX THEM.
  *
- * WHAT THIS IS NOT. It does not bump manifests or open PRs itself. Dependabot
- * does that, and it does it well; a second bump engine here would duplicate it
- * badly and fight it on the same branches. What this fixes is the thing standing
- * in Dependabot's way: a lane that names the manifest the alert is on.
+ * TWO STEPS, AND THE SECOND ONE IS WHY THIS MODE EXISTS. First the Dependabot
+ * lanes are derived from each repo's own alerts, because an alert on a manifest
+ * no lane names can never become a PR. Then the worker bumps the vulnerable
+ * dependency itself and opens the PR (see `ops/vulnAutofix.ts`).
+ *
+ * WHY THE SECOND STEP WAS NEEDED. The lane work was measured as insufficient on
+ * its own: 2026-11-16, 52 owned repos, 129 open alerts (126 with a published
+ * patch), `automated-security-fixes` enabled and not paused everywhere, lanes in
+ * place — and ZERO open Dependabot PRs. Configuration that produces no PRs is
+ * not a fix, and the previous docstring here said outright that opening PRs was
+ * not this mode's job. That was the gap.
  *
  * THE MEASURED GAP. 478 of 630 open alerts across this fleet sat on manifests no
  * `updates:` lane named — nested `requirements.txt`, `rust/Cargo.lock`,
@@ -102,7 +111,63 @@ export async function fixVulns(argv: string[], context: WorkerCliContext): Promi
 				"vuln-fix: every fixable alert already sits on a watched manifest — Dependabot owns the rest.",
 			)
 		}
-		return syncHooksExitCode(res.lines)
+		if (argv.includes("--lanes-only")) {
+			console.log("vuln-fix: --lanes-only — lanes synced, no PRs opened.")
+			return syncHooksExitCode(res.lines)
+		}
+
+		// ── STEP 2: the fix itself ──────────────────────────────────────────
+		//
+		// Everything above only makes an advisory POSSIBLE to fix. This is the
+		// part that moves the version, pushes the branch and opens the PR, which
+		// is the part the fleet was missing: lanes in place, security updates on,
+		// and not one PR.
+		const token = deps.fetchGhToken()
+		if (!token) {
+			console.error("vuln-fix: no GitHub token available — no PRs opened")
+			return 1
+		}
+		const list = await listAllOwnedRepos(deps.api, token)
+		if (list.repos.length === 0) {
+			console.error(`vuln-fix: could not list any repo (HTTP ${list.ok ? 200 : list.status})`)
+			return 1
+		}
+		// A TRUNCATED FLEET IS STATED, never implied. The listing is paged, and a
+		// page that failed leaves repos with no fix and no trace of why.
+		if (!list.ok) {
+			console.log(
+				`⚠️  vuln-fix: repo listing incomplete (HTTP ${list.status}) — ${list.repos.length} repo(s) read, the rest were NOT touched`,
+			)
+		}
+		const fixes = await runVulnAutofix(
+			{
+				api: deps.api,
+				run: deps.run,
+				exec: deps.exec,
+				workdirs: deps.workdirs,
+				fetchGhToken: deps.fetchGhToken,
+				dry,
+				report: (line) => console.log(line),
+			},
+			{ token, repos: list.repos.map((r) => r.fullName) },
+		)
+		console.log(
+			dry
+				? `vuln-fix: DRY RUN — ${fixes.perRepo.filter((r) => r.fixable > 0).length} repo(s) have fixable alerts; ${fixes.manual} need a human. Nothing pushed.`
+				: `vuln-fix: ${fixes.opened} PR(s) opened, ${fixes.manual} left for a human, ${fixes.failed} failed, across ${list.repos.length} repo(s).`,
+		)
+		// THE PAGES TO OPEN, per repo, for whatever is still open — the fixer only
+		// clears what it could apply, and an operator chasing the rest needs the
+		// URL rather than a repo name to search for.
+		const stillOpen = fixes.perRepo.filter((r) => r.openAlerts > 0 && !r.unreadable)
+		if (stillOpen.length > 0) {
+			console.log("vuln-fix: Dependabot pages still carrying open alerts:")
+			for (const r of stillOpen.sort((a, b) => b.openAlerts - a.openAlerts)) {
+				console.log(`   ${dependabotUrl(r.repo)}  (${r.openAlerts} open)`)
+			}
+		}
+		// A failed fix is a failure signal; a repo with nothing to fix is not.
+		return fixes.failed > 0 ? 1 : syncHooksExitCode(res.lines)
 	} finally {
 		lock.release()
 		setReleaseHeld(null)
@@ -120,21 +185,23 @@ export async function auditVulns(argv: string[], context: WorkerCliContext): Pro
 		console.error("vuln-scan: no GitHub token available")
 		return 1
 	}
-	// Fetch list of repositories
-	const { status, data } = await deps.api.request(
-		"GET",
-		"/user/repos?affiliation=owner&per_page=100",
-		{ token },
-	)
-	if (status !== 200 || !Array.isArray(data)) {
-		console.error(`vuln-scan: failed to list repos (HTTP ${status})`)
+	// EVERY repo, not the first page of them. This used to read one page of
+	// `/user/repos`, so repo 101 and beyond were never audited and the count it
+	// printed looked like a complete fleet. See `ops/repoList.ts`.
+	const listed = await listAllOwnedRepos(deps.api, token)
+	if (listed.repos.length === 0) {
+		console.error(`vuln-scan: failed to list repos (HTTP ${listed.ok ? 200 : listed.status})`)
 		return 1
 	}
-	const repos = data
-		.map((r: unknown) =>
-			typeof r === "object" && r !== null && "full_name" in r ? String(r.full_name ?? "") : "",
+	if (!listed.ok) {
+		// The audit still runs on what it has, but says out loud that it is partial:
+		// "no vulnerabilities in 100 repos" is a very different claim from "no
+		// vulnerabilities in the fleet".
+		console.log(
+			`⚠️  vuln-scan: repo listing incomplete (HTTP ${listed.status}) — auditing ${listed.repos.length} repo(s) only`,
 		)
-		.filter(Boolean)
+	}
+	const repos = listed.repos.map((r) => r.fullName)
 	console.log(`🔍 Scanning Dependabot security alerts across ${repos.length} repositories...`)
 	const results = await scanVulns(deps.api, repos, token)
 	// An audit that only counts advisories answers the wrong question. The one
@@ -165,6 +232,9 @@ export async function auditVulns(argv: string[], context: WorkerCliContext): Pro
 		if (alerts.length > 0) {
 			totalVulns += alerts.length
 			unfixable += alerts.filter((a) => !hasPatch(a)).length
+			// The page, next to the count. A finding nobody can navigate to is a
+			// finding that waits for someone to reconstruct the URL by hand.
+			console.log(`   📄 ${dependabotUrl(repo)}  (${alerts.length} open)`)
 			for (const line of summarizeVulns(repo, alerts)) {
 				console.log(line)
 			}

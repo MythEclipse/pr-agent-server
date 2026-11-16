@@ -78,8 +78,16 @@ function fakeApi(repos: string[], fixtures: Record<string, Fixture> = {}): Fake 
 		// `/user/repos?affiliation=owner`, not `/users/{owner}/repos`: the public
 		// listing silently omits private repos, so a private repo with a
 		// Dependabot config would never be synced and never look missing.
-		if (method === "GET" && path === "/user/repos?affiliation=owner&per_page=100") {
-			return { status: 200, data: repos.map((full_name) => ({ full_name })) }
+		//
+		// PAGED, like the real endpoint. It answers every page, and page 2 is
+		// empty: the walk must stop on a short page rather than on a hardcoded
+		// count, so a fixture that served page 1 forever would hide the cap.
+		if (method === "GET" && path.startsWith("/user/repos?affiliation=owner&per_page=100")) {
+			const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? "1")
+			return {
+				status: 200,
+				data: page === 1 ? repos.map((full_name) => ({ full_name })) : [],
+			}
 		}
 		// Dependabot alerts, CURSOR-paginated. The real endpoint rejects `?page=N`
 		// outright with HTTP 400, so this fake refuses it too — a fake that served
@@ -622,7 +630,17 @@ describe("runSyncHooks > the summary", () => {
 		const res = await runSyncHooks({ api, ghToken: "pat" })
 		// `/user/repos?affiliation=owner`, so private repos are included. The
 		// public `/users/{owner}/repos` listing answered 62 of 69 on this fleet.
-		expect(of(calls, "GET", "/user/repos?affiliation=owner&per_page=100")).toHaveLength(1)
+		//
+		// Read ACROSS PAGES: this used to be one request, which capped the fleet at
+		// 100 repos with no marker. The fixture's page 1 is short (two repos), so
+		// the walk ends there — that short page IS the terminator, and a fixture
+		// with a full first page would be the pagination test (see
+		// `vuln-autofix.test.ts`).
+		const listing = calls.filter(
+			(c) => c.method === "GET" && c.path.startsWith("/user/repos?affiliation=owner"),
+		)
+		expect(listing).toHaveLength(1)
+		expect(listing[0]?.path).toContain("page=1")
 		// Dependabot config + auto-merge workflow + opt-out label.
 		expect(res.ok).toBe(3)
 	})

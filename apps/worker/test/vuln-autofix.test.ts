@@ -1,0 +1,470 @@
+import { describe, expect, it } from "vitest"
+import type { GitResult } from "../src/git.ts"
+import { listAllOwnedRepos, toOwnedRepo } from "../src/ops/repoList.ts"
+import type { DependabotAlert } from "../src/ops/security.ts"
+import {
+	alertUrl,
+	buildVulnPrBody,
+	compareVersions,
+	dependabotUrl,
+	directoryOf,
+	fixCommandFor,
+	planVulnFixes,
+	runVulnAutofix,
+	type VulnFixPlan,
+	vulnBranchName,
+} from "../src/ops/vulnAutofix.ts"
+
+const alert = (over: Partial<DependabotAlert> & { number: number }): DependabotAlert => ({
+	state: "open",
+	dependency: {
+		package: { ecosystem: "npm", name: "lodash" },
+		manifest_path: "package-lock.json",
+	},
+	security_advisory: {
+		ghsa_id: "GHSA-aaaa-bbbb-cccc",
+		cve_id: null,
+		summary: "prototype pollution",
+		severity: "high",
+	},
+	security_vulnerability: {
+		package: { ecosystem: "npm", name: "lodash" },
+		severity: "high",
+		vulnerable_version_range: "< 4.17.21",
+		first_patched_version: { identifier: "4.17.21" },
+	},
+	url: "https://api.github.com/repos/o/r/dependabot/alerts/1",
+	html_url: "https://github.com/o/r/security/dependabot/1",
+	created_at: "2026-11-01T00:00:00Z",
+	...over,
+})
+
+describe("listAllOwnedRepos", () => {
+	it("reads every page, not just the first hundred", async () => {
+		// THE BUG THIS REPLACES: one page of 100 and stop. Repo 101 onwards got
+		// no Dependabot config, no vulnerability alerts and no security PRs, and
+		// the count the callers printed looked like a complete fleet.
+		const page1 = Array.from({ length: 100 }, (_, i) => ({ full_name: `o/r${i}` }))
+		const page2 = [{ full_name: "o/last" }]
+		const calls: string[] = []
+		// PARSE the page number, never substring-match it: every URL here carries
+		// `per_page=100`, which itself contains `page=1`.
+		const pageOf = (p: string): number => Number(/[?&]page=(\d+)/.exec(p)?.[1] ?? "0")
+		const api = {
+			async request(_m: string, path: string) {
+				calls.push(path)
+				const page = pageOf(path)
+				return { status: 200, data: page === 1 ? page1 : page === 2 ? page2 : [] }
+			},
+		}
+
+		const got = await listAllOwnedRepos(api, "tok")
+
+		expect(got.ok).toBe(true)
+		expect(got.repos).toHaveLength(101)
+		expect(got.repos.at(-1)?.fullName).toBe("o/last")
+		expect(calls.some((c) => c.includes("page=2"))).toBe(true)
+	})
+
+	it("a failed page is NOT a smaller fleet", async () => {
+		const page1 = Array.from({ length: 100 }, (_, i) => ({ full_name: `o/r${i}` }))
+		const pageOf = (p: string): number => Number(/[?&]page=(\d+)/.exec(p)?.[1] ?? "0")
+		const api = {
+			async request(_m: string, path: string) {
+				return pageOf(path) === 1 ? { status: 200, data: page1 } : { status: 502, data: {} }
+			},
+		}
+
+		const got = await listAllOwnedRepos(api, "tok")
+
+		// The repos already read are still returned — they are real work — but the
+		// result says the walk did not finish, so no caller can report "the fleet".
+		expect(got.ok).toBe(false)
+		expect(got).toMatchObject({ status: 502 })
+		expect(got.repos).toHaveLength(100)
+	})
+
+	it("a repeated row does not become two syncs", async () => {
+		// `sort=full_name` is stable but a repo created between two page requests
+		// shifts the window, so a row can appear on both pages.
+		const full = Array.from({ length: 100 }, (_, i) => ({ full_name: `o/r${i}` }))
+		const pageOf = (p: string): number => Number(/[?&]page=(\d+)/.exec(p)?.[1] ?? "0")
+		const api = {
+			async request(_m: string, path: string) {
+				return { status: 200, data: pageOf(path) === 1 ? full : [{ full_name: "o/r0" }] }
+			},
+		}
+		const got = await listAllOwnedRepos(api, "tok")
+		expect(got.repos).toHaveLength(100)
+	})
+
+	it("archived and disabled repos are dropped, not reported as in sync", () => {
+		expect(toOwnedRepo({ full_name: "o/a", archived: true })).toBeNull()
+		expect(toOwnedRepo({ full_name: "o/b", disabled: true })).toBeNull()
+		expect(toOwnedRepo({ full_name: "o/c" })).toEqual({ fullName: "o/c", defaultBranch: "main" })
+		expect(toOwnedRepo({ full_name: "o/d", default_branch: "trunk" })).toEqual({
+			fullName: "o/d",
+			defaultBranch: "trunk",
+		})
+		expect(toOwnedRepo({})).toBeNull()
+	})
+})
+
+describe("planVulnFixes", () => {
+	it("groups one plan per (manifest, package), keeping the highest patch", () => {
+		const alerts = [
+			alert({ number: 1 }),
+			// Same package, a later advisory with a HIGHER patched version: taking
+			// the lower one would leave the second advisory open.
+			alert({
+				number: 2,
+				security_advisory: {
+					ghsa_id: "GHSA-dddd-eeee-ffff",
+					cve_id: null,
+					summary: "x",
+					severity: "critical",
+				},
+				security_vulnerability: {
+					package: { ecosystem: "npm", name: "lodash" },
+					severity: "critical",
+					vulnerable_version_range: "< 4.17.22",
+					first_patched_version: { identifier: "4.17.22" },
+				},
+			}),
+		]
+		const plans = planVulnFixes("o/r", alerts)
+		expect(plans).toHaveLength(1)
+		expect(plans[0]).toMatchObject({
+			packageName: "lodash",
+			patchedVersion: "4.17.22",
+			severity: "critical",
+			alertNumbers: [1, 2],
+			ghsaIds: ["GHSA-aaaa-bbbb-cccc", "GHSA-dddd-eeee-ffff"],
+		})
+	})
+
+	it("the same package on two manifests is two units of work", () => {
+		const plans = planVulnFixes("o/r", [
+			alert({ number: 1 }),
+			alert({
+				number: 2,
+				dependency: {
+					package: { ecosystem: "npm", name: "lodash" },
+					manifest_path: "apps/web/package-lock.json",
+				},
+			}),
+		])
+		expect(plans.map((p) => p.directory).sort()).toEqual(["/", "/apps/web"])
+	})
+
+	it("an alert with no patched version is not a plan", () => {
+		// Nothing to upgrade to: the lane is fine, the release does not exist yet.
+		const plans = planVulnFixes("o/r", [
+			alert({
+				number: 3,
+				security_vulnerability: {
+					package: { ecosystem: "npm", name: "lodash" },
+					severity: "high",
+					vulnerable_version_range: "< 9",
+					first_patched_version: null,
+				},
+			}),
+		])
+		expect(plans).toEqual([])
+	})
+
+	it("directoryOf gives the update command a real cwd", () => {
+		expect(directoryOf("package-lock.json")).toBe("/")
+		expect(directoryOf("apps/web/package-lock.json")).toBe("/apps/web")
+		expect(directoryOf("/leading/package-lock.json")).toBe("/leading")
+	})
+
+	it("compareVersions orders numerically, not lexically", () => {
+		expect(compareVersions("4.17.21", "4.17.9")).toBe(1)
+		expect(compareVersions("1.2.3", "1.2.3")).toBe(0)
+		expect(compareVersions("1.2.3-rc.1", "1.2.3")).toBe(-1)
+		expect(compareVersions("v2.0.0", "1.9.9")).toBe(1)
+	})
+})
+
+describe("fixCommandFor", () => {
+	const plan = (manifestPath: string, ecosystem = "npm"): VulnFixPlan => ({
+		repo: "o/r",
+		ecosystem,
+		manifestPath,
+		directory: directoryOf(manifestPath),
+		packageName: "lodash",
+		patchedVersion: "4.17.21",
+		severity: "high",
+		alertNumbers: [1],
+		ghsaIds: ["GHSA-aaaa-bbbb-cccc"],
+	})
+
+	it("rewrites the lockfile without installing node_modules", () => {
+		expect(fixCommandFor(plan("package-lock.json"))).toEqual({
+			argv: [
+				"npm",
+				"install",
+				"--package-lock-only",
+				"--ignore-scripts",
+				"--no-audit",
+				"--no-fund",
+				"lodash@4.17.21",
+			],
+		})
+		expect(fixCommandFor(plan("pnpm-lock.yaml"))).toEqual({
+			argv: ["pnpm", "update", "lodash@4.17.21", "--lockfile-only", "--ignore-scripts"],
+		})
+		expect(fixCommandFor(plan("Cargo.lock", "rust"))).toEqual({
+			argv: ["cargo", "update", "-p", "lodash", "--precise", "4.17.21"],
+		})
+		expect(fixCommandFor(plan("composer.lock", "composer"))).toEqual({
+			argv: [
+				"composer",
+				"update",
+				"lodash",
+				"--with-dependencies",
+				"--no-interaction",
+				"--no-scripts",
+			],
+		})
+	})
+
+	it("yarn needs the form its major version actually has", () => {
+		// Yarn 1 has no `up`; Berry has no `upgrade`. Guessing wrong exits 0
+		// without touching the lockfile, which the diff check then reports as
+		// "nothing to fix".
+		expect(fixCommandFor(plan("yarn.lock"), { yarnBerry: true })).toEqual({
+			argv: ["yarn", "up", "lodash@4.17.21"],
+		})
+		expect(fixCommandFor(plan("yarn.lock"))).toEqual({
+			argv: ["yarn", "upgrade", "lodash@4.17.21"],
+		})
+	})
+
+	it("an ecosystem with no single-command update is MANUAL, not attempted", () => {
+		const maven = fixCommandFor(plan("pom.xml", "maven"))
+		expect("manual" in maven).toBe(true)
+		expect(fixCommandFor(plan("requirements.txt", "pip"))).toHaveProperty("manual")
+	})
+})
+
+describe("branch names, URLs and PR body", () => {
+	const plan: VulnFixPlan = {
+		repo: "MythEclipse/BotWa",
+		ecosystem: "npm",
+		manifestPath: "package-lock.json",
+		directory: "/",
+		packageName: "@babel/traverse",
+		patchedVersion: "7.23.2",
+		severity: "critical",
+		alertNumbers: [12, 13],
+		ghsaIds: ["GHSA-67hx-6x53-jw92"],
+	}
+
+	it("a scoped package becomes a branch name GitHub accepts", () => {
+		expect(vulnBranchName(plan)).toBe("fix/vuln-babel-traverse-7.23.2")
+		expect(vulnBranchName(plan)).not.toContain("@")
+		expect(vulnBranchName(plan)).not.toContain("//")
+	})
+
+	it("the body links the alerts and the Dependabot page", () => {
+		const body = buildVulnPrBody(plan)
+		expect(body).toContain(alertUrl("MythEclipse/BotWa", 12))
+		expect(body).toContain(alertUrl("MythEclipse/BotWa", 13))
+		expect(body).toContain(dependabotUrl("MythEclipse/BotWa"))
+		expect(body).toContain("GHSA-67hx-6x53-jw92")
+		expect(body).toContain("7.23.2")
+		// The reviewer must be able to reproduce the bump by hand.
+		expect(body).toContain("npm install --package-lock-only")
+	})
+
+	it("the URLs are the ones a human opens", () => {
+		expect(dependabotUrl("MythEclipse/BotWa")).toBe(
+			"https://github.com/MythEclipse/BotWa/security/dependabot",
+		)
+		expect(alertUrl("MythEclipse/BotWa", 7)).toBe(
+			"https://github.com/MythEclipse/BotWa/security/dependabot/7",
+		)
+	})
+})
+
+// ── The orchestrator, with every effect injected ─────────────────────────────
+
+type Recorded = { method: string; path: string; json?: unknown }
+
+function harness(opts: {
+	alerts?: DependabotAlert[]
+	alertsStatus?: number
+	existingPr?: number
+	diff?: string
+	pushOk?: boolean
+	prStatus?: number
+	defaultBranch?: string
+}) {
+	const requests: Recorded[] = []
+	const gitCalls: string[][] = []
+	const execCalls: string[][] = []
+	const workdirs = new Map<string, string>()
+	const api = {
+		async request(method: string, path: string, o?: { token?: string; json?: unknown }) {
+			requests.push({ method, path, json: o?.json })
+			if (path.includes("/dependabot/alerts")) {
+				const status = opts.alertsStatus ?? 200
+				return status === 200 ? { status, data: opts.alerts ?? [] } : { status, data: {} }
+			}
+			if (path.includes("/pulls?state=open&head=")) {
+				const n = opts.existingPr
+				return { status: 200, data: n ? [{ number: n }] : [] }
+			}
+			if (method === "POST" && path.endsWith("/pulls")) {
+				return { status: opts.prStatus ?? 201, data: { number: 77 } }
+			}
+			// GET /repos/{repo}
+			return { status: 200, data: { default_branch: opts.defaultBranch ?? "main" } }
+		},
+	}
+	const run = (args: string[]): GitResult => {
+		gitCalls.push(args)
+		if (args[0] === "clone" || args[0] === "config") return { code: 0, stdout: "", stderr: "" }
+		if (args[0] === "status") {
+			return { code: 0, stdout: opts.diff ?? " M package-lock.json\n", stderr: "" }
+		}
+		if (args[0] === "commit") return { code: 0, stdout: "", stderr: "" }
+		if (args[0] === "push") {
+			return opts.pushOk === false
+				? { code: 1, stdout: "", stderr: "! [rejected] main -> main" }
+				: { code: 0, stdout: "", stderr: "" }
+		}
+		return { code: 0, stdout: "", stderr: "" }
+	}
+	const exec = (args: string[]): GitResult => {
+		execCalls.push(args)
+		return { code: 0, stdout: "", stderr: "" }
+	}
+	const lines: string[] = []
+	const deps = {
+		api: api as never,
+		run: run as never,
+		exec: exec as never,
+		workdirs: {
+			exists: (p: string) => workdirs.has(p),
+			mkdir: (p: string) => workdirs.set(p, ""),
+			remove: (p: string) => workdirs.delete(p),
+			writeFile: (p: string, c: string) => workdirs.set(p, c),
+			readFile: (p: string) => workdirs.get(p) ?? "",
+		},
+		fetchGhToken: () => "",
+		dry: false,
+		report: (l: string) => lines.push(l),
+	}
+	return { deps, requests, gitCalls, execCalls, lines }
+}
+
+describe("runVulnAutofix", () => {
+	it("bumps, pushes and opens the PR", async () => {
+		const h = harness({ alerts: [alert({ number: 1 })] })
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(1)
+		expect(summary.failed).toBe(0)
+		// The ecosystem's own command ran, in the manifest's directory.
+		expect(h.execCalls[0]?.[0]).toBe("npm")
+		expect(h.execCalls[0]).toContain("lodash@4.17.21")
+		// A branch was pushed and a PR opened against the default branch.
+		const push = h.gitCalls.find((c) => c[0] === "push")
+		expect(push?.join(" ")).toContain("refs/heads/fix/vuln-lodash-4.17.21")
+		const pr = h.requests.find((r) => r.method === "POST")
+		expect(pr?.json).toMatchObject({ head: "fix/vuln-lodash-4.17.21", base: "main" })
+		expect(h.lines.join("\n")).toContain("https://github.com/o/r/pull/77")
+		// The clone does not leak: the workdir is removed on the way out.
+		expect(h.deps.workdirs.exists("/tmp/pr-queue-work/_vuln_o_r_lodash-4.17.21")).toBe(false)
+	})
+
+	it("an update that changes nothing opens NO PR", async () => {
+		// The command can exit 0 and leave the lockfile alone. A PR from that
+		// claims a remediation the branch does not contain, and the alert stays
+		// open with a "fix" attached to it.
+		const h = harness({ alerts: [alert({ number: 1 })], diff: "" })
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(summary.failed).toBe(1)
+		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
+		expect(h.requests.some((r) => r.method === "POST")).toBe(false)
+		expect(h.lines.join("\n")).toContain("no change")
+	})
+
+	it("a package that already has an open PR is skipped, not re-cloned", async () => {
+		const h = harness({ alerts: [alert({ number: 1 })], existingPr: 5 })
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(1) // the work is done, by someone
+		expect(h.gitCalls.some((c) => c[0] === "clone")).toBe(false)
+		expect(h.lines.join("\n")).toContain("PR #5")
+	})
+
+	it("an unreadable alert list is a failure, never a clean repo", async () => {
+		const h = harness({ alertsStatus: 403 })
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.failed).toBe(1)
+		expect(summary.perRepo[0]).toMatchObject({ repo: "o/r", unreadable: true })
+		expect(h.lines.join("\n")).toContain("HTTP 403")
+	})
+
+	it("a maven alert is reported as MANUAL, not attempted", async () => {
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "maven", name: "mysql:mysql-connector-java" },
+						manifest_path: "pom.xml",
+					},
+				}),
+			],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.manual).toBe(1)
+		expect(summary.opened).toBe(0)
+		expect(h.execCalls).toEqual([])
+	})
+
+	it("dry run reports the plan and touches nothing", async () => {
+		const h = harness({ alerts: [alert({ number: 1 })] })
+		h.deps.dry = true
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(h.execCalls).toEqual([])
+		expect(h.gitCalls.some((c) => c[0] === "clone")).toBe(false)
+		expect(h.lines.join("\n")).toContain("would bump lodash -> 4.17.21")
+	})
+
+	it("the per-repo cap leaves the rest for the next run", async () => {
+		const alerts = Array.from({ length: 8 }, (_, i) =>
+			alert({
+				number: i + 1,
+				dependency: {
+					package: { ecosystem: "npm", name: `pkg${i}` },
+					manifest_path: "package-lock.json",
+				},
+			}),
+		)
+		const h = harness({ alerts })
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"], maxPrsPerRepo: 2 })
+
+		expect(summary.opened).toBe(2)
+		expect(h.lines.join("\n")).toContain("left for the next run")
+	})
+
+	it("a failed push is a failure, and no PR is attempted", async () => {
+		const h = harness({ alerts: [alert({ number: 1 })], pushOk: false })
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.failed).toBe(1)
+		expect(h.requests.some((r) => r.method === "POST")).toBe(false)
+	})
+})

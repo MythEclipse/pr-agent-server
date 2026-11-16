@@ -48,6 +48,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { GitHubApi } from "../github.ts"
 import type { GhClient } from "../pr/scan.ts"
+import { listAllOwnedRepos } from "./repoList.ts"
 import {
 	enableAutomatedSecurityFixes,
 	enableVulnerabilityAlerts,
@@ -141,20 +142,10 @@ const LEGACY_AUTO_MERGE_PATH = `${GITHUB_DIR}/${AUTO_MERGE_FILE}`
 export const AUTO_MERGE_OPTOUT_LABEL = "dependabot-no-auto-merge"
 
 /**
- * The repo listing.
- *
- * `GET /user/repos?affiliation=owner`, NOT `GET /users/{owner}/repos`. The
- * public listing returns only public repos: on this fleet it answers 62 for an
- * account that owns 69, so five private repos that carry a Dependabot config
- * would never be synced and would never show up as missing — the failure is an
- * absence, exactly like the workflow at the wrong path.
- *
- * `/user/repos` is authenticated and returns the caller's own repos including
- * private ones. `affiliation=owner` keeps it to repos this account owns rather
- * than everything it can merely see (org membership, collaborator access),
- * because the sync writes to each of them.
- */
-const REPO_LIST_PATH = "/user/repos?affiliation=owner&per_page=100"
+ // The repo listing lives in `./repoList.ts` now: it has to be PAGED (this module
+ // read one page of 100 and stopped, so repos past it were never configured), and
+ // `--audit-vulns` and `--fix-vulns` need the same list. One implementation, one
+ // place for the "which repos, and are they all here" rules.
 
 /**
  * `GhClient`, plus the one optional method this module uses to self-resolve a
@@ -679,13 +670,28 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 
 		let repos = deps.repos
 		if (!repos) {
-			const { status, data } = await api.request("GET", REPO_LIST_PATH, { token })
+			// PAGED, and that is a fix rather than a nicety: this read ONE page of
+			// `/user/repos`, so repo 101 and beyond never got a Dependabot config,
+			// never had vulnerability alerts enabled, and never appeared in the
+			// "N synced" count that made the run look complete. See `repoList.ts`.
+			const listed = await listAllOwnedRepos(api, token)
 			// A failed listing is NOT an empty fleet: reporting "0 synced" for a
-			// transport failure would read as a healthy run.
-			if (status !== 200 || !Array.isArray(data)) {
-				return { ok: 0, skip: 0, lines: [`⚠️  sync-hooks: repo listing failed (HTTP ${status})`] }
+			// transport failure would read as a healthy run. An EMPTY list from a
+			// successful listing is different — it is a real answer ("this account
+			// owns nothing"), and it falls through to the empty loop below.
+			if (!listed.ok && listed.repos.length === 0) {
+				return {
+					ok: 0,
+					skip: 0,
+					lines: [`⚠️  sync-hooks: repo listing failed (HTTP ${listed.ok ? 200 : listed.status})`],
+				}
 			}
-			repos = data.map((r) => str(r?.full_name)).filter((name) => name.length > 0)
+			if (!listed.ok) {
+				lines.push(
+					`⚠️  sync-hooks: repo listing incomplete (HTTP ${listed.status}) — ${listed.repos.length} repo(s) synced, the rest were NOT touched`,
+				)
+			}
+			repos = listed.repos.map((r) => r.fullName)
 		}
 
 		for (const repo of repos) {
