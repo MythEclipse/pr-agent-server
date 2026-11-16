@@ -83,7 +83,7 @@ describe("stepMerge — a 404 means the PR is GONE, not refused", () => {
 		const { deps, report, saved } = harness(404)
 		const fixState: any = {}
 
-		expect(await stepMerge(deps, ctx(fixState), false)).toBe(false)
+		expect(await stepMerge(deps, ctx(fixState))).toBe(false)
 
 		const entry = fixState[REPO]?.[String(PR)]
 		// The disposition is recorded at this head, which is what stops the next
@@ -101,7 +101,7 @@ describe("stepMerge — a 404 means the PR is GONE, not refused", () => {
 
 	test("never says it is retrying next tick", async () => {
 		const { deps, report } = harness(404)
-		await stepMerge(deps, ctx({}), false)
+		await stepMerge(deps, ctx({}))
 		// The old arm printed "🔁 ... retrying next tick" here, which was the lie:
 		// nothing could ever change for a deleted repo.
 		expect(report.join("\n")).not.toContain("retrying next tick")
@@ -111,7 +111,7 @@ describe("stepMerge — a 404 means the PR is GONE, not refused", () => {
 		const { deps, report } = harness(422, "Validation Failed")
 		const fixState: any = {}
 
-		expect(await stepMerge(deps, ctx(fixState), false)).toBe(false)
+		expect(await stepMerge(deps, ctx(fixState))).toBe(false)
 
 		const entry = fixState[REPO]?.[String(PR)]
 		// A refusal is mutable input: a repo-side rule change clears it, so it must
@@ -125,7 +125,7 @@ describe("stepMerge — a 404 means the PR is GONE, not refused", () => {
 		const { deps, report } = harness(500, "boom")
 		const fixState: any = {}
 
-		expect(await stepMerge(deps, ctx(fixState), false)).toBe(false)
+		expect(await stepMerge(deps, ctx(fixState))).toBe(false)
 
 		expect(fixState[REPO]).toBeUndefined()
 		expect(report.join("\n")).toContain("Merge deferred")
