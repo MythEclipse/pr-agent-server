@@ -277,6 +277,48 @@ export function fixCommandFor(plan: VulnFixPlan, opts: { yarnBerry?: boolean } =
 	}
 }
 
+/**
+ * The declared range for a package in package.json, or `null` when the package
+ * is not declared at all (i.e. it is transitive).
+ *
+ * All four sections are checked: a `devDependency` is just as direct as a
+ * `dependency`, and treating it as transitive would take the `overrides` path
+ * against a package the repo names on purpose.
+ */
+export function npmDirectRange(manifest: Record<string, unknown>, pkg: string): string | null {
+	for (const section of [
+		"dependencies",
+		"devDependencies",
+		"optionalDependencies",
+		"peerDependencies",
+	]) {
+		const block = manifest[section]
+		if (block === null || typeof block !== "object") continue
+		const range = (block as Record<string, unknown>)[pkg]
+		if (typeof range === "string") return range
+	}
+	return null
+}
+
+/**
+ * The version npm actually installed at the TOP level, from the lockfile.
+ *
+ * Read through `Workdirs` rather than `fs` so the flow stays testable, and
+ * `null` on anything unparseable — the caller treats "cannot tell" as "do not
+ * move it", which is the safe direction for a dependency that the app imports.
+ */
+export function npmLockedVersion(workdirs: Workdirs, lockPath: string, pkg: string): string | null {
+	try {
+		const lock = JSON.parse(workdirs.readFile(lockPath)) as {
+			packages?: Record<string, { version?: string }>
+		}
+		const entry = lock.packages?.[`node_modules/${pkg}`]
+		return typeof entry?.version === "string" ? entry.version : null
+	} catch {
+		return null
+	}
+}
+
 /** A branch name GitHub will accept: no `@`, no `/` from a scoped package. */
 export function vulnBranchName(plan: VulnFixPlan): string {
 	const slug = `${plan.packageName}-${plan.patchedVersion}`
@@ -472,29 +514,64 @@ async function applyPlan(
 	const isNpmLock = /^(package-lock\.json|npm-shrinkwrap\.json)$/i.test(basename(plan.manifestPath))
 	let overrideWritten = false
 	let argv = command.argv
-	if (plan.transitive && isNpmLock) {
+	if (isNpmLock) {
 		const pkgPath = `${cwd}/package.json`
 		let manifest: Record<string, unknown>
 		try {
-			const raw = workdirs.readFile(pkgPath)
-			manifest = JSON.parse(raw) as Record<string, unknown>
+			manifest = JSON.parse(workdirs.readFile(pkgPath)) as Record<string, unknown>
 		} catch {
 			workdirs.remove(workdir)
 			return {
 				ok: false,
 				manual: true,
-				detail: `could not read ${plan.directory === "/" ? "" : plan.directory.slice(1)}package.json as JSON to add an override`,
+				detail: `could not read ${plan.directory === "/" ? "" : plan.directory.slice(1)}package.json as JSON — the npm update needs it`,
 			}
 		}
-		const existingOverrides =
-			manifest.overrides !== null && typeof manifest.overrides === "object"
-				? (manifest.overrides as Record<string, unknown>)
-				: {}
-		manifest.overrides = { ...existingOverrides, [plan.packageName]: plan.patchedVersion }
-		workdirs.writeFile(pkgPath, `${JSON.stringify(manifest, null, "	")}\n`)
-		overrideWritten = true
-		// The override drives resolution, so the command takes no package argument.
-		argv = ["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"]
+		const directRange = npmDirectRange(manifest, plan.packageName)
+		if (directRange !== null) {
+			// A DIRECT DEPENDENCY IS A DIFFERENT DECISION, and this is the one that
+			// went wrong in the first live run: BotWa's `axios` was a direct
+			// dependency at `^1.21.1` while the advisories were on 0.x copies nested
+			// under `dhn-api` and `wa-sticker-formatter`. `npm install axios@0.33.0`
+			// "fixed" it by rewriting the DIRECT range to `^0.33.0` — a downgrade of
+			// the package the app itself imports — and left the nested copies exactly
+			// as they were. The PR passed CI and was merged.
+			//
+			// So: only move a direct dependency FORWARD, and refuse when the patched
+			// version is not ahead of what is installed, because then the vulnerable
+			// instance is somewhere else in the tree and bumping its parent is the
+			// fix — a decision with a blast radius this flow cannot judge.
+			const locked = npmLockedVersion(workdirs, `${cwd}/package-lock.json`, plan.packageName)
+			if (locked !== null && compareVersions(plan.patchedVersion, locked) <= 0) {
+				workdirs.remove(workdir)
+				return {
+					ok: false,
+					manual: true,
+					detail:
+						`${plan.packageName} is a direct dependency already at ${locked}; the vulnerable copy is ` +
+						`nested under another package, so forcing ${plan.patchedVersion} would DOWNGRADE it — ` +
+						`the parent that pulls the old copy has to be bumped`,
+				}
+			}
+			// Forward move: npm rewrites the declared range and the lockfile together.
+		} else {
+			const existingOverrides =
+				manifest.overrides !== null && typeof manifest.overrides === "object"
+					? (manifest.overrides as Record<string, unknown>)
+					: {}
+			manifest.overrides = { ...existingOverrides, [plan.packageName]: plan.patchedVersion }
+			workdirs.writeFile(pkgPath, `${JSON.stringify(manifest, null, "	")}\n`)
+			overrideWritten = true
+			// The override drives resolution, so the command takes no package argument.
+			argv = [
+				"npm",
+				"install",
+				"--package-lock-only",
+				"--ignore-scripts",
+				"--no-audit",
+				"--no-fund",
+			]
+		}
 	}
 
 	const [program, ...args] = argv

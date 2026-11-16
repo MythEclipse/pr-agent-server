@@ -373,8 +373,16 @@ function harness(opts: {
 			writeFile: (p: string, c: string) => workdirs.set(p, c),
 			readFile: (p: string) => {
 				const v = workdirs.get(p)
-				if (v === undefined) throw new Error(`ENOENT: ${p}`)
-				return v
+				if (v !== undefined) return v
+				// Defaults for the npm flows, which now read the repo's own manifest
+				// and lockfile to tell a direct dependency from a transitive one:
+				// `lodash` declared at ^4.17.0 and installed at 4.17.0, so the usual
+				// "bump it forward" case is exercised unless a test seeds otherwise.
+				if (p.endsWith("/package.json")) return '{"dependencies":{"lodash":"^4.17.0"}}'
+				if (p.endsWith("/package-lock.json")) {
+					return JSON.stringify({ packages: { "node_modules/lodash": { version: "4.17.0" } } })
+				}
+				throw new Error(`ENOENT: ${p}`)
 			},
 		},
 		fetchGhToken: () => "",
@@ -533,6 +541,45 @@ describe("runVulnAutofix", () => {
 		expect(JSON.stringify(h.requests.find((r) => r.method === "POST")?.json)).toContain(
 			"Pinned with",
 		)
+	})
+
+	it("refuses to DOWNGRADE a direct dependency whose vulnerable copy is nested", async () => {
+		// MEASURED, and it shipped once: BotWa's `axios` was a direct `^1.21.1`
+		// while the advisories were on 0.x copies nested under `dhn-api` and
+		// `wa-sticker-formatter`. `npm install axios@0.33.0` rewrote the DIRECT
+		// range to `^0.33.0` — a downgrade of the package the app itself imports —
+		// and left the nested copies untouched. CI was green, so it merged.
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "axios" },
+						manifest_path: "package-lock.json",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "axios" },
+						severity: "high",
+						vulnerable_version_range: "< 0.33.0",
+						first_patched_version: { identifier: "0.33.0" },
+					},
+				}),
+			],
+			files: {
+				"/tmp/pr-queue-work/_vuln_o_r_axios-0.33.0/package.json":
+					'{"dependencies":{"axios":"^1.21.1"}}',
+				"/tmp/pr-queue-work/_vuln_o_r_axios-0.33.0/package-lock.json": JSON.stringify({
+					packages: { "node_modules/axios": { version: "1.21.1" } },
+				}),
+			},
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.manual).toBe(1)
+		expect(summary.opened).toBe(0)
+		// npm is never run: the decision is made before touching the tree.
+		expect(h.execCalls).toEqual([])
+		expect(h.lines.join("\n")).toContain("DOWNGRADE")
 	})
 
 	it("an override that leaves the lockfile alone is NOT a fix", async () => {
