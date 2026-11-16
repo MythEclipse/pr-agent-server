@@ -1,3 +1,10 @@
+## [1.12.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.6...v1.12.7) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker:** a no-push conflict run must not pin the head ([76202e6](https://github.com/MythEclipse/pr-agent-server/commit/76202e69d54d1495b8db1ba1314b616cd9ca6e22)), closes [MythEclipse/BotWa#29](https://github.com/MythEclipse/BotWa/issues/29) [#27](https://github.com/MythEclipse/pr-agent-server/issues/27)
+
 ## [1.12.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.5...v1.12.6) (2026-11-16)
 
 
