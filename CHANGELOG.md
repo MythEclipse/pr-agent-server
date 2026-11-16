@@ -1,3 +1,10 @@
+## [1.12.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.1...v1.12.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker:** separate "a human must decide" from "the run is broken" ([cf85db8](https://github.com/MythEclipse/pr-agent-server/commit/cf85db8a658c4e97abd5fa3940c811e45f976ecc))
+
 ## [1.12.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.0...v1.12.1) (2026-11-16)
 
 
