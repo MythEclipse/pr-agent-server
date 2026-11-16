@@ -1,3 +1,11 @@
+## [1.12.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.4...v1.12.5) (2026-11-16)
+
+
+### Bug Fixes
+
+* **worker:** drop the literal tab from the indent regex ([8cbbc70](https://github.com/MythEclipse/pr-agent-server/commit/8cbbc7011284cd34ad542fc3b4b930bd78addc8a))
+* **worker:** keep package.json's own indentation when adding an override ([ea7ba64](https://github.com/MythEclipse/pr-agent-server/commit/ea7ba6407c8956153beaba2ca868dea0c3e9d0f4))
+
 ## [1.12.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.3...v1.12.4) (2026-11-16)
 
 
