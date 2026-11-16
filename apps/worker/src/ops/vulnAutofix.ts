@@ -514,6 +514,12 @@ async function applyPlan(
 	const isNpmLock = /^(package-lock\.json|npm-shrinkwrap\.json)$/i.test(basename(plan.manifestPath))
 	let overrideWritten = false
 	let argv = command.argv
+	// The peer-conflict retry has to follow the SAME route. Carrying the original
+	// `argv` into the retry after switching to `overrides` re-runs the plain
+	// `npm install <pkg>@<ver>` — which is exactly the promotion the override
+	// exists to avoid. Measured on BotWa #24: the override landed AND
+	// `"brace-expansion": "^1.1.21"` was added to `dependencies` by the retry.
+	let fallback: string[] | undefined = "fallback" in command ? command.fallback : undefined
 	if (isNpmLock) {
 		const pkgPath = `${cwd}/package.json`
 		let manifest: Record<string, unknown>
@@ -580,6 +586,7 @@ async function applyPlan(
 				"--no-audit",
 				"--no-fund",
 			]
+			fallback = [...argv, "--legacy-peer-deps"]
 		}
 	}
 
@@ -626,8 +633,8 @@ async function applyPlan(
 		}
 		// One retry, only for the peer-conflict flag. Anything else is the repo's
 		// own problem and retrying it just doubles the run time.
-		if (command.fallback && /ERESOLVE|peer dep/i.test(why)) {
-			const [fprogram, ...fargs] = command.fallback
+		if (fallback && /ERESOLVE|peer dep/i.test(why)) {
+			const [fprogram, ...fargs] = fallback
 			updated = exec([fprogram ?? "", ...fargs], cwd, UPDATE_TIMEOUT_SEC)
 			usedFallback = updated.code === 0
 			if (!usedFallback) {

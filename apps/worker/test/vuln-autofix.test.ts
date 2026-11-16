@@ -587,6 +587,51 @@ describe("runVulnAutofix", () => {
 		expect(h.lines.join("\n")).toContain("DOWNGRADE")
 	})
 
+	it("the peer-conflict retry keeps the override route", async () => {
+		// MEASURED on BotWa #24: the override landed AND `"brace-expansion":
+		// "^1.1.21"` was added to `dependencies`, because the retry carried the
+		// ORIGINAL `npm install <pkg>@<ver>` argv — the promotion the override
+		// exists to avoid.
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "brace-expansion" },
+						manifest_path: "package-lock.json",
+						relationship: "transitive",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "brace-expansion" },
+						severity: "high",
+						vulnerable_version_range: "< 1.1.21",
+						first_patched_version: { identifier: "1.1.21" },
+					},
+				}),
+			],
+			files: {
+				"/tmp/pr-queue-work/_vuln_o_r_brace-expansion-1.1.21/package.json": '{\n	"name": "r"\n}\n',
+			},
+			execResults: [
+				{ code: 1, stdout: "", stderr: "npm error code ERESOLVE" },
+				{ code: 0, stdout: "", stderr: "" },
+			],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(1)
+		// The retry must NOT name the package: naming it is what promotes it.
+		expect(h.execCalls[1]).toEqual([
+			"npm",
+			"install",
+			"--package-lock-only",
+			"--ignore-scripts",
+			"--no-audit",
+			"--no-fund",
+			"--legacy-peer-deps",
+		])
+	})
+
 	it("an override that leaves the lockfile alone is NOT a fix", async () => {
 		// Writing the override dirties package.json, so "any change" would pass.
 		// Only a moved LOCKFILE counts.
