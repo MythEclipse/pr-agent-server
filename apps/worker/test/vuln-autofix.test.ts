@@ -198,6 +198,7 @@ describe("fixCommandFor", () => {
 		severity: "high",
 		alertNumbers: [1],
 		ghsaIds: ["GHSA-aaaa-bbbb-cccc"],
+		transitive: false,
 	})
 
 	it("rewrites the lockfile without installing node_modules", () => {
@@ -270,6 +271,7 @@ describe("branch names, URLs and PR body", () => {
 		severity: "critical",
 		alertNumbers: [12, 13],
 		ghsaIds: ["GHSA-67hx-6x53-jw92"],
+		transitive: false,
 	}
 
 	it("a scoped package becomes a branch name GitHub accepts", () => {
@@ -313,11 +315,13 @@ function harness(opts: {
 	defaultBranch?: string
 	/** Queued results for successive `exec` calls; the last one repeats. */
 	execResults?: GitResult[]
+	/** Files the fake filesystem starts with, keyed by absolute path. */
+	files?: Record<string, string>
 }) {
 	const requests: Recorded[] = []
 	const gitCalls: string[][] = []
 	const execCalls: string[][] = []
-	const workdirs = new Map<string, string>()
+	const workdirs = new Map<string, string>(Object.entries(opts.files ?? {}))
 	const api = {
 		async request(method: string, path: string, o?: { token?: string; json?: unknown }) {
 			requests.push({ method, path, json: o?.json })
@@ -367,7 +371,11 @@ function harness(opts: {
 			mkdir: (p: string) => workdirs.set(p, ""),
 			remove: (p: string) => workdirs.delete(p),
 			writeFile: (p: string, c: string) => workdirs.set(p, c),
-			readFile: (p: string) => workdirs.get(p) ?? "",
+			readFile: (p: string) => {
+				const v = workdirs.get(p)
+				if (v === undefined) throw new Error(`ENOENT: ${p}`)
+				return v
+			},
 		},
 		fetchGhToken: () => "",
 		dry: false,
@@ -474,6 +482,89 @@ describe("runVulnAutofix", () => {
 
 		expect(summary.opened).toBe(2)
 		expect(h.lines.join("\n")).toContain("left for the next run")
+	})
+
+	it("a TRANSITIVE npm advisory is pinned with overrides, not promoted to a dependency", async () => {
+		// MEASURED on BotWa: `npm install --package-lock-only brace-expansion@1.1.21`
+		// satisfies the advisory by ADDING `"brace-expansion": "^1.1.21"` to
+		// `dependencies` — it promotes a transitive package to a direct one, which
+		// changes the repo's dependency contract. `--no-save` is not the answer
+		// either (measured: "up to date", lockfile untouched, so the "fix" fixes
+		// nothing). `overrides` is npm's own idiom for this case.
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "brace-expansion" },
+						manifest_path: "package-lock.json",
+						relationship: "transitive",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "brace-expansion" },
+						severity: "high",
+						vulnerable_version_range: "< 1.1.21",
+						first_patched_version: { identifier: "1.1.21" },
+					},
+				}),
+			],
+			files: {
+				"/tmp/pr-queue-work/_vuln_o_r_brace-expansion-1.1.21/package.json":
+					'{\n	"name": "r",\n	"dependencies": {\n		"minimatch": "^3.1.2"\n	}\n}\n',
+			},
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+		expect(summary.opened).toBe(1)
+		// The override is what drives resolution, so the command takes no package arg.
+		expect(h.execCalls[0]).toEqual([
+			"npm",
+			"install",
+			"--package-lock-only",
+			"--ignore-scripts",
+			"--no-audit",
+			"--no-fund",
+		])
+		const written = JSON.parse(
+			h.deps.workdirs.readFile("/tmp/pr-queue-work/_vuln_o_r_brace-expansion-1.1.21/package.json"),
+		)
+		expect(written.overrides).toEqual({ "brace-expansion": "1.1.21" })
+		// The dependency list is untouched — that is the whole point.
+		expect(written.dependencies).toEqual({ minimatch: "^3.1.2" })
+		expect(JSON.stringify(h.requests.find((r) => r.method === "POST")?.json)).toContain(
+			"Pinned with",
+		)
+	})
+
+	it("an override that leaves the lockfile alone is NOT a fix", async () => {
+		// Writing the override dirties package.json, so "any change" would pass.
+		// Only a moved LOCKFILE counts.
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "brace-expansion" },
+						manifest_path: "package-lock.json",
+						relationship: "transitive",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "brace-expansion" },
+						severity: "high",
+						vulnerable_version_range: "< 1.1.21",
+						first_patched_version: { identifier: "1.1.21" },
+					},
+				}),
+			],
+			files: {
+				"/tmp/pr-queue-work/_vuln_o_r_brace-expansion-1.1.21/package.json": '{ "name": "r" }\n',
+			},
+			diff: " M package.json\n",
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(summary.manual).toBe(1)
+		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
 	})
 
 	it("an npm peer conflict is retried once with --legacy-peer-deps", async () => {

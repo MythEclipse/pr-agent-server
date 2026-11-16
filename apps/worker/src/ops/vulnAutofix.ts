@@ -73,6 +73,13 @@ export type VulnFixPlan = {
 	severity: string
 	alertNumbers: number[]
 	ghsaIds: string[]
+	/**
+	 * Every alert in this group is on a TRANSITIVE dependency (not named in the
+	 * manifest). It changes the update strategy for npm, which cannot pin a
+	 * transitive version from the command line without promoting it — see
+	 * `applyPlan`.
+	 */
+	transitive: boolean
 }
 
 const SEVERITY_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 }
@@ -154,6 +161,7 @@ export function planVulnFixes(repo: string, alerts: readonly DependabotAlert[]):
 				severity: alert.security_vulnerability?.severity ?? alert.security_advisory?.severity ?? "",
 				alertNumbers: [alert.number],
 				ghsaIds: alert.security_advisory?.ghsa_id ? [alert.security_advisory.ghsa_id] : [],
+				transitive: alert.dependency?.relationship === "transitive",
 			})
 			continue
 		}
@@ -161,6 +169,10 @@ export function planVulnFixes(repo: string, alerts: readonly DependabotAlert[]):
 		// lower one would leave the other advisory open) and keep every advisory
 		// id, because the PR body is what a reviewer uses to check the fix.
 		if (compareVersions(patched, existing.patchedVersion) > 0) existing.patchedVersion = patched
+		// A group is "transitive" only if EVERY advisory in it is: one direct
+		// advisory means the manifest already names the package, and the plain
+		// install is the right command.
+		if (alert.dependency?.relationship !== "transitive") existing.transitive = false
 		existing.severity = worse(existing.severity, alert.security_vulnerability?.severity ?? "")
 		if (!existing.alertNumbers.includes(alert.number)) existing.alertNumbers.push(alert.number)
 		const ghsa = alert.security_advisory?.ghsa_id
@@ -295,7 +307,7 @@ export function dependabotUrl(repo: string): string {
  */
 export function buildVulnPrBody(
 	plan: VulnFixPlan,
-	opts: { legacyPeerDeps?: boolean } = {},
+	opts: { legacyPeerDeps?: boolean; overrides?: boolean } = {},
 ): string {
 	const advisories = plan.ghsaIds.length ? plan.ghsaIds.join(", ") : "security advisory"
 	const links = plan.alertNumbers
@@ -312,6 +324,14 @@ export function buildVulnPrBody(
 		`the advisory had a published patched version, but no PR had been opened for it, so the ` +
 		`worker applied the update itself. The lockfile is the only file this PR should touch; ` +
 		`CI and the normal review gate decide whether it merges.\n\n` +
+		(opts.overrides
+			? `\n**Pinned with \`overrides\`.** The advisory is on a TRANSITIVE dependency, ` +
+				`and \`npm install <pkg>@<version>\` would "fix" it by promoting the package into ` +
+				`\`dependencies\` — a change to this repo's dependency contract that the advisory ` +
+				`did not ask for. The \`overrides\` entry is npm's own idiom: the dependency list ` +
+				`stays as it is, the lockfile resolves the vulnerable package to the patched ` +
+				`version, and \`npm ci\` honours it.\n`
+			: "") +
 		(opts.legacyPeerDeps
 			? `\n**Resolved with \`--legacy-peer-deps\`.** npm refused the bump with ` +
 				`\`ERESOLVE\` — a peer conflict this repo already had, between packages ` +
@@ -435,10 +455,49 @@ async function applyPlan(
 	const command = fixCommandFor(plan)
 	if (!("argv" in command)) {
 		workdirs.remove(workdir)
-		return { ok: false, detail: command.manual }
+		return { ok: false, manual: true, detail: command.manual }
 	}
 	const cwd = plan.directory === "/" ? workdir : `${workdir}${plan.directory}`
-	const [program, ...args] = command.argv
+
+	// npm CANNOT PIN A TRANSITIVE DEPENDENCY FROM THE COMMAND LINE.
+	//
+	// Measured on BotWa: `npm install --package-lock-only brace-expansion@1.1.21`
+	// satisfies the advisory by ADDING `"brace-expansion": "^1.1.21"` to
+	// `dependencies` — it promotes a transitive package to a direct one, changing
+	// the repo's dependency contract without anyone asking. `--no-save` is not the
+	// answer either: measured, it leaves the lockfile untouched ("up to date"), so
+	// the fix would be a no-op. `overrides` is npm's own idiom for this exact
+	// case — the dependency list stays as it is, the lockfile resolves the
+	// vulnerable package to the patched version, and `npm ci` honours it.
+	const isNpmLock = /^(package-lock\.json|npm-shrinkwrap\.json)$/i.test(basename(plan.manifestPath))
+	let overrideWritten = false
+	let argv = command.argv
+	if (plan.transitive && isNpmLock) {
+		const pkgPath = `${cwd}/package.json`
+		let manifest: Record<string, unknown>
+		try {
+			const raw = workdirs.readFile(pkgPath)
+			manifest = JSON.parse(raw) as Record<string, unknown>
+		} catch {
+			workdirs.remove(workdir)
+			return {
+				ok: false,
+				manual: true,
+				detail: `could not read ${plan.directory === "/" ? "" : plan.directory.slice(1)}package.json as JSON to add an override`,
+			}
+		}
+		const existingOverrides =
+			manifest.overrides !== null && typeof manifest.overrides === "object"
+				? (manifest.overrides as Record<string, unknown>)
+				: {}
+		manifest.overrides = { ...existingOverrides, [plan.packageName]: plan.patchedVersion }
+		workdirs.writeFile(pkgPath, `${JSON.stringify(manifest, null, "	")}\n`)
+		overrideWritten = true
+		// The override drives resolution, so the command takes no package argument.
+		argv = ["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"]
+	}
+
+	const [program, ...args] = argv
 	let updated = exec([program ?? "", ...args], cwd, UPDATE_TIMEOUT_SEC)
 	let usedFallback = false
 	if (updated.code !== 0) {
@@ -505,8 +564,12 @@ async function applyPlan(
 	// lockfile the tool decided was up to date, a `yarn upgrade` that resolved
 	// nothing. Opening a PR from that would claim a remediation the branch does
 	// not contain, and the alert would stay open with a "fix" attached to it.
+	// THE MANIFEST MUST HAVE MOVED, not just any file. With an `overrides` entry
+	// written above, `package.json` is dirty whether or not the lockfile was
+	// re-resolved — a check for "any change" would happily ship a PR that adds an
+	// override and fixes nothing.
 	const status = run(["status", "--porcelain"], workdir, 60)
-	if (status.code !== 0 || status.stdout.trim() === "") {
+	if (status.code !== 0 || !status.stdout.includes(plan.manifestPath)) {
 		workdirs.remove(workdir)
 		// `pnpm` exits 0 having resolved nothing when the package is transitive and
 		// the parent's range already pins the version it keeps — measured on GMW's
@@ -543,7 +606,7 @@ async function applyPlan(
 			title: `fix(deps): bump ${plan.packageName} to ${plan.patchedVersion} (security)`,
 			head: branch,
 			base: opts.defaultBranch,
-			body: buildVulnPrBody(plan, { legacyPeerDeps: usedFallback }),
+			body: buildVulnPrBody(plan, { legacyPeerDeps: usedFallback, overrides: overrideWritten }),
 		},
 	})
 	workdirs.remove(workdir)
