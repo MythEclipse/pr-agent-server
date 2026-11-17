@@ -209,6 +209,19 @@ export async function checkCiPassed(
 	token: string,
 	repo: string,
 	sha: string,
+	/**
+	 * Owner PAT, used only where the App is REFUSED.
+	 *
+	 * The App installation on this fleet has `checks`, `issues`, `contents`,
+	 * `metadata`, `pull_requests` — no `statuses`. So the combined-status read below
+	 * answered 403 on every head, the gate said `unknown`, and every caller treats
+	 * unknown as "wait for the next tick". Measured on MythEclipse/web1#24: the PR
+	 * waited indefinitely and the report blamed a transient GitHub fault.
+	 *
+	 * `""` preserves the old behaviour exactly (an App-only caller), which is what
+	 * the tests and any repo without a PAT configured get.
+	 */
+	pat = "",
 ): Promise<CiResult> {
 	const { status, runs: all, complete } = await listCheckRuns(api, token, repo, sha)
 	// Filtered BEFORE anything counts them, exactly like the workflow's own
@@ -259,7 +272,7 @@ export async function checkCiPassed(
 			msg: `⚠️ CI partially read (${checks.length} checks seen) — not merging on an incomplete list`,
 		}
 
-	const legacy = await checkCommitStatus(api, token, repo, sha)
+	const legacy = await checkCommitStatus(api, token, repo, sha, pat)
 	if (legacy.blocked) return legacy.blocked
 	if (!checks.length && legacy.count === 0) {
 		return {
@@ -322,8 +335,10 @@ export async function checkCiWithSuiteRequirement(
 	repo: string,
 	sha: string,
 	expectedChecks: readonly string[],
+	/** Owner PAT for the App's permission holes — see `checkCiPassed`. */
+	pat = "",
 ): Promise<CiResult> {
-	const result = await checkCiPassed(api, token, repo, sha)
+	const result = await checkCiPassed(api, token, repo, sha, pat)
 	// Only a GREEN verdict is suspicious this way.
 	if (!result.ok || expectedChecks.length === 0) return result
 

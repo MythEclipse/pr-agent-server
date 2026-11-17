@@ -71,6 +71,14 @@ export interface PollOpts {
 	 * was actually tested.
 	 */
 	expectedChecks?: readonly string[]
+	/**
+	 * Owner PAT, used only where the App is refused.
+	 *
+	 * The App has no `statuses` permission on this fleet, so the combined-status
+	 * read 403s and the poll would wait out its whole timeout on an `unknown` that
+	 * can never resolve. See `commit-status.ts` for the measurement.
+	 */
+	pat?: string
 }
 
 export interface PollResult {
@@ -109,8 +117,8 @@ export async function waitForCiSettled(
 	for (;;) {
 		polls += 1
 		last = opts.expectedChecks?.length
-			? await checkCiWithSuiteRequirement(api, token, repo, sha, opts.expectedChecks)
-			: await checkCiPassed(api, token, repo, sha)
+			? await checkCiWithSuiteRequirement(api, token, repo, sha, opts.expectedChecks, opts.pat)
+			: await checkCiPassed(api, token, repo, sha, opts.pat)
 
 		// A red CI is final. So is green. Only "pending" (and a read we could not
 		// perform) is worth another look. The flag, not the message text: the

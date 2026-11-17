@@ -169,7 +169,7 @@ export async function stepReview(
  * the toolchain made explicit.
  */
 export async function stepLockPrefix(deps: WorkerDeps, c: Ctx): Promise<void> {
-	const early = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+	const early = await checkCiPassed(deps.api, c.token, c.repo, c.headSha, deps.fetchGhToken())
 	// A RUNNING SUITE IS NOT A RED ONE. `ok: false` covers three different
 	// verdicts now (failed, pending, unreadable), and this arm's whole purpose is
 	// "CI is red, so pre-fix the lockfile and push". Pushing a lockfile commit
@@ -348,7 +348,7 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 	// (GitHub 5xx, a rate limit, a runner still registering) and spending 30
 	// minutes of a paid model on a guess is worse than waiting one tick — the
 	// CI gate downstream refuses to merge on an unknown gate anyway.
-	const ciNow = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+	const ciNow = await checkCiPassed(deps.api, c.token, c.repo, c.headSha, deps.fetchGhToken())
 	if (ciNow.ok) {
 		deps.report.push(
 			`   ✅ CI already green (${ciNow.msg}) — no fix needed, going to the merge gate`,
@@ -442,7 +442,7 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 			const fresh = await refetchHead(deps, c)
 			const sha = movedSha(fresh, c.headSha)
 			if (sha) c.headSha = sha
-			const current = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+			const current = await checkCiPassed(deps.api, c.token, c.repo, c.headSha, deps.fetchGhToken())
 			// Same distinction as above: a suite that is still running is not a
 			// failure the agent failed to fix, and saying so sends the operator
 			// after a red build that does not exist.
@@ -468,6 +468,10 @@ export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Pro
 			// reads as green on zero checks otherwise, which is how an untested fix
 			// got auto-merged.
 			expectedChecks: EXPECTED_CI_CHECKS,
+			// Same PAT the gate uses: without it the poll would spend its whole
+			// timeout on an `unknown` that cannot resolve — the App has no
+			// `statuses` permission, so the combined-status read is a permanent 403.
+			pat: deps.fetchGhToken(),
 		})
 		if (verdict.ci.ok) {
 			deps.report.push(`   ✅ CI green after iteration ${iteration} — ${verdict.ci.msg}`)
