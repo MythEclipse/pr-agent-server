@@ -33,7 +33,15 @@ export interface DbReviewQueueOptions {
  * would otherwise post a second GitHub comment for the same head SHA.
  */
 export function makeDbReviewQueue(opts: DbReviewQueueOptions): IDbReviewQueue {
-	const { store, concurrency, run, log = console.error, pollIntervalMs = 1_000 } = opts
+	const { store, concurrency, run, pollIntervalMs = 1_000 } = opts
+	const writeLog = opts.log ?? console.error
+	const log = (message: string) => {
+		try {
+			writeLog(message)
+		} catch {
+			// Logging must not interrupt queue recovery.
+		}
+	}
 	const cap = Math.max(1, Math.floor(concurrency))
 
 	let inFlight = 0
@@ -52,16 +60,25 @@ export function makeDbReviewQueue(opts: DbReviewQueueOptions): IDbReviewQueue {
 		const key = `${job.owner}/${job.repo}#${job.pr}`
 		let rerun = false
 		try {
-			await run(job)
-			// `complete` reports whether a webhook landed while this ran. It puts the
-			// row back on `pending` itself, so all this side needs to do is know that
-			// there IS work — the next `pump()` claims it.
-			rerun = (await store.complete(key)).rerun
-		} catch (err) {
-			// A failing job must never wedge the queue: record it and move on,
-			// which is what the in-memory queue does too.
-			log(`[queue] review FAILED for ${key}: ${String(err)}`)
-			await store.complete(key, String(err))
+			let error: string | null = null
+			try {
+				await run(job)
+			} catch (err) {
+				error = String(err)
+				log(`[queue] review FAILED for ${key}: ${error}`)
+			}
+			// Retain the slot and retry only persistence during an outage. Replaying
+			// the review would repeat the LLM call and GitHub publication, while
+			// releasing it would strand a running row until the next restart.
+			for (;;) {
+				try {
+					rerun = (await store.complete(key, error)).rerun
+					break
+				} catch (err) {
+					log(`[queue] completion deferred for ${key}: ${String(err)} — retrying`)
+					await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs))
+				}
+			}
 		} finally {
 			inFlight--
 			// A re-queued job means the queue is NOT idle: pump immediately instead

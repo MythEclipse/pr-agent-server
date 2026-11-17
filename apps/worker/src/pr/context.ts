@@ -24,6 +24,8 @@ import type { RepoOverrides, SyncState } from "../sync/config.ts"
 import type { PostDiscord } from "../sync/run.ts"
 import type { AgentPort, ProcessDeps, ReportPort } from "./autofix.ts"
 import type { RegistryFetch } from "./bump-guard.ts"
+import { checkCiWithSuiteRequirement } from "./ci.ts"
+import { EXPECTED_CI_CHECKS } from "./fix-loop.ts"
 import type { ProcRunner, Workdirs } from "./lockfix.ts"
 import type { FetchLike } from "./review.ts"
 import type { GhAppClient } from "./scan.ts"
@@ -520,4 +522,17 @@ export async function refetchHead(deps: WorkerDeps, c: Ctx): Promise<any | null>
 export const movedSha = (pr: any, from: string): string | null => {
 	const sha = strOf(pr?.head?.sha)
 	return sha && sha !== from ? sha : null
+}
+
+/** Keep the real-suite requirement for a pushed AI fix across gates and ticks. */
+export function checkHeadCi(deps: WorkerDeps, c: Ctx) {
+	const fix = c.fixState[c.repo]?.[String(c.prNum)]
+	const pushedFix = fix?.sha === c.headSha && Number(fix?.fix_commits ?? 0) > 0
+	return checkCiWithSuiteRequirement(
+		deps.api,
+		c.token,
+		c.repo,
+		c.headSha,
+		pushedFix ? EXPECTED_CI_CHECKS : [],
+	)
 }

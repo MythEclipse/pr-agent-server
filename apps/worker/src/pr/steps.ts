@@ -87,7 +87,11 @@ export async function stepPinGuard(deps: WorkerDeps, c: Ctx): Promise<boolean> {
  * Returns the review body, or null when the PR STOPS for this tick — a review
  * was just triggered and needs a cycle.
  */
-export async function stepReview(deps: WorkerDeps, c: Ctx): Promise<string | null> {
+export async function stepReview(
+	deps: WorkerDeps,
+	c: Ctx,
+	allowNoCodeMarker = true,
+): Promise<string | null> {
 	// THE HEAD SHA IS PART OF THE QUESTION. A guide published for an earlier
 	// commit is not a review of this one, and accepting it let the worker score
 	// and approve a diff nobody had looked at. `findReviewComment` refuses any
@@ -102,6 +106,7 @@ export async function stepReview(deps: WorkerDeps, c: Ctx): Promise<string | nul
 	// lockfile-only bump yields "No code suggestions found" rather than a guide,
 	// and re-triggering every five minutes produced duplicate comment spam.
 	if (
+		allowNoCodeMarker &&
 		isTrivialPr(c.title, c.author) &&
 		(await findTrivialNoReviewMarker(deps.api, c.token, c.repo, c.prNum))
 	) {

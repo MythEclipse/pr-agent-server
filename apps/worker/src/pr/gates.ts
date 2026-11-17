@@ -29,13 +29,14 @@ import {
 	rebaseStepAt,
 } from "../state.ts"
 import { checkPrStillValid, killOrphanedAgent, runAiFix } from "./autofix.ts"
-import { checkCiPassed, closeStaleCiPr, STALE_CI_CLOSE_DAYS } from "./ci.ts"
+import { closeStaleCiPr, STALE_CI_CLOSE_DAYS } from "./ci.ts"
 import {
 	AI_FIX_BUDGET_CEILING,
 	AI_FIX_ENABLED,
 	ageDays,
 	CONFLICT_ATTEMPT_CEILING,
 	type Ctx,
+	checkHeadCi,
 	isBudgetExhaustion,
 	isInfra,
 	isTransientInfra,
@@ -365,7 +366,7 @@ export async function stepSafetyAndCi(deps: WorkerDeps, c: Ctx, review: string):
 	deps.report.push(`   ✅ Safety score: ${safety.score}/10`)
 	c.score = safety.score
 
-	const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+	const ci = await checkHeadCi(deps, c)
 	deps.report.push(`   🧪 CI: ${ci.msg}`)
 	// An unreadable gate is not a green one, and it must stop BEFORE the stale
 	// branch below — otherwise "we do not know" gets answered with a close.

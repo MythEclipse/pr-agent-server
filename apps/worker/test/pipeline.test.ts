@@ -2950,3 +2950,76 @@ describe("clone workdirs are swept for closed PRs", () => {
 		}
 	})
 })
+
+describe("post-fix review and CI gates", () => {
+	const pushed = "b".repeat(40)
+	const moved = makePr({ head: { sha: pushed, ref: "feature/harden" } })
+	const green = (name: string): Route => ({
+		status: 200,
+		data: { check_runs: [{ name, status: "completed", conclusion: "success" }] },
+	})
+	const fixed = (comments: any[], checkName = "verify") =>
+		harness({
+			comments,
+			checkRunsReplySeq: [{ status: 200, data: { check_runs: RED_FOR_FIX } }, green(checkName)],
+			agent: [{ ok: true, snippet: "pushed fix" }],
+			pushedSha: pushed,
+			pullReplySeq: [
+				{ status: 200, data: makePr() },
+				{ status: 200, data: moved },
+			],
+		})
+
+	test("a pushed fix triggers a new review instead of merging under the old verdict", async () => {
+		const h = fixed([reviewComment(SAFE_REVIEW)])
+		const out = await processPr(h.deps, ctx)
+		expect(out.fixed).toBe(true)
+		expect(out.triggered).toBe(true)
+		expect(out.merged).toBe(false)
+		expect(approves(h.calls)).toBe(0)
+		expect(merges(h.calls)).toBe(0)
+	})
+
+	test("a fresh review and real suite allow the pushed head to merge", async () => {
+		const h = fixed([reviewComment(SAFE_REVIEW), reviewComment(SAFE_REVIEW, pushed)])
+		const out = await processPr(h.deps, ctx)
+		expect(out.merged).toBe(true)
+		expect(
+			h.calls.find((c) => c.method === "PUT" && c.path.endsWith("/merge"))?.json,
+		).toMatchObject({ sha: pushed })
+	})
+
+	test("a fresh review cannot bypass the missing real-suite verdict", async () => {
+		const h = fixed(
+			[reviewComment(SAFE_REVIEW), reviewComment(SAFE_REVIEW, pushed)],
+			"security-app",
+		)
+		const out = await processPr(h.deps, ctx)
+		expect(h.lines.some((l) => l.includes("No real CI ran"))).toBe(true)
+		expect(out.merged).toBe(false)
+		expect(approves(h.calls)).toBe(0)
+	})
+
+	test("the safety gate judges the new review after a push", async () => {
+		const unsafe = "## PR Reviewer Guide 🔍\n🏅 Score: 0\n🔒 Security concerns: Yes - SQL injection"
+		const h = fixed([reviewComment(SAFE_REVIEW), reviewComment(unsafe, pushed)])
+		const out = await processPr(h.deps, ctx)
+		expect(out.merged).toBe(false)
+		expect(approves(h.calls)).toBe(0)
+		expect(h.lines.some((line) => line.includes("SAFETY BLOCKED"))).toBe(true)
+	})
+
+	for (const author of ["alice", "dependabot[bot]"]) {
+		test(`a recorded fix still requires real CI on a later tick (${author})`, async () => {
+			const h = harness({
+				comments: [reviewComment(SAFE_REVIEW, pushed)],
+				checkRunsReply: green("security-app"),
+				fixState: { [REPO]: { [String(PR_NUM)]: { sha: pushed, fix_commits: 1 } } },
+			})
+			const out = await processPr(h.deps, { ...ctx, pr: { ...moved, user: { login: author } } })
+			expect(out.merged).toBe(false)
+			expect(approves(h.calls)).toBe(0)
+			expect(h.lines.some((l) => l.includes("No real CI ran"))).toBe(true)
+		})
+	}
+})

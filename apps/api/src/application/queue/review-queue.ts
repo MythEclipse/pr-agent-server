@@ -147,12 +147,12 @@ export class ReviewQueue {
 				// A throwing logger must not strand the queue.
 			}
 		} finally {
-			this.inFlight.delete(key)
 			// Coalesced re-run: the deduped webhook(s) landed while this ran, so
 			// review the PR again against its current head. Doing it here — before
 			// the idle check below — keeps the "pending implies running" invariant.
 			const rerun = this.rerun.delete(key)
 			if (rerun) this.pending.push(job)
+			else this.inFlight.delete(key)
 			this.running--
 			this.pump()
 			// No `return` inside `finally`: it would swallow a throw from the try

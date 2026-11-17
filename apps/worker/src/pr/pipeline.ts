@@ -41,10 +41,10 @@ import { LOCK_FILE } from "../lock.ts"
 import { alreadyFixed, getSkipReason, pruneClosedFixState } from "../state.ts"
 import { runUpstreamSync } from "../sync/run.ts"
 import type { ReportPort } from "./autofix.ts"
-import { checkCiPassed } from "./ci.ts"
 import {
 	AI_FIX_ENABLED,
 	type Ctx,
+	checkHeadCi,
 	ctime,
 	notifySkipOnce,
 	type PrResult,
@@ -79,7 +79,7 @@ type DependabotCiStatus = {
 async function dependabotCiStatus(deps: WorkerDeps, c: Ctx): Promise<DependabotCiStatus> {
 	if (c.author !== "dependabot[bot]") return { state: "not-dependabot" }
 
-	const ci = await checkCiPassed(deps.api, c.token, c.repo, c.headSha)
+	const ci = await checkHeadCi(deps, c)
 	if (ci.ok) return { state: "green", message: ci.msg }
 	// A RUNNING suite is neither green nor red. Reporting it as red printed
 	// "🔧 Dependabot CI is red — offering Claude Code a fix" and cleared
@@ -147,7 +147,7 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 		return c.out
 	}
 
-	const review = await stepReview(deps, c)
+	let review = await stepReview(deps, c)
 	if (review === null) return c.out // Triggered review: NOT a skip (line 1934).
 
 	let already = alreadyFixed(c.fixState, repo, c.prNum, c.headSha)
@@ -171,7 +171,14 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 		return c.out
 	}
 
+	const reviewedHead = c.headSha
 	await stepAiFix(deps, c, already)
+	if (c.headSha !== reviewedHead) {
+		// A pushed fix (or concurrent author push) invalidates the old verdict.
+		c.noCodeReview = false
+		review = await stepReview(deps, c, false)
+		if (review === null) return c.out
+	}
 	if (await stepSafetyAndCi(deps, c, review)) return c.out
 
 	// `=== false`, NOT falsy: GitHub's `mergeable` is null while it computes, and

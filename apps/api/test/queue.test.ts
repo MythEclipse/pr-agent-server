@@ -165,3 +165,34 @@ describe("ReviewQueue", () => {
 		expect(q.stats()).toMatchObject({ failed: 1, done: 1, pending: 0, running: 0 })
 	})
 })
+
+test("a delivery during a coalesced rerun never starts a parallel review of the same PR", async () => {
+	const releases: (() => void)[] = []
+	let active = 0
+	let peak = 0
+	let runs = 0
+	const q = new ReviewQueue({
+		concurrency: 2,
+		run: async () => {
+			active++
+			runs++
+			peak = Math.max(peak, active)
+			await new Promise<void>((resolve) => releases.push(resolve))
+			active--
+		},
+	})
+	const job = { owner: "o", repo: "r", pr: 1 }
+	q.enqueue(job)
+	q.enqueue(job)
+	releases.shift()?.()
+	await tick()
+	expect(runs).toBe(2)
+	expect(q.enqueue(job)).toBe("deduped")
+	expect(active).toBe(1)
+	releases.shift()?.()
+	await tick()
+	releases.shift()?.()
+	await q.drain()
+	expect(peak).toBe(1)
+	expect(runs).toBe(3)
+})
