@@ -1,3 +1,10 @@
+## [1.13.9](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.8...v1.13.9) (2026-11-17)
+
+
+### Bug Fixes
+
+* **vuln:** a comma in the override key EMPTIED the lockfile, and the gate called it fixed ([a2e9792](https://github.com/MythEclipse/pr-agent-server/commit/a2e97920f82245b36471501ed4993b958977ea1c)), closes [MythEclipse/web1#24](https://github.com/MythEclipse/web1/issues/24)
+
 ## [1.13.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.7...v1.13.8) (2026-11-17)
 
 
