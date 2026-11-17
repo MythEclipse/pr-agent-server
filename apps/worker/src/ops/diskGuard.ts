@@ -19,7 +19,7 @@
 // rather than fill the last gigabytes: a skipped run is recoverable, a full disk
 // is an outage.
 
-import { execFileSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { readdirSync, rmSync, statfsSync, statSync } from "node:fs"
 
 /** What the guard needs from the filesystem and the process runner. */
@@ -203,6 +203,26 @@ export function guardDisk(deps: DiskGuardDeps, opts: DiskGuardOptions): DiskGuar
 	return { usedPctBefore, usedPctAfter, removed, freedBytes, pruned, refuse }
 }
 
+/**
+ * Parse `du -xh --max-depth=1` output into sizes.
+ *
+ * Exported because it is the one part of the scan worth testing: `du` writes
+ * human sizes (`58G`, `8.5G`, `0`), tab-separates the path, and omits the unit on
+ * a bare byte count — three shapes, one of which a naive `parseInt` gets wrong.
+ */
+export function parseDuOutput(text: string): { path: string; bytes: number }[] {
+	const parsed: { path: string; bytes: number }[] = []
+	for (const line of text.split("\n")) {
+		const [size, dir] = line.split("\t")
+		if (!size || !dir) continue
+		const match = /^(\d+(?:\.\d+)?)([BKMGTP]?)$/.exec(size)
+		if (!match) continue
+		const unit = "BKMGTP".indexOf(match[2] || "B")
+		parsed.push({ path: dir, bytes: Number(match[1]) * 1024 ** Math.max(unit, 0) })
+	}
+	return parsed
+}
+
 /** The real dependencies. Kept here so callers cannot drift from the guard. */
 export function nodeDiskDeps(
 	exec: (argv: string[]) => { code: number },
@@ -242,25 +262,19 @@ export function nodeDiskDeps(
 		// turning a housekeeping run into a hang.
 		scan: (path) => {
 			try {
-				// stderr is DISCARDED: the scan runs as the service user, which cannot
-				// read /home/* or /etc/ssl/private, and `du` prints one line per denied
-				// directory — measured, that buried the report it was meant to produce.
-				const out = execFileSync("du", ["-xh", "--max-depth=1", path], {
+				// `spawnSync`, not `execFileSync`, and stderr discarded. Two measured
+				// reasons: the scan runs as the service user, which cannot read /home/*
+				// or /etc/ssl/private, so `du` prints one "Permission denied" line per
+				// directory and buries the report — and it exits NON-ZERO for those
+				// denials, which `execFileSync` turns into a throw that discarded the
+				// stdout it had already produced. A partial scan is still a useful scan.
+				const res = spawnSync("du", ["-xh", "--max-depth=1", path], {
 					timeout: 120_000,
 					encoding: "utf8",
 					stdio: ["ignore", "pipe", "ignore"],
 				})
-				return out
-					.split("\n")
-					.map((line) => {
-						const [size, dir] = line.split("	")
-						if (!size || !dir) return null
-						const match = /^(\d+(?:\.\d+)?)([BKMGTP])$/.exec(size)
-						if (!match) return null
-						const unit = "BKMGTP".indexOf(match[2] ?? "B")
-						return { path: dir, bytes: Number(match[1]) * 1024 ** unit }
-					})
-					.filter((entry): entry is { path: string; bytes: number } => entry !== null)
+				const out = res.stdout ?? ""
+				return parseDuOutput(out)
 			} catch {
 				return []
 			}

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { beforeEach, describe, expect, it } from "vitest"
 import { looksFlaky, runIdFromDetailsUrl, runTriage } from "../src/ops/ciTriage.ts"
-import { formatBytes, guardDisk, reapWorkdirs } from "../src/ops/diskGuard.ts"
+import { formatBytes, guardDisk, parseDuOutput, reapWorkdirs } from "../src/ops/diskGuard.ts"
 import { packageFromTitle, runHygiene, supersededPrs } from "../src/ops/hygiene.ts"
 import { enforceRepoSettings, readSettings } from "../src/ops/repoSettings.ts"
 import { codeqlLanguagesFor, codeqlWorkflowBody } from "../src/ops/syncHooks.ts"
@@ -151,6 +151,15 @@ describe("diskGuard", () => {
 		expect(res.usedPctBefore).toBe(90)
 		expect(res.usedPctAfter).toBe(90)
 		expect(res.refuse).toBe(false)
+	})
+
+	it("parses du's human sizes, including a bare byte count and a decimal", () => {
+		const parsed = parseDuOutput("58G	/home\n8.5G	/var\n0	/data\nnot-a-size	/x\n")
+		expect(parsed).toEqual([
+			{ path: "/home", bytes: 58 * GB },
+			{ path: "/var", bytes: 8.5 * GB },
+			{ path: "/data", bytes: 0 },
+		])
 	})
 
 	it("reports bytes in the unit an operator reads", () => {
