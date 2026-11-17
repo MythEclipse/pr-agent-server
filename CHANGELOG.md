@@ -1,3 +1,10 @@
+## [1.12.12](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.11...v1.12.12) (2026-11-17)
+
+
+### Bug Fixes
+
+* **history:** make `running` and `queued` mean what the dashboard says they mean ([f53c2f0](https://github.com/MythEclipse/pr-agent-server/commit/f53c2f042cde05ab1df6d58be447669c0205961a))
+
 ## [1.12.11](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.10...v1.12.11) (2026-11-17)
 
 
