@@ -1,3 +1,10 @@
+## [1.13.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.6...v1.13.7) (2026-11-17)
+
+
+### Bug Fixes
+
+* **ci-gate:** read commit status with the owner PAT — the App has no `statuses` permission ([7967cdc](https://github.com/MythEclipse/pr-agent-server/commit/7967cdcefbebca820c7e0e52900e774e27ba14bf))
+
 ## [1.13.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.5...v1.13.6) (2026-11-17)
 
 
