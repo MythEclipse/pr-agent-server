@@ -817,6 +817,8 @@ export type VulnAutofixSummary = {
 	manual: number
 	/** Plans whose advisory is stale: the lockfile resolves nothing vulnerable. */
 	alreadyPatched: number
+	/** Plans whose patch no reachable version can contain (upstream). */
+	blockedUpstream: number
 	failed: number
 	lines: string[]
 	perRepo: RepoAutofixResult[]
@@ -952,6 +954,18 @@ async function applyPlan(
 	 * when they were either fixed already or one override away from being fixed.
 	 */
 	alreadyPatched?: boolean
+	/**
+	 * True when the update ran and the lockfile STILL resolves a vulnerable copy:
+	 * the patch is outside what this manifest can reach.
+	 *
+	 * Not a human decision and not a failure of the run. MEASURED on zeavis-edu's
+	 * `glib`: the advisory's patch is 0.20.0, the crate that pulls glib is
+	 * `gtk ^0.18` under `tauri 2.12.5` (the newest 2.x), and the newest gtk on
+	 * crates.io is 0.19.0 — so no reachable version combination contains the fix.
+	 * The next run re-checks it for free, and the PR appears by itself the day
+	 * upstream ships a compatible release.
+	 */
+	blockedUpstream?: boolean
 	/**
 	 * True when this plan needed no work because its PR already exists.
 	 *
@@ -1388,14 +1402,25 @@ async function applyPlan(
 						: `${basename(plan.manifestPath)} resolves only ${[...new Set(versions)].join(", ")}, all at or above ${plan.patchedVersion} — the advisory is stale`,
 			}
 		}
+		if (vulnerable.length > 0) {
+			// The update ran and the vulnerable copy is still there: the patch is
+			// outside what this manifest can reach (a parent pins the old line). No
+			// human can decide that away either — it is upstream's to release, and
+			// the next run re-checks it for free.
+			return {
+				ok: false,
+				blockedUpstream: true,
+				detail:
+					`${basename(plan.manifestPath)} still resolves ${[...new Set(vulnerable)].join(", ")} — ` +
+					`${plan.patchedVersion} is not reachable from this manifest yet`,
+			}
+		}
 		return {
 			ok: false,
 			manual: true,
 			detail:
 				`the package manager resolved nothing (${program} exited 0)${forcedNow ? ` even with ${overrideLabel}` : ""}` +
-				(vulnerable.length > 0
-					? `, and ${basename(plan.manifestPath)} still resolves ${[...new Set(vulnerable)].join(", ")}`
-					: ", and the lockfile could not be read to tell whether anything is still vulnerable"),
+				", and the lockfile could not be read to tell whether anything is still vulnerable",
 		}
 	}
 
@@ -1412,7 +1437,7 @@ async function applyPlan(
 		workdirs.remove(workdir)
 		return {
 			ok: false,
-			manual: true,
+			blockedUpstream: true,
 			detail:
 				`${basename(plan.manifestPath)} still resolves ${[...new Set(stillThere)].join(", ")} after the update — ` +
 				`${plan.patchedVersion} is outside what this manifest can reach`,
@@ -1503,6 +1528,7 @@ export async function runVulnAutofix(
 		skipped: 0,
 		manual: 0,
 		alreadyPatched: 0,
+		blockedUpstream: 0,
 		failed: 0,
 		lines: [],
 		perRepo: [],
@@ -1586,6 +1612,14 @@ export async function runVulnAutofix(
 				perRepo.opened += 1
 				say(
 					`   ✅ ${repo}: ${plan.packageName} -> ${plan.patchedVersion} (${plan.alertNumbers.length} alert(s)) ${res.prUrl ?? res.detail}`,
+				)
+			} else if (res.blockedUpstream) {
+				// NOT a human decision and not a failure: the patch exists but no
+				// version this manifest can resolve contains it. The timer re-checks
+				// every run, so the PR appears by itself when upstream catches up.
+				summary.blockedUpstream += 1
+				say(
+					`   ⛔ ${repo}: ${plan.packageName} -> ${plan.patchedVersion} blocked upstream — ${res.detail}`,
 				)
 			} else if (res.alreadyPatched) {
 				// Not a failure and not a decision: the lockfile no longer resolves
