@@ -30,7 +30,7 @@
  */
 
 import type { RepoOverrides, SyncConfig, SyncState } from "./config.ts"
-import { num, syncConfig, syncEntry } from "./config.ts"
+import { num, pendingVerify, syncConfig, syncEntry } from "./config.ts"
 import { syncOpenPr, upstreamStatus } from "./repos.ts"
 import type { SyncForkDeps, SyncRequest, SyncResult } from "./run.ts"
 
@@ -99,6 +99,12 @@ export async function sweepForks(
 		const cfg = syncConfig(fork, deps.repoOverrides, enabled)
 		if (!cfg.enabled) continue // Python line 1750
 		if (budget <= 0 && !only) break // Python lines 1752-1753
+		// Verification runs before this sweep. A watch retained after an outage
+		// or failed rollback must not be overwritten by another upstream merge.
+		if (pendingVerify(state[fork])?.sha) {
+			lines.push(`   ⏳ ${fork}: waiting for the previous sync's CI watch`)
+			continue
+		}
 
 		// Python lines 1754-1759: an override pins the branch pair; otherwise
 		// the fork's default branch, and upstream's, default to the parent's.

@@ -195,7 +195,7 @@ type Call = { method: string; path: string; token?: string; json?: unknown }
 function recorder(
 	handler: (call: Call, n: number) => { status: number; data: unknown } = () => ({
 		status: 200,
-		data: {},
+		data: { check_runs: [] },
 	}),
 ): { api: GhClient; calls: Call[] } {
 	const calls: Call[] = []
@@ -664,7 +664,7 @@ describe("ci gate — messages and guard", () => {
 		expect(r.ok).toBe(false)
 		expect(r.unknown).toBe(true)
 	})
-	test("a non-object body is treated as no CI", async () => {
+	test("a malformed check list is unknown", async () => {
 		const r = await checkCiPassed(
 			{
 				request: async (_m: string, path: string) =>
@@ -676,7 +676,8 @@ describe("ci gate — messages and guard", () => {
 			"o/r",
 			"sha",
 		)
-		expect(r.ok).toBe(true)
+		expect(r.ok).toBe(false)
+		expect(r.unknown).toBe(true)
 	})
 	test("the check-runs path and the installation token are used", async () => {
 		const { api, calls } = recorder()

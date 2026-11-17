@@ -515,3 +515,52 @@ describe("setBotIdentity", () => {
 		})
 	})
 })
+
+test("rollback lease rejects a concurrent human push on the remote", () => {
+	const dir = tempDir("rollback-lease-")
+	try {
+		const remote = join(dir, "remote.git")
+		const local = join(dir, "local")
+		const git = (args: string[], cwd?: string) => {
+			const result = runGit(args, cwd, 10)
+			expect(result.code, result.stderr).toBe(0)
+			return result.stdout.trim()
+		}
+		git(["init", "--bare", remote])
+		git(["init", "-b", "main", local])
+		git(["config", "user.name", "Test"], local)
+		git(["config", "user.email", "test@example.invalid"], local)
+		git(["commit", "--allow-empty", "-m", "before"], local)
+		const before = git(["rev-parse", "HEAD"], local)
+		git(["commit", "--allow-empty", "-m", "bot merge"], local)
+		const bot = git(["rev-parse", "HEAD"], local)
+		git(["push", remote, "HEAD:refs/heads/main"], local)
+		git(["commit", "--allow-empty", "-m", "human work"], local)
+		const human = git(["rev-parse", "HEAD"], local)
+		git(["push", remote, "HEAD:refs/heads/main"], local)
+		// Redirect the fake credential URL to our local bare repo; actual Git
+		// enforces the remote SHA condition, independent of the clone's refs.
+		const run: GitRunner = (args, cwd, timeout) =>
+			runGit(
+				args.map((a) => (a.startsWith("https://") ? remote : a)),
+				cwd,
+				timeout,
+			)
+		const refused = pushRef(local, "f/x", before, "refs/heads/main", "app", true, {
+			pat: "pat",
+			run,
+			expectedHeadSha: bot,
+		})
+		expect(refused.ok).toBe(false)
+		expect(git(["--git-dir", remote, "rev-parse", "refs/heads/main"])).toBe(human)
+		const allowed = pushRef(local, "f/x", before, "refs/heads/main", "app", true, {
+			pat: "",
+			run,
+			expectedHeadSha: human,
+		})
+		expect(allowed.ok).toBe(true)
+		expect(git(["--git-dir", remote, "rev-parse", "refs/heads/main"])).toBe(before)
+	} finally {
+		rmSync(dir, { recursive: true, force: true })
+	}
+})

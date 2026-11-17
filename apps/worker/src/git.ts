@@ -190,6 +190,8 @@ export function isWorkflowPushError(err: string): boolean {
 export type PushRefResult = { ok: boolean; detail: string; protected: boolean }
 
 export type PushRefOpts = {
+	/** Remote head required for a conditional forced update. */
+	expectedHeadSha?: string
 	/** Injected PAT; `""` mirrors an unavailable `gh auth token`. */
 	pat: string
 	run?: GitRunner
@@ -214,10 +216,14 @@ export function pushRef(
 	force = false,
 	opts: PushRefOpts,
 ): PushRefResult {
-	const refspec = `${force ? "+" : ""}${source}:${dest}`
+	const lease = opts.expectedHeadSha
+	const refspec = `${force && !lease ? "+" : ""}${source}:${dest}`
 	let last = "no push credentials available"
 	for (const { url, kind } of pushUrls(fork, appToken, opts.pat)) {
-		const r = (opts.run ?? runGit)(["push", url, refspec], workdir, PUSH_TIMEOUT_SEC)
+		const args = lease
+			? ["push", `--force-with-lease=${dest}:${lease}`, url, refspec]
+			: ["push", url, refspec]
+		const r = (opts.run ?? runGit)(args, workdir, PUSH_TIMEOUT_SEC)
 		if (r.code === 0) {
 			return { ok: true, detail: `${kind} push ok`, protected: false }
 		}

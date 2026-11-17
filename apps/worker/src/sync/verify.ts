@@ -11,34 +11,11 @@
  * tip. Once a human (or another sync) pushes on top, the merge is no longer
  * ours to undo and the watch simply stops.
  *
- * THERE ARE SEVEN EXITS AND THEY ARE NOT INTERCHANGEABLE. Three of them write
- * state, two deliberately do NOT, and the difference is behavioural, not
- * cosmetic. In order (Python lines 1466-1514):
- *
- *   (a) `verify_ci` false, or a dry run → clear, NO save, NO line (1466-1468).
- *       A dry run must leave nothing behind, so it cannot even persist the
- *       clearing.
- *   (b) age > `verify_ci_max_age_h` → clear, SAVE, one line, KEEP the merge
- *       (1470-1475). The merge stays: after 6 hours a revert would race real
- *       development, and the report says so explicitly.
- *   (c) the branch tip moved past our sha → clear, SAVE, one line (1477-1483).
- *       No revert — the guard that keeps the worker from discarding a human's
- *       work.
- *   (d) any check FAILED → revert, clear, `last_merged_upstream_sha = ""`,
- *       SAVE, Discord (1488-1502). Clearing the merged sha is what lets the
- *       next tick try the same upstream tip again.
- *   (e) NO checks and age < `no_ci_grace_s` → CONTINUE, clear nothing, save
- *       nothing (1503-1505). Check-runs may not have registered yet; this is
- *       the one exit that does nothing at all. Note the boundary is
- *       EXCLUSIVE — `age < grace` keeps waiting, `age >= grace` stops.
- *   (f) no checks and past the grace → clear, SAVE, NO line (1506-1508).
- *   (g) still running → CONTINUE, clear nothing, save nothing (1509-1510).
- *   (h) green → clear, SAVE, one line (1511-1514).
- *
- * (a) versus (e) is the asymmetry a naive rewrite loses: one saves and one
- * does not, and both are correct. (a) is a policy change (the watch is off),
- * (e) is patience (the watch is on, we are early).
+ * Unreadable tips or CI lists keep the watch armed until a later tick. Only a
+ * confirmed successful rollback clears the merge record. A rollback also uses
+ * an explicit Git lease so a push after the tip read cannot be overwritten.
  */
+import { listCheckRuns } from "../pr/ci.ts"
 import type { GhClient } from "../pr/scan.ts"
 import type { RepoOverrides, SyncEntry, SyncState } from "./config.ts"
 import { num, pendingVerify, syncConfig } from "./config.ts"
@@ -93,9 +70,7 @@ const asObject = (value: unknown): Record<string, any> | undefined =>
  *
  * NEVER THROWS beyond what a caller must handle: `GhClient.request` already
  * never throws (github.ts exhausts its retries and returns `{status: 0,
- * data: {}}`), so a transport failure here degrades to "no tip", "no checks"
- * and therefore the patience path — the same as the Python, where `gh_api`
- * returns `(0, {})` on exhaustion.
+ * data: {}}`). An unavailable tip or incomplete CI list keeps the watch armed.
  *
  * The `pending_verify` sha is the guard, not the branch name: a merge we did
  * not push has no `pending_verify`, so it is never a candidate for a revert.
@@ -137,12 +112,16 @@ export async function verifyPendingSyncs(
 			continue
 		}
 
-		// Python line 1476: the TIP of the branch, as a one-element list.
-		const tipResult = await deps.api.request("GET", `/repos/${fork}/commits/${branch}?per_page=1`, {
-			token,
-		})
-		const tipList = Array.isArray(tipResult.data) ? tipResult.data : []
-		const tip = tipList.length ? String(asObject(tipList[0])?.sha ?? "") : ""
+		const tipResult = await deps.api.request(
+			"GET",
+			`/repos/${fork}/commits/${encodeURIComponent(branch)}`,
+			{ token },
+		)
+		const tip = asObject(tipResult.data)?.sha
+		if (tipResult.status !== 200 || typeof tip !== "string" || !tip) {
+			lines.push(`   ⏳ ${fork}: branch tip unavailable — keeping the CI watch`)
+			continue
+		}
 
 		// (c) — someone pushed on top of our merge. Not ours to revert.
 		if (tip && tip !== pending.sha) {
@@ -155,15 +134,19 @@ export async function verifyPendingSyncs(
 			continue
 		}
 
-		const checksResult = await deps.api.request(
-			"GET",
-			`/repos/${fork}/commits/${pending.sha}/check-runs`,
-			{ token },
+		const {
+			status,
+			runs: checks,
+			complete,
+		} = await listCheckRuns(deps.api, token, fork, pending.sha)
+		if (status !== 200 || !complete) {
+			lines.push(`   ⏳ ${fork}: CI list unavailable or incomplete — keeping the CI watch`)
+			continue
+		}
+		const failed = checks.filter(
+			(c: any) =>
+				c?.status === "completed" && !["success", "neutral", "skipped"].includes(c?.conclusion),
 		)
-		const checks = Array.isArray(asObject(checksResult.data)?.check_runs)
-			? (checksResult.data as any).check_runs
-			: []
-		const failed = checks.filter((c: any) => c?.conclusion === "failure")
 		const running = checks.filter((c: any) => c?.status !== "completed")
 
 		// (d) — the only path that touches the branch.
@@ -177,8 +160,13 @@ export async function verifyPendingSyncs(
 				fork,
 				branch,
 				preMergeSha: pending.pre_merge_sha ?? "",
+				expectedHeadSha: pending.sha,
 				reason: `CI failed: ${names}`,
 			})
+			if (!reverted.ok) {
+				lines.push(`   ⚠️ ${fork}: rollback failed: ${reverted.detail} — keeping the CI watch`)
+				continue
+			}
 			lines.push(`   ↩️  ${fork}: ${reverted.detail}`)
 			await deps.postDiscord(
 				`↩️ Fork sync reverted: ${fork}`,

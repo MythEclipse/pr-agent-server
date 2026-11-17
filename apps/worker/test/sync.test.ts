@@ -1148,8 +1148,8 @@ describe("group 9 · verifyPendingSyncs", () => {
 	const verifyHarness = (checkRuns: unknown[], tip = PENDING_SHA) => {
 		const reverts: Revert[] = []
 		const api = fakeApi((_m, path) => {
-			if (path.includes("/commits/main?per_page=1")) return { data: [{ sha: tip }] }
-			if (path.endsWith("/check-runs")) return { data: { check_runs: checkRuns } }
+			if (path === "/repos/f/x/commits/main") return { data: { sha: tip } }
+			if (path.includes("/check-runs?")) return { data: { check_runs: checkRuns } }
 			return { data: {} }
 		})
 		const discord = recordingDiscord()
@@ -1454,12 +1454,13 @@ describe("group 13 · fetch URL, quality prompt, revert, state file", () => {
 			fork: "f/x",
 			branch: "main",
 			preMergeSha: "abcdef123456",
+			expectedHeadSha: "bot-merge",
 			reason: "CI failed: build",
 			fetchGhToken: () => "",
 		})
 		expect(out.ok).toBe(true)
 		expect(out.detail).toBe("reverted main to abcdef12 (CI failed: build)")
-		expect(git.state.pushes).toEqual(["+abcdef123456:refs/heads/main"])
+		expect(git.state.pushes).toEqual(["abcdef123456:refs/heads/main"])
 		// No workdir survives the revert, success or not.
 		expect(git.verbs[0]).toBe("clone")
 	})
@@ -1472,6 +1473,7 @@ describe("group 13 · fetch URL, quality prompt, revert, state file", () => {
 			fork: "f/x",
 			branch: "main",
 			preMergeSha: "abcdef123456",
+			expectedHeadSha: "bot-merge",
 			reason: "CI failed",
 			fetchGhToken: () => "",
 		})

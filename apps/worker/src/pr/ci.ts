@@ -161,17 +161,15 @@ export async function listCheckRuns(
 		status = res.status
 		if (status !== 200) return { status, runs, complete: false }
 		const body = res.data as { check_runs?: unknown; total_count?: unknown } | null
-		const pageRuns =
-			body !== null && typeof body === "object" && Array.isArray(body.check_runs)
-				? (body.check_runs as any[])
-				: []
+		if (!body || !Array.isArray(body.check_runs)) return { status, runs, complete: false }
+		const pageRuns = body.check_runs as any[]
 		runs.push(...pageRuns)
-		// A short page is the last page: GitHub answers a page past the end with
-		// `[]`, and the loop must not treat that as "more to come".
-		if (pageRuns.length < CHECK_PAGE_SIZE) return { status, runs, complete: true }
-		const total = typeof body?.total_count === "number" ? body.total_count : null
-		lastTotal = total
+		const total = typeof body.total_count === "number" ? body.total_count : null
 		if (total !== null && runs.length >= total) return { status, runs, complete: true }
+		if (pageRuns.length === 0)
+			return { status, runs, complete: total === null || runs.length >= total }
+		if (total === null && pageRuns.length < CHECK_PAGE_SIZE) return { status, runs, complete: true }
+		lastTotal = total
 	}
 	// The CAP ended this walk, not GitHub. Only `total_count` can prove the list
 	// is nevertheless whole; without it, it is partial by definition.

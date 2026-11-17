@@ -215,6 +215,8 @@ export type RevertArgs = {
 	branch: string
 	/** The fork's tip BEFORE our merge — the sha to force back to. */
 	preMergeSha: string
+	/** Only replace this exact remote head; never discard a subsequent push. */
+	expectedHeadSha: string
 	/** Reported in the success detail; never used to decide anything. */
 	reason: string
 	/** Python `_fetch_gh_token()` — the PAT the push tries first. */
@@ -237,8 +239,8 @@ export type RevertArgs = {
  * a server that still had the object, silently discard every commit between.
  * The check runs BEFORE the push for that reason.
  *
- * `force: true` is the whole point (line 1443) and must never be "tidied" into
- * a fast-forward.
+ * The rollback is forced only with an explicit expected-head lease. A later
+ * remote push makes the lease fail instead of discarding somebody else's work.
  */
 export function syncRevertMerge(
 	run: GitRunner,
@@ -246,6 +248,8 @@ export function syncRevertMerge(
 	args: RevertArgs,
 ): RevertOutcome {
 	const { appToken, fork, branch, preMergeSha, reason } = args
+	if (!args.expectedHeadSha || !preMergeSha)
+		return { ok: false, detail: "missing rollback commit identity" }
 	const dir = `${SYNC_TMP_BASE}/${fork.replace(/\//g, "_")}_revert`
 
 	if (workdirs.exists(dir)) workdirs.remove(dir) // Python lines 1431-1432
@@ -280,6 +284,7 @@ export function syncRevertMerge(
 		const pushed = pushRef(dir, fork, preMergeSha, `refs/heads/${branch}`, appToken, true, {
 			pat: args.fetchGhToken?.() ?? "",
 			run,
+			expectedHeadSha: args.expectedHeadSha,
 		})
 		if (pushed.ok) {
 			return { ok: true, detail: `reverted ${branch} to ${preMergeSha.slice(0, 8)} (${reason})` }
