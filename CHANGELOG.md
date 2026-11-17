@@ -1,3 +1,10 @@
+## [1.12.15](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.14...v1.12.15) (2026-11-17)
+
+
+### Bug Fixes
+
+* **worker:** name the one alert that no release can fix yet ([a817d57](https://github.com/MythEclipse/pr-agent-server/commit/a817d579367a77e1c789d1678b615e3392641f04))
+
 ## [1.12.14](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.13...v1.12.14) (2026-11-17)
 
 
