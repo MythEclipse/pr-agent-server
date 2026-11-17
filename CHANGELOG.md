@@ -1,3 +1,10 @@
+## [1.13.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.7...v1.13.8) (2026-11-17)
+
+
+### Bug Fixes
+
+* **ci-gate:** thread the PAT through the MERGE gate too — it was the one left out ([3b35e5e](https://github.com/MythEclipse/pr-agent-server/commit/3b35e5e6f3de914974b19a68777e3744ab995e34))
+
 ## [1.13.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.6...v1.13.7) (2026-11-17)
 
 
