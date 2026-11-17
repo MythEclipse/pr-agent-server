@@ -101,6 +101,80 @@ describe("commit status with an App that cannot read statuses", () => {
 	})
 })
 
+describe("every reader of the combined status gets the PAT", () => {
+	/**
+	 * A STATIC check, because the bug it prevents was a MISSING ARGUMENT at one of
+	 * five call sites. Measured live: the fix loop printed
+	 *
+	 *   ✅ CI already green (✅ 1 checks green) — no fix needed, going to the merge gate
+	 *   🧪 CI: ⚠️ Commit status unavailable (HTTP 403) — no owner PAT was available
+	 *
+	 * — two gates, one credential, opposite verdicts, and the merge gate was the one
+	 * that had been left out. A unit test of `checkCiPassed` cannot see that, and a
+	 * reviewer cannot reliably see it either, so the wiring is asserted.
+	 */
+	it("passes the PAT at every call site in src", async () => {
+		const { readFileSync, readdirSync, statSync } = await import("node:fs")
+		const { join } = await import("node:path")
+		const root = join(import.meta.dirname, "..", "src")
+
+		const files: string[] = []
+		const walk = (dir: string): void => {
+			for (const entry of readdirSync(dir)) {
+				const full = join(dir, entry)
+				if (statSync(full).isDirectory()) walk(full)
+				else if (full.endsWith(".ts")) files.push(full)
+			}
+		}
+		walk(root)
+
+		/**
+		 * Strip comments BEFORE scanning. The first version of this test used
+		 * `fn\([^)]*\)` and matched nothing useful: a call site's own explanatory
+		 * comment contains `(HTTP 403)`, so the regex stopped at that paren and the
+		 * "call" it captured was a fragment with no arguments at all — the check
+		 * failed on a file that was already correct. A regex over source is only
+		 * worth having if it is run against source and not against prose.
+		 */
+		const stripComments = (src: string): string =>
+			src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")
+
+		/** The full argument text of `fn(...)`, paren-balanced, so nested calls survive. */
+		const callsTo = (src: string, fn: string): string[] => {
+			const found: string[] = []
+			const re = new RegExp(`\\b${fn}\\s*\\(`, "g")
+			for (const match of src.matchAll(re)) {
+				let depth = 0
+				let i = (match.index ?? 0) + match[0].length - 1
+				const start = i
+				for (; i < src.length; i++) {
+					if (src[i] === "(") depth += 1
+					else if (src[i] === ")") {
+						depth -= 1
+						if (depth === 0) break
+					}
+				}
+				found.push(src.slice(start, i + 1))
+			}
+			return found
+		}
+
+		const offenders: string[] = []
+		for (const file of files) {
+			if (file.endsWith("ci.ts") || file.endsWith("commit-status.ts")) continue
+			const text = stripComments(readFileSync(file, "utf8"))
+			for (const fn of ["checkCiPassed", "checkCiWithSuiteRequirement"]) {
+				for (const call of callsTo(text, fn)) {
+					if (call.includes("fetchGhToken") || call.includes("opts.pat") || call.includes(", pat"))
+						continue
+					offenders.push(`${file.split("/src/")[1]}: ${call.replace(/\s+/g, " ").slice(0, 90)}`)
+				}
+			}
+		}
+		expect(offenders).toEqual([])
+	})
+})
+
 describe("checkCiPassed with the PAT fallback", () => {
 	it("reaches a real verdict on a head the App's statuses permission cannot see", async () => {
 		const client = api({

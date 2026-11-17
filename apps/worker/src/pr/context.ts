@@ -534,5 +534,13 @@ export function checkHeadCi(deps: WorkerDeps, c: Ctx) {
 		c.repo,
 		c.headSha,
 		pushedFix ? EXPECTED_CI_CHECKS : [],
+		// THE SAME PAT THE EARLIER GATES USE. This is the call the MERGE gate makes,
+		// and it was the one site left without the fallback: the fix loop reported
+		// `✅ CI already green` and then the merge gate immediately answered
+		// `⚠️ Commit status unavailable (HTTP 403) — no owner PAT was available`,
+		// because the App has no `statuses` permission. Two gates, one credential,
+		// opposite verdicts — so the fallback has to be threaded through EVERY
+		// reader of the combined status, not just the ones that looked convenient.
+		deps.fetchGhToken(),
 	)
 }
