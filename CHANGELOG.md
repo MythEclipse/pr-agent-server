@@ -1,3 +1,10 @@
+## [1.13.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.4...v1.13.5) (2026-11-17)
+
+
+### Bug Fixes
+
+* **disk:** the consumer report was buried under its own permission errors ([d16d305](https://github.com/MythEclipse/pr-agent-server/commit/d16d30593fb8beeb899b1eeb0d5b4a3424006315))
+
 ## [1.13.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.3...v1.13.4) (2026-11-17)
 
 
