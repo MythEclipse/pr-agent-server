@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it } from "vitest"
 import { looksFlaky, runIdFromDetailsUrl, runTriage } from "../src/ops/ciTriage.ts"
 import { formatBytes, guardDisk, reapWorkdirs } from "../src/ops/diskGuard.ts"
 import { packageFromTitle, runHygiene, supersededPrs } from "../src/ops/hygiene.ts"
@@ -27,6 +27,8 @@ function fakeApi(routes: Record<string, { status: number; data?: any }>) {
 
 describe("diskGuard", () => {
 	const GB = 1024 * 1024 * 1024
+	// Shared by the log assertions below.
+	const lines: string[] = []
 	const deps = (
 		usedPct: number,
 		afterCleanupPct: number,
@@ -56,6 +58,9 @@ describe("diskGuard", () => {
 			},
 		}
 	}
+	beforeEach(() => {
+		lines.length = 0
+	})
 
 	it("reaps only directories this worker owns, and only stale ones", () => {
 		const h = deps(90, 90, [
@@ -88,15 +93,40 @@ describe("diskGuard", () => {
 		expect(res.refuse).toBe(false)
 	})
 
-	it("prunes caches only when reaping was not enough", () => {
+	it("prunes the cache only when reaping was not enough, and reports a failure", () => {
 		const h = deps(90, 96, [{ name: "_vuln_x", mtimeMs: 0 }])
 		const res = guardDisk(h.deps, { base: "/tmp/pr-queue-work", refuseAtPct: 95 })
-		expect(h.pruned).toEqual([
-			["pnpm", "store", "prune"],
-			["cargo", "cache", "clean"],
-		])
+		expect(h.pruned).toEqual([["pnpm", "store", "prune"]])
+		// A prune that exits non-zero is still REPORTED. The first version dropped
+		// it into an `if (code === 0)` and claimed a cleanup that never happened —
+		// `cargo cache clean` was not even installed.
+		expect(res.pruned).toEqual(["pnpm store prune"])
 		// 96% is above the hard limit, so the caller is told to stop.
 		expect(res.refuse).toBe(true)
+	})
+
+	it("names the biggest directories instead of guessing at caches", () => {
+		const h = deps(90, 90, [])
+		const res = guardDisk(
+			{
+				...h.deps,
+				// Measured shape on this box: /home 58G, /usr 13G, /var 8.5G — none of
+				// it the worker's, which is why reporting beats guessing.
+				scan: () => [
+					{ path: "/var", bytes: 8.5 * GB },
+					{ path: "/home", bytes: 58 * GB },
+					{ path: "/usr", bytes: 13 * GB },
+				],
+				log: (line) => lines.push(line),
+			},
+			{ base: "/tmp/pr-queue-work", pruneCaches: false },
+		)
+		expect(res.usedPctBefore).toBe(90)
+		expect(lines.filter((l) => l.includes(" is "))).toEqual([
+			"disk: /home is 58.0G",
+			"disk: /usr is 13.0G",
+			"disk: /var is 8.5G",
+		])
 	})
 
 	it("judges the threshold by the WORST filesystem, not just the clone directory", () => {

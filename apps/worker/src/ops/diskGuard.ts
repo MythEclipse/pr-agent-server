@@ -19,6 +19,7 @@
 // rather than fill the last gigabytes: a skipped run is recoverable, a full disk
 // is an outage.
 
+import { execFileSync } from "node:child_process"
 import { readdirSync, rmSync, statfsSync, statSync } from "node:fs"
 
 /** What the guard needs from the filesystem and the process runner. */
@@ -31,6 +32,16 @@ export type DiskGuardDeps = {
 	remove: (path: string) => void
 	/** Run a cache-pruning command; returns whether it exited 0. */
 	prune: (argv: string[]) => { code: number }
+	/**
+	 * The biggest directories under a path, for the report.
+	 *
+	 * WHY REPORT AT ALL. Measured on this box: `/` is 89% full and the top consumer
+	 * is `/home` at 58G — `/var/lib/pr-agent-server` is 3.0G and the cargo registry
+	 * 36M. So the reaper is correct hygiene for the worker's own growth and will
+	 * never be the cure for this disk. Printing the real consumers is what makes
+	 * the number actionable; guessing at caches is what makes a guard feel useless.
+	 */
+	scan?: (path: string) => { path: string; bytes: number }[]
 	now: () => number
 	log: (line: string) => void
 }
@@ -155,13 +166,27 @@ export function guardDisk(deps: DiskGuardDeps, opts: DiskGuardOptions): DiskGuar
 
 		// Caches only once the cheap reaping has not been enough: pruning them
 		// costs a re-download on the next run, so it is the second resort.
+		//
+		// ONE COMMAND, and failures are REPORTED rather than dropped. The first
+		// version ran `cargo cache clean` too, which is not installed on this box —
+		// it exited 127 and vanished into the `if (code === 0)` branch, so the log
+		// claimed a cleanup that never happened. `cargo`'s registry is 36M here:
+		// not worth a destructive delete for a disk that is 89% full.
 		if (opts.pruneCaches !== false && worstPct() >= reapAtPct) {
-			for (const argv of [
-				["pnpm", "store", "prune"],
-				["cargo", "cache", "clean"],
-			]) {
-				const res = deps.prune(argv)
-				if (res.code === 0) pruned.push(argv.join(" "))
+			const argv = ["pnpm", "store", "prune"]
+			const res = deps.prune(argv)
+			pruned.push(res.code === 0 ? argv.join(" ") : `${argv.join(" ")} (exit ${res.code})`)
+		}
+
+		// AND SAY WHERE THE SPACE ACTUALLY IS. `du` on `/` is a few seconds, which is
+		// why it only runs when the disk is already a problem.
+		if (deps.scan) {
+			const biggest = deps
+				.scan(systemPath)
+				.sort((a, b) => b.bytes - a.bytes)
+				.slice(0, 3)
+			for (const entry of biggest) {
+				deps.log(`disk: ${entry.path} is ${formatBytes(entry.bytes)}`)
 			}
 		}
 	}
@@ -213,5 +238,28 @@ export function nodeDiskDeps(
 		prune: exec,
 		now: () => Date.now(),
 		log,
+		// `du -x` stays on one filesystem, and the timeout keeps a slow disk from
+		// turning a housekeeping run into a hang.
+		scan: (path) => {
+			try {
+				const out = execFileSync("du", ["-xh", "--max-depth=1", path], {
+					timeout: 120_000,
+					encoding: "utf8",
+				})
+				return out
+					.split("\n")
+					.map((line) => {
+						const [size, dir] = line.split("	")
+						if (!size || !dir) return null
+						const match = /^(\d+(?:\.\d+)?)([BKMGTP])$/.exec(size)
+						if (!match) return null
+						const unit = "BKMGTP".indexOf(match[2] ?? "B")
+						return { path: dir, bytes: Number(match[1]) * 1024 ** unit }
+					})
+					.filter((entry): entry is { path: string; bytes: number } => entry !== null)
+			} catch {
+				return []
+			}
+		},
 	}
 }
