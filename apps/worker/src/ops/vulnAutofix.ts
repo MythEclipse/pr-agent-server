@@ -479,6 +479,71 @@ export function writeWorkspaceOverride(raw: string, key: string, version: string
 	return `${lines.join("\n")}\n`
 }
 
+/**
+ * How many packages a lockfile records, or `null` when this format does not say.
+ *
+ * Used ONLY to detect destruction: an update that leaves FEWER packages than the
+ * committed lockfile had has deleted state, not fixed a vulnerability. A format
+ * this cannot count answers `null`, which disables the check rather than guessing.
+ */
+export function lockPackageCount(workdirs: Workdirs, lockPath: string): number | null {
+	let raw: string
+	try {
+		raw = workdirs.readFile(lockPath)
+	} catch {
+		return null
+	}
+	const file = basename(lockPath).toLowerCase()
+	if (file === "package-lock.json" || file === "npm-shrinkwrap.json") {
+		try {
+			const lock = JSON.parse(raw) as { packages?: Record<string, unknown> }
+			return Object.keys(lock.packages ?? {}).length
+		} catch {
+			return null
+		}
+	}
+	if (file === "pnpm-lock.yaml") {
+		// `packages:` (v6) or `snapshots:` (v9) — count the top-level entries of
+		// whichever is present, at exactly one indent level.
+		const block = /^(?:packages|snapshots):\s*\n((?:[ \t]+\S.*\n?)*)/m.exec(raw)?.[1]
+		if (block === undefined) return null
+		return block.split("\n").filter((line) => /^ {2}[^\s]/.test(line)).length
+	}
+	if (file === "cargo.lock") return raw.split("[[package]]").length - 1
+	return null
+}
+
+/**
+ * Turn an advisory's vulnerable range into a selector npm will accept.
+ *
+ * THE BUG THIS EXISTS FOR, and it shipped a destroyed lockfile to a user's repo.
+ * GitHub writes the range as a comma-separated SET:
+ *
+ *   >= 7.0.0, < 11.0.1
+ *
+ * npm's override selector is a SINGLE range with a space-separated conjunction,
+ * and it does not reject the comma form — it silently treats it as a selector
+ * matching nothing. Measured on MythEclipse/web1 (npm 12.0.2):
+ *
+ *   overrides: {"minimatch@>= 7.0.0, < 11.0.1": "11.0.1"}
+ *   $ npm install --package-lock-only   →  "up to date in 140ms"
+ *   lockfile before: 421 packages       after: 0 packages
+ *
+ * A 224KB lockfile replaced by a 140-byte stub, exit code 0, and `git status`
+ * showed the lockfile as changed — so every gate downstream saw a "fix". The
+ * comma is the whole difference: the same range with a space resolves normally
+ * and leaves all 421 packages in place.
+ */
+export function npmRange(range: string): string {
+	const parts = range
+		.split(",")
+		.map((part) => part.trim())
+		.filter(Boolean)
+	// npm's conjunction is whitespace. Two bounds (`>= a < b`) are the common
+	// shape; a single bound is returned unchanged.
+	return parts.join(" ")
+}
+
 export function writeForcedVersion(
 	raw: string,
 	file: string,
@@ -512,7 +577,7 @@ export function writeForcedVersion(
 				label = "pnpm.overrides"
 				break
 			}
-			const key = opts.scopeToRange ? `${pkg}@${opts.scopeToRange}` : pkg
+			const key = opts.scopeToRange ? `${pkg}@${npmRange(opts.scopeToRange)}` : pkg
 			return {
 				text: writeWorkspaceOverride(opts.workspaceYaml ?? "", key, patchedVersion),
 				label: "overrides (pnpm-workspace.yaml)",
@@ -549,7 +614,7 @@ export function writeForcedVersion(
 		block[leaf] !== null && typeof block[leaf] === "object"
 			? (block[leaf] as Record<string, unknown>)
 			: {}
-	const key = opts.scopeToRange ? `${pkg}@${opts.scopeToRange}` : pkg
+	const key = opts.scopeToRange ? `${pkg}@${npmRange(opts.scopeToRange)}` : pkg
 	block[leaf] = { ...existing, [key]: patchedVersion }
 
 	const indent = /\n([^\S\n]+)"/.exec(raw)?.[1] ?? "	"
@@ -1054,6 +1119,17 @@ async function applyPlan(
 		return { ok: false, detail: `clone failed: ${head(reportable(cloned.stderr), 200)}` }
 	}
 
+	// THE BASELINE, MEASURED ON THE CLONE BEFORE ANY TOOL TOUCHES IT.
+	//
+	// Every gate below compares against this, and the comparison is what makes
+	// "the lockfile changed" mean "the lockfile was UPDATED" rather than "the
+	// lockfile was REPLACED". Taken here, immediately after the clone, because a
+	// moment later the override write has already dirtied `package.json`.
+	const lockBaseline = lockPackageCount(
+		workdirs,
+		`${plan.directory === "/" ? workdir : `${workdir}${plan.directory}`}/${basename(plan.manifestPath)}`,
+	)
+
 	// The cwd first, because the Yarn form depends on the tree that was just
 	// cloned (its root `package.json` declares the major).
 	const cwd = plan.directory === "/" ? workdir : `${workdir}${plan.directory}`
@@ -1484,6 +1560,34 @@ async function applyPlan(
 			detail:
 				`${basename(plan.manifestPath)} still resolves ${[...new Set(stillThere)].join(", ")} after the update — ` +
 				`${plan.patchedVersion} is outside what this manifest can reach`,
+		}
+	}
+
+	// A LOCKFILE THAT LOST PACKAGES IS NOT A FIX, AND MUST NOT REACH A PR.
+	//
+	// Checked HERE, immediately before the commit, because this is the last point
+	// where the working tree is still available and the first point where every
+	// route has finished writing. The earlier placement was inside the "nothing
+	// moved" arm, which was wrong for the case that actually happened: a destroyed
+	// lockfile DOES move — `git status` shows it — so the guard never ran and the
+	// PR was opened.
+	//
+	// MEASURED on MythEclipse/web1#24, and it reached a user's repo: a
+	// comma-separated override selector (`minimatch@>= 7.0.0, < 11.0.1`, exactly
+	// how GitHub writes the advisory) made `npm install --package-lock-only` exit 0
+	// and rewrite a 421-package lockfile as a 140-byte stub. The worker merged it,
+	// and the repository's dependency tree was gone.
+	//
+	// The discriminator is SHRINKAGE against the lockfile that was cloned. A
+	// legitimate update never reduces the package count — it replaces a version.
+	const lockAfter = lockPackageCount(workdirs, `${cwd}/${basename(plan.manifestPath)}`)
+	if (lockAfter !== null && lockBaseline !== null && lockAfter < lockBaseline) {
+		workdirs.remove(workdir)
+		return {
+			ok: false,
+			detail:
+				`${basename(plan.manifestPath)} SHRANK from ${lockBaseline} to ${lockAfter} package(s) — ` +
+				`the package manager destroyed the lockfile instead of updating it, so nothing is opened`,
 		}
 	}
 

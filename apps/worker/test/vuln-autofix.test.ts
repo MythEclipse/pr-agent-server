@@ -10,6 +10,8 @@ import {
 	directoryOf,
 	fixCommandFor,
 	lockedVersionsOf,
+	lockPackageCount,
+	npmRange,
 	planVulnFixes,
 	runVulnAutofix,
 	type VulnFixPlan,
@@ -186,6 +188,36 @@ describe("planVulnFixes", () => {
 		expect(compareVersions("1.2.3", "1.2.3")).toBe(0)
 		expect(compareVersions("1.2.3-rc.1", "1.2.3")).toBe(-1)
 		expect(compareVersions("v2.0.0", "1.9.9")).toBe(1)
+	})
+})
+
+describe("npmRange", () => {
+	it("converts an advisory's comma-separated range into npm's space form", () => {
+		// THE BUG: GitHub writes `>= 7.0.0, < 11.0.1`. npm's override selector is a
+		// single whitespace-conjoined range, and the comma form is NOT rejected — it
+		// silently matches nothing and npm rewrites the lockfile as an empty stub.
+		// Measured on MythEclipse/web1#24: 421 packages -> 0, exit 0, "up to date".
+		expect(npmRange(">= 7.0.0, < 11.0.1")).toBe(">= 7.0.0 < 11.0.1")
+		expect(npmRange("<11.0.1")).toBe("<11.0.1")
+		expect(npmRange(">= 7.0.0,< 11.0.1")).toBe(">= 7.0.0 < 11.0.1")
+	})
+})
+
+describe("lockPackageCount", () => {
+	it("counts npm and pnpm lockfiles, and refuses to guess at anything else", () => {
+		const workdirs = (text: string) => ({ readFile: () => text }) as never
+		expect(
+			lockPackageCount(
+				workdirs(JSON.stringify({ packages: { a: {}, b: {} } })),
+				"package-lock.json",
+			),
+		).toBe(2)
+		expect(lockPackageCount(workdirs("packages:\n  /a: {}\n  /b: {}\n"), "pnpm-lock.yaml")).toBe(2)
+		expect(lockPackageCount(workdirs('[[package]]\nname = "a"\n'), "Cargo.lock")).toBe(1)
+		// A format it cannot count answers null, which DISABLES the destruction
+		// check rather than guessing — a wrong count would either block every
+		// legitimate update or wave a destroyed lockfile through.
+		expect(lockPackageCount(workdirs("anything"), "go.sum")).toBeNull()
 	})
 })
 
@@ -577,6 +609,15 @@ function harness(opts: {
 	 * that wants to see that refusal turns this on.
 	 */
 	keepVulnerableLock?: boolean
+	/**
+	 * Serve a lockfile that the tool DESTROYED — the package count collapses.
+	 *
+	 * The fake models the real npm behaviour measured on MythEclipse/web1#24: a
+	 * comma-separated override selector is silently treated as matching nothing, so
+	 * `npm install --package-lock-only` exits 0 having rewritten a 421-package
+	 * lockfile as a 140-byte stub.
+	 */
+	emptiedLock?: boolean
 	/** The `packageManager` field the default `package.json` reports. */
 	packageManager?: string
 	/** The remote head a `git/ref/heads/<branch>` read reports, when any. */
@@ -641,7 +682,9 @@ function harness(opts: {
 		const version = first?.security_vulnerability?.first_patched_version?.identifier
 		if (typeof name !== "string" || typeof version !== "string") return null
 		if (path.endsWith("/package-lock.json"))
-			return JSON.stringify({ packages: { [`node_modules/${name}`]: { version } } })
+			return opts.emptiedLock
+				? JSON.stringify({ packages: {} })
+				: JSON.stringify({ packages: { [`node_modules/${name}`]: { version } } })
 		if (path.endsWith("/pnpm-lock.yaml"))
 			return `lockfileVersion: '9.0'\nsnapshots:\n  ${name}@${version}:\n`
 		if (path.endsWith("/Cargo.lock"))
@@ -1181,6 +1224,73 @@ describe("runVulnAutofix", () => {
 		const workspace = [...h.files.keys()].find((k) => k.endsWith("/pnpm-workspace.yaml"))
 		expect(workspace, "no pnpm-workspace.yaml was written").toBeDefined()
 		expect(h.files.get(workspace as string)).toBe("overrides:\n  esbuild: 0.25.0\n")
+	})
+
+	it("does NOT open a PR when the package manager EMPTIED the lockfile", async () => {
+		// MEASURED on MythEclipse/web1#24, and it reached a user's repo: a
+		// comma-separated override selector made `npm install --package-lock-only`
+		// rewrite a 421-package lockfile as a 140-byte stub, exit 0, "up to date".
+		// The gate that reads "resolves no copy of this package" called that
+		// `alreadyPatched` — a stale advisory — so a PR was opened, merged, and the
+		// user's entire dependency tree was gone.
+		const plan: VulnFixPlan = {
+			repo: "o/r",
+			ecosystem: "npm",
+			manifestPath: "package-lock.json",
+			directory: "/",
+			packageName: "minimatch",
+			patchedVersion: "11.0.1",
+			severity: "high",
+			alertNumbers: [87],
+			ghsaIds: ["GHSA-aaaa-bbbb-cccc"],
+			transitive: true,
+			vulnerableRange: ">= 7.0.0, < 11.0.1",
+		}
+		const workdir = `/tmp/pr-queue-work/_vuln_o_r_${vulnBranchName(plan).replace("fix/vuln-", "")}`
+		const h = harness({
+			alerts: [
+				alert({
+					number: 87,
+					dependency: {
+						package: { ecosystem: "npm", name: "minimatch" },
+						manifest_path: "package-lock.json",
+						relationship: "transitive",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "minimatch" },
+						severity: "high",
+						vulnerable_version_range: ">= 7.0.0, < 11.0.1",
+						first_patched_version: { identifier: "11.0.1" },
+					},
+				}),
+			],
+			// The clone starts with a HEALTHY lockfile: three packages, the vulnerable
+			// copy named at its installed version. That version has to be readable or
+			// the direct-dependency guard answers first — a different (and correct)
+			// refusal, which would make this test prove nothing about destruction.
+			files: {
+				[`${workdir}/package-lock.json`]: JSON.stringify({
+					packages: {
+						"": {},
+						"node_modules/minimatch": { version: "10.2.6" },
+						"node_modules/a": {},
+					},
+				}),
+				[`${workdir}/package.json`]: JSON.stringify({
+					name: "web1",
+					dependencies: { minimatch: "^11.0.1" },
+				}),
+			},
+			// ...and the tool replaces it with an empty one, which is what npm did.
+			emptiedLock: true,
+			diff: " M package-lock.json\n",
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(summary.alreadyPatched).toBe(0)
+		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
+		expect(h.lines.join("\n")).toContain("SHRANK")
 	})
 
 	it("does NOT open a PR when the update leaves a vulnerable copy behind", async () => {
