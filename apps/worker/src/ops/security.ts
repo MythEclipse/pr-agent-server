@@ -10,7 +10,19 @@
 
 import type { GhClient } from "../pr/scan.ts"
 
-export type SecurityStep = { ok: boolean; line: string }
+export type SecurityStep = {
+	ok: boolean
+	line: string
+	/**
+	 * True when the setting is not offered on this repo at all (HTTP 422 — secret
+	 * scanning on a private repo without GitHub Advanced Security).
+	 *
+	 * Distinct from `ok: false`, which means "did not change and should have". A
+	 * caller that counts both as failures makes a unit exit non-zero on every run
+	 * and fire the failure alert for something no permission can fix.
+	 */
+	unavailable?: boolean
+}
 
 /**
  * Enable Dependabot vulnerability alerts on a repo.

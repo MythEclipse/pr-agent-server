@@ -89,9 +89,15 @@ export async function maintain(argv: string[], context: WorkerCliContext): Promi
 		if (only("--enforce-settings")) {
 			const enforced = await enforceRepoSettings(deps.api, { repos, token, dry, log: say })
 			say(
-				`settings: ${enforced.converged ? "every repo in the desired state" : `${enforced.blocked.length} repo(s) could not be converged`}`,
+				`settings: ${enforced.converged ? "every repo in the desired state" : `${enforced.blocked.length} repo(s) could not be converged`}` +
+					(enforced.unavailable.length > 0
+						? `, ${enforced.unavailable.length} repo(s) do not offer secret scanning`
+						: ""),
 			)
 			for (const line of enforced.blocked) say(`⚠️  settings: ${line}`)
+			// `unavailable` is NOT a failure: a private repo without GitHub Advanced
+			// Security cannot have secret scanning, and failing the unit for it would
+			// fire the failure alert every six hours forever.
 			if (!enforced.converged && !dry) failures += 1
 		}
 

@@ -37,9 +37,23 @@ export type RepoSettingState = {
 
 export type EnforceResult = {
 	steps: SecurityStep[]
-	/** Repos where a setting is off and could not be turned on. */
+	/**
+	 * Repos where a setting is off and the run could not turn it on because of a
+	 * PERMISSION or transport problem — something an operator can fix.
+	 */
 	blocked: string[]
-	/** True when every repo is in the desired state afterwards. */
+	/**
+	 * Repos where the setting is off because GitHub does not offer it there.
+	 *
+	 * MEASURED on the first live run: 4 repos enabled, 7 answered `HTTP 422` for
+	 * secret scanning. That is not a failure — secret scanning is free on public
+	 * repos and needs GitHub Advanced Security on private ones, and no amount of
+	 * permission fixes it. Reporting it as `blocked` made the unit exit non-zero
+	 * and fire `OnFailure=` on every single run, which is exactly the alert fatigue
+	 * that makes a real failure invisible.
+	 */
+	unavailable: string[]
+	/** True when no repo is `blocked`. */
 	converged: boolean
 }
 
@@ -130,6 +144,15 @@ export async function enableSecretScanning(
 		)
 		return { ok: true, line: `🔐 ${repo}: enabled ${what.join(" + ")}` }
 	}
+	if (res.status === 422) {
+		// Not offered here: a private repo without GitHub Advanced Security. Named
+		// honestly so nobody goes looking for a permission that does not exist.
+		return {
+			ok: false,
+			unavailable: true,
+			line: `⏭️  ${repo}: secret scanning not available (HTTP 422 — needs GitHub Advanced Security on a private repo)`,
+		}
+	}
 	return {
 		ok: false,
 		line:
@@ -150,6 +173,7 @@ export async function enforceRepoSettings(
 ): Promise<EnforceResult> {
 	const steps: SecurityStep[] = []
 	const blocked: string[] = []
+	const unavailable: string[] = []
 
 	for (const repo of deps.repos) {
 		const state = await readSettings(api, repo, deps.token)
@@ -185,15 +209,23 @@ export async function enforceRepoSettings(
 		// leave the setting off when the App's permission is downgraded, and the
 		// only signal that matters is the state afterwards.
 		const after = await readSettings(api, repo, deps.token)
+		// The Dependabot switches are always available; the secret-scanning pair may
+		// not be, and a repo where the feature does not exist is not a failure.
 		const stillOff = [
 			after.vulnerabilityAlerts === true ? "" : "vulnerability alerts",
 			after.automatedSecurityFixes === true ? "" : "automated security fixes",
-			after.secretScanning === true ? "" : "secret scanning",
-			after.secretScanningPushProtection === true ? "" : "push protection",
 		].filter(Boolean)
-		if (stillOff.length > 0) blocked.push(`${repo}: ${stillOff.join(", ")}`)
+		const scanStillOff =
+			after.secretScanning !== true || after.secretScanningPushProtection !== true
+		if (stillOff.length > 0) {
+			blocked.push(`${repo}: ${stillOff.join(", ")}`)
+		} else if (scanStillOff) {
+			const step = steps[steps.length - 1]
+			if (step?.unavailable === true) unavailable.push(`${repo}: secret scanning`)
+			else blocked.push(`${repo}: secret scanning, push protection`)
+		}
 	}
 
 	for (const step of steps) deps.log(step.line)
-	return { steps, blocked, converged: blocked.length === 0 }
+	return { steps, blocked, unavailable, converged: blocked.length === 0 }
 }

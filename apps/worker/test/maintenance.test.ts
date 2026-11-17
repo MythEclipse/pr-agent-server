@@ -97,6 +97,30 @@ describe("diskGuard", () => {
 		expect(res.refuse).toBe(true)
 	})
 
+	it("judges the threshold by the WORST filesystem, not just the clone directory", () => {
+		// MEASURED on the box: `/tmp` is a 7.9G tmpfs at 15% while `/` is a 116G
+		// disk at 90%. A guard that only measured the clone directory reported
+		// "14%, nothing to do" while the disk the deploy unpacks into was nearly
+		// full — the guard has to look at both.
+		const res = guardDisk(
+			{
+				usage: (path) =>
+					path === "/tmp/pr-queue-work"
+						? { freeBytes: 85 * GB, totalBytes: 100 * GB } // 15% used
+						: { freeBytes: 10 * GB, totalBytes: 100 * GB }, // 90% used
+				list: () => [],
+				remove: () => {},
+				prune: () => ({ code: 0 }),
+				now: () => 0,
+				log: () => {},
+			},
+			{ base: "/tmp/pr-queue-work", pruneCaches: false, refuseAtPct: 95 },
+		)
+		expect(res.usedPctBefore).toBe(90)
+		expect(res.usedPctAfter).toBe(90)
+		expect(res.refuse).toBe(false)
+	})
+
 	it("reports bytes in the unit an operator reads", () => {
 		expect(formatBytes(0)).toBe("0B")
 		expect(formatBytes(1536)).toBe("1.5K")

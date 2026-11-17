@@ -52,6 +52,16 @@ export type DiskGuardOptions = {
 	ownedPrefixes?: readonly string[]
 	/** Skip the cache prune (tests, or a box where it is not installed). */
 	pruneCaches?: boolean
+	/**
+	 * The filesystem whose fullness breaks the machine, measured alongside `base`.
+	 *
+	 * THEY ARE NOT THE SAME FILESYSTEM AND THAT MATTERS. Measured on this box:
+	 * `/tmp` is a 7.9G tmpfs at 15% while `/` is a 116G disk at 90% — so a guard
+	 * that only looked at the clone directory reported "14%, nothing to do" while
+	 * the disk that the deploy unpacks into was nearly full. The thresholds are
+	 * applied to the WORST of the two.
+	 */
+	systemPath?: string
 }
 
 export type DiskGuardResult = {
@@ -124,15 +134,19 @@ export function guardDisk(deps: DiskGuardDeps, opts: DiskGuardOptions): DiskGuar
 	const pct = (u: { freeBytes: number; totalBytes: number }): number =>
 		u.totalBytes === 0 ? 0 : Math.round(((u.totalBytes - u.freeBytes) / u.totalBytes) * 100)
 
-	const before = deps.usage(opts.base)
-	const usedPctBefore = pct(before)
+	const systemPath = opts.systemPath ?? "/"
+	const worstPct = (): number => Math.max(pct(deps.usage(opts.base)), pct(deps.usage(systemPath)))
+
+	const baseBefore = deps.usage(opts.base)
+	const systemBefore = deps.usage(systemPath)
+	const usedPctBefore = Math.max(pct(baseBefore), pct(systemBefore))
 	let removed = 0
 	let freedBytes = 0
 	const pruned: string[] = []
 
 	if (usedPctBefore >= reapAtPct) {
 		deps.log(
-			`disk: ${usedPctBefore}% used (${formatBytes(before.freeBytes)} free) — reaping workdirs older than ${Math.round(maxAgeMs / 3_600_000)}h`,
+			`disk: ${usedPctBefore}% used (${formatBytes(Math.min(baseBefore.freeBytes, systemBefore.freeBytes))} free) — reaping workdirs older than ${Math.round(maxAgeMs / 3_600_000)}h`,
 		)
 		const reaped = reapWorkdirs(deps, { base: opts.base, maxAgeMs, ownedPrefixes })
 		removed = reaped.removed
@@ -141,7 +155,7 @@ export function guardDisk(deps: DiskGuardDeps, opts: DiskGuardOptions): DiskGuar
 
 		// Caches only once the cheap reaping has not been enough: pruning them
 		// costs a re-download on the next run, so it is the second resort.
-		if (opts.pruneCaches !== false && pct(deps.usage(opts.base)) >= reapAtPct) {
+		if (opts.pruneCaches !== false && worstPct() >= reapAtPct) {
 			for (const argv of [
 				["pnpm", "store", "prune"],
 				["cargo", "cache", "clean"],
@@ -152,12 +166,13 @@ export function guardDisk(deps: DiskGuardDeps, opts: DiskGuardOptions): DiskGuar
 		}
 	}
 
-	const after = deps.usage(opts.base)
-	const usedPctAfter = pct(after)
+	const baseAfter = deps.usage(opts.base)
+	const systemAfter = deps.usage(systemPath)
+	const usedPctAfter = Math.max(pct(baseAfter), pct(systemAfter))
 	const refuse = usedPctAfter >= refuseAtPct
 	if (refuse) {
 		deps.log(
-			`disk: STILL ${usedPctAfter}% used (${formatBytes(after.freeBytes)} free) after cleanup — refusing to start new work`,
+			`disk: STILL ${usedPctAfter}% used (${formatBytes(Math.min(baseAfter.freeBytes, systemAfter.freeBytes))} free) after cleanup — refusing to start new work`,
 		)
 	}
 	return { usedPctBefore, usedPctAfter, removed, freedBytes, pruned, refuse }
