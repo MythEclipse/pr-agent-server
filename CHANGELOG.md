@@ -1,3 +1,10 @@
+## [1.12.11](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.10...v1.12.11) (2026-11-17)
+
+
+### Bug Fixes
+
+* **worker:** give the vuln fixer the composer and cargo it shells out to ([0c090d3](https://github.com/MythEclipse/pr-agent-server/commit/0c090d38892e470c586985419c4608953415ec56))
+
 ## [1.12.10](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.9...v1.12.10) (2026-11-17)
 
 
