@@ -291,6 +291,55 @@ describe("branch names, URLs and PR body", () => {
 		expect(body).toContain("npm install --package-lock-only")
 	})
 
+	it("a Yarn Berry repo is told to run `yarn up`, not `yarn upgrade`", async () => {
+		// `fixCommandFor` has always had a `yarnBerry` option, but NOTHING passed
+		// it — so every Berry repo (which pins `packageManager: "yarn@4.x"`) was
+		// run with Yarn 1's `yarn upgrade`. Berry treats that as an unknown
+		// command that exits 0 WITHOUT touching the lockfile, and the no-diff
+		// check then reported "resolved nothing" on a repo that was fixable.
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "lodash" },
+						manifest_path: "yarn.lock",
+					},
+				}),
+			],
+			// The clone is removed before it is recreated, so the manifest must come
+			// from the fake's default rather than a pre-seeded file.
+			packageManager: "yarn@4.1.0",
+			// The lockfile moved, so the diff check passes.
+			diff: " M yarn.lock\n",
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["MythEclipse/BotWa"] })
+
+		expect(summary.opened).toBe(1)
+		expect(h.execCalls[0]?.slice(0, 2)).toEqual(["yarn", "up"])
+		expect(h.execCalls[0]).not.toContain("upgrade")
+	})
+
+	it("two manifests for ONE package get DIFFERENT branches", () => {
+		// THE BUG THIS PINS. A plan is one (manifest, package) pair, but the branch
+		// used to be `pkg@version` alone. The same package on `package-lock.json`
+		// and `apps/web/package-lock.json` therefore produced ONE branch: the first
+		// PR opened, and the second plan found it via `openPrForBranch` and reported
+		// "already open" — so the second manifest was never fixed and the report
+		// claimed it was. That is the silent half-fix the grouping rule forbids.
+		const root: VulnFixPlan = { ...plan, manifestPath: "package-lock.json", directory: "/" }
+		const nested: VulnFixPlan = {
+			...plan,
+			manifestPath: "apps/web/package-lock.json",
+			directory: "/apps/web",
+		}
+		expect(vulnBranchName(root)).toBe("fix/vuln-babel-traverse-7.23.2")
+		expect(vulnBranchName(nested)).not.toBe(vulnBranchName(root))
+		expect(vulnBranchName(nested)).toMatch(/^fix\/vuln-babel-traverse-7\.23\.2-[0-9a-f]{8}$/)
+		// Stable across calls: a re-run must find the SAME branch, not a new one.
+		expect(vulnBranchName(nested)).toBe(vulnBranchName(nested))
+	})
+
 	it("the URLs are the ones a human opens", () => {
 		expect(dependabotUrl("MythEclipse/BotWa")).toBe(
 			"https://github.com/MythEclipse/BotWa/security/dependabot",
@@ -309,6 +358,8 @@ function harness(opts: {
 	alerts?: DependabotAlert[]
 	alertsStatus?: number
 	existingPr?: number
+	/** Per-branch override: return a PR number when that head already has one. */
+	existingPrFor?: (path: string) => number | undefined
 	diff?: string
 	pushOk?: boolean
 	prStatus?: number
@@ -317,6 +368,8 @@ function harness(opts: {
 	execResults?: GitResult[]
 	/** Files the fake filesystem starts with, keyed by absolute path. */
 	files?: Record<string, string>
+	/** The `packageManager` field the default `package.json` reports. */
+	packageManager?: string
 }) {
 	const requests: Recorded[] = []
 	const gitCalls: string[][] = []
@@ -330,7 +383,7 @@ function harness(opts: {
 				return status === 200 ? { status, data: opts.alerts ?? [] } : { status, data: {} }
 			}
 			if (path.includes("/pulls?state=open&head=")) {
-				const n = opts.existingPr
+				const n = opts.existingPrFor?.(path) ?? opts.existingPr
 				return { status: 200, data: n ? [{ number: n }] : [] }
 			}
 			if (method === "POST" && path.endsWith("/pulls")) {
@@ -378,7 +431,11 @@ function harness(opts: {
 				// and lockfile to tell a direct dependency from a transitive one:
 				// `lodash` declared at ^4.17.0 and installed at 4.17.0, so the usual
 				// "bump it forward" case is exercised unless a test seeds otherwise.
-				if (p.endsWith("/package.json")) return '{"dependencies":{"lodash":"^4.17.0"}}'
+				if (p.endsWith("/package.json")) {
+					const manifest: Record<string, unknown> = { dependencies: { lodash: "^4.17.0" } }
+					if (opts.packageManager) manifest.packageManager = opts.packageManager
+					return JSON.stringify(manifest)
+				}
 				if (p.endsWith("/package-lock.json")) {
 					return JSON.stringify({ packages: { "node_modules/lodash": { version: "4.17.0" } } })
 				}
@@ -425,6 +482,39 @@ describe("runVulnAutofix", () => {
 		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
 		expect(h.requests.some((r) => r.method === "POST")).toBe(false)
 		expect(h.lines.join("\n")).toContain("resolved nothing")
+	})
+
+	it("a plan whose PR already exists does NOT consume the per-repo cap", async () => {
+		// THE STARVATION BUG. The cap bounds PRs OPENED per run, but it used to be
+		// incremented for every plan the loop looked at — including the ones that
+		// were skipped because their PR already existed. A repo whose first N plans
+		// were already open therefore "spent" the whole budget without opening
+		// anything, the rest were deferred, and the next run repeated the same N.
+		// The genuinely unfixed alerts behind them never got a PR, on any run.
+		const alerts = ["a", "b", "c"].map((pkg, i) =>
+			alert({
+				number: i + 1,
+				dependency: {
+					package: { ecosystem: "npm", name: pkg },
+					manifest_path: "package-lock.json",
+				},
+			}),
+		)
+		const h = harness({
+			alerts,
+			// `a` and `b` already have PRs; `c` does not and must be reached.
+			existingPrFor: (path) =>
+				path.includes("fix/vuln-a-") ? 10 : path.includes("fix/vuln-b-") ? 11 : undefined,
+		})
+		await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"], maxPrsPerRepo: 1 })
+
+		// `c` must actually be worked on: a POST for its branch, and no "left for
+		// the next run" (which is what the starving loop printed instead).
+		const posted = h.requests
+			.filter((r) => r.method === "POST" && r.path.endsWith("/pulls"))
+			.map((r) => JSON.stringify(r.json))
+		expect(posted.some((j) => j.includes("fix/vuln-c-"))).toBe(true)
+		expect(h.lines.join("\n")).not.toContain("left for the next run")
 	})
 
 	it("a package that already has an open PR is skipped, not re-cloned", async () => {
@@ -585,6 +675,30 @@ describe("runVulnAutofix", () => {
 		// npm is never run: the decision is made before touching the tree.
 		expect(h.execCalls).toEqual([])
 		expect(h.lines.join("\n")).toContain("DOWNGRADE")
+	})
+
+	it("refuses to move a direct dependency when its installed version is unreadable", async () => {
+		// `npmLockedVersion` documents null as "do not move it", but the guard only
+		// refused when the version was READABLE and not ahead. An absent or
+		// unparseable lockfile therefore fell through to `npm install <pkg>@<ver>`,
+		// which rewrites the DECLARED range — on a direct dependency that can be a
+		// downgrade of the package the app imports (the BotWa `axios` shape), on no
+		// evidence at all.
+		const h = harness({
+			alerts: [alert({ number: 1 })],
+			files: {
+				"/tmp/pr-queue-work/_vuln_o_r_lodash-4.17.21/package.json":
+					'{"dependencies":{"lodash":"^4.17.0"}}',
+				// A lockfile that is not JSON, i.e. "cannot tell".
+				"/tmp/pr-queue-work/_vuln_o_r_lodash-4.17.21/package-lock.json": "{not json",
+			},
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(summary.manual).toBe(1)
+		expect(h.execCalls).toEqual([])
+		expect(h.lines.join("\n")).toContain("could not be read")
 	})
 
 	it("the peer-conflict retry keeps the override route", async () => {

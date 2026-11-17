@@ -283,8 +283,31 @@ export async function checkCiPassed(
  * suite ran. The check only ever ADDS refusal: a red or pending verdict passes
  * through untouched.
  *
- * @param expectedChecks job names that must appear, e.g. `["verify"]`. Empty
- *   disables the requirement, preserving `checkCiPassed` for repos with no CI.
+ * EVIDENCE IS "A GITHUB ACTIONS RUN", NOT A JOB NAME.
+ *
+ * The first cut required a check literally named `verify` — this repo's own CI
+ * job. That is correct HERE and wrong for the rest of the fleet: `verify` is
+ * the name in THIS repo's `.github/workflows/ci.yml`, while the other repos name
+ * their jobs `Test`, `Build`, `Lint and format`, `CI`, … So after an AI fix
+ * pushed a commit, `checkHeadCi` demanded `verify`, found none, and answered
+ * `unknown` — and the merge gate refuses an unknown. Those PRs could never
+ * merge, no matter how green their real suite was, and the report blamed a
+ * `[skip ci]` commit that had not happened.
+ *
+ * What the gate actually needs to prove is that a WORKFLOW ran on this head,
+ * because that is what `[skip ci]` suppresses and what a third-party security
+ * app cannot stand in for. GitHub reports the owning app on every check run as
+ * `app.slug`, and Actions is `"github-actions"`. So a run owned by Actions is
+ * evidence; a run owned by any other app is not. The worker's own auto-merge
+ * job is Actions-owned too, which is why `isSelfCheck` still filters it by
+ * name first.
+ *
+ * `expectedChecks` remains as an EXTRA accepted name, so a caller can pin a
+ * specific job where it knows one, and the existing contract is unchanged: the
+ * requirement only ever ADDS refusal.
+ *
+ * @param expectedChecks job names that also count as evidence. Empty disables
+ *   the requirement entirely, preserving `checkCiPassed` for repos with no CI.
  */
 export async function checkCiWithSuiteRequirement(
 	api: GhClient,
@@ -312,8 +335,13 @@ export async function checkCiWithSuiteRequirement(
 			unknown: true,
 			msg: `⚠️ Could not confirm a real CI run on this head (check list incomplete) — not merging`,
 		}
-	const names = new Set(runs.filter((c) => !isSelfCheck(c)).map((c) => String(c?.name ?? "")))
+	const real = runs.filter((c) => !isSelfCheck(c))
+	const names = new Set(real.map((c) => String(c?.name ?? "")))
 	if (expectedChecks.some((name) => names.has(name))) return result
+	// A GitHub Actions run on this head is the evidence `[skip ci]` removes and
+	// that no third-party app can substitute for. See the doc comment above for
+	// why this is the app and not a job name.
+	if (real.some((c) => c?.app?.slug === "github-actions")) return result
 
 	return {
 		ok: false,

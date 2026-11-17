@@ -22,7 +22,13 @@ import { EXPECTED_CI_CHECKS } from "../src/pr/fix-loop.ts"
 import type { GhClient } from "../src/pr/scan.ts"
 
 function apiWith(
-	checks: Array<{ name: string; status?: string; conclusion?: string | null }>,
+	checks: Array<{
+		name: string
+		status?: string
+		conclusion?: string | null
+		/** The owning app's slug; `github-actions` is what a workflow run reports. */
+		app?: string
+	}>,
 ): GhClient {
 	return {
 		async request(_m: string, path: string) {
@@ -35,6 +41,7 @@ function apiWith(
 						name: c.name,
 						status: c.status ?? "completed",
 						conclusion: c.conclusion === undefined ? "success" : c.conclusion,
+						app: c.app === undefined ? undefined : { slug: c.app },
 					})),
 				},
 			}
@@ -74,6 +81,29 @@ describe("a head with no real suite is NOT green", () => {
 		expect(got.ok).toBe(false)
 		expect(got.unknown).toBeUndefined()
 		expect(got.msg).toContain("pending")
+	})
+
+	it("accepts a GitHub Actions run whose job is named something OTHER than verify", async () => {
+		// THE FLEET BUG. The requirement used to be a literal `verify`, which is
+		// THIS repo's job name. Every other repo names its jobs `Test`, `Build`,
+		// `CI`, … so after an AI fix pushed a commit, `checkHeadCi` demanded
+		// `verify`, found none, answered `unknown`, and the merge gate refused it
+		// forever. The evidence that matters is that Actions RAN on this head —
+		// that is what `[skip ci]` suppresses and what no third-party app can
+		// stand in for.
+		const api = apiWith([{ name: "Test", app: "github-actions" }])
+		const got = await checkCiWithSuiteRequirement(api, "t", "o/r", "sha", EXPECTED_CI_CHECKS)
+		expect(got.ok).toBe(true)
+	})
+
+	it("still refuses a third-party app's green check as CI evidence", async () => {
+		// The mirror of the case above: a security scanner is NOT a test suite.
+		// Accepting every green check would re-open the `[skip ci]` trap.
+		const api = apiWith([{ name: "GitGuardian Security Checks", app: "gitguardian" }])
+		const got = await checkCiWithSuiteRequirement(api, "t", "o/r", "sha", EXPECTED_CI_CHECKS)
+		expect(got.ok).toBe(false)
+		expect(got.unknown).toBe(true)
+		expect(got.msg).toContain("No real CI ran")
 	})
 
 	it("with an empty requirement, behaves exactly like the old gate", async () => {

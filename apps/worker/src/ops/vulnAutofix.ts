@@ -44,6 +44,7 @@
  * than a listed one, and Dependabot's own lanes still cover those.
  */
 
+import { createHash } from "node:crypto"
 import type { GitRunner } from "../git.ts"
 import { pushRef } from "../git.ts"
 import {
@@ -319,14 +320,71 @@ export function npmLockedVersion(workdirs: Workdirs, lockPath: string, pkg: stri
 	}
 }
 
-/** A branch name GitHub will accept: no `@`, no `/` from a scoped package. */
-export function vulnBranchName(plan: VulnFixPlan): string {
-	const slug = `${plan.packageName}-${plan.patchedVersion}`
+/**
+ * A short, stable discriminator for a plan's MANIFEST, or "" for the legacy case.
+ *
+ * THE UNIT OF WORK IS `(manifest, package)`, so the branch must identify the
+ * manifest too. It used to be `pkg@version` alone, which meant the SAME package
+ * on two manifests produced the SAME branch: the first plan opened a PR, and the
+ * second found that PR via `openPrForBranch` and reported "already open as
+ * PR #n" — so the second manifest was never fixed, and the report said it was.
+ * That is exactly the silent half-fix `planVulnFixes`' grouping comment forbids.
+ *
+ * `package-lock.json` at the repo root keeps its historical, human-readable
+ * branch (`fix/vuln-lodash-4.17.21`), because that is the overwhelmingly common
+ * case and existing open PRs use that name — changing it would orphan them and
+ * open a duplicate. Everything else (a nested manifest, or a root
+ * `npm-shrinkwrap.json`) carries a hash of its path.
+ */
+function manifestDiscriminator(plan: VulnFixPlan): string {
+	const base = plan.manifestPath.slice(plan.manifestPath.lastIndexOf("/") + 1)
+	if (plan.directory === "/" && base === "package-lock.json") return ""
+	const hash = createHash("sha256").update(plan.manifestPath).digest("hex").slice(0, 8)
+	return `-${hash}`
+}
+
+/** The shared `<pkg>-<version><manifest-discriminator>` slug for a plan. */
+function unitSlug(plan: VulnFixPlan): string {
+	const base = `${plan.packageName}-${plan.patchedVersion}`
 		.toLowerCase()
 		.replace(/[^a-z0-9._-]+/g, "-")
 		.replace(/^[.-]+|[.-]+$/g, "")
 		.slice(0, 60)
-	return `fix/vuln-${slug || "dependency"}`
+	return `${base || "dependency"}${manifestDiscriminator(plan)}`
+}
+
+/**
+ * True when the repo pins a Yarn 2+ ("Berry") release in `packageManager`.
+ *
+ * YARN NEEDS TWO COMMAND FORMS and the caller has to say which, because the two
+ * majors treat each other's flag as a WARNING rather than an error: Yarn 1 has
+ * no `up`, Berry has no `upgrade`, and the wrong one exits 0 WITHOUT touching
+ * the lockfile — which the no-diff check then reports as "resolved nothing".
+ * So a Berry repo was never fixable by this flow.
+ *
+ * The declaration lives in the ROOT `package.json`'s `packageManager` field
+ * (`"yarn@4.1.0"`), which is why the root is read first even when the manifest
+ * is nested. Unreadable or absent means Yarn 1 — the far more common shape, and
+ * the form this flow shipped with.
+ */
+function isYarnBerry(workdirs: Workdirs, workdir: string, cwd: string): boolean {
+	for (const path of [`${workdir}/package.json`, `${cwd}/package.json`]) {
+		try {
+			const manifest = JSON.parse(workdirs.readFile(path)) as { packageManager?: unknown }
+			const declared = manifest.packageManager
+			if (typeof declared !== "string") continue
+			const major = Number(/^yarn@(\d+)/.exec(declared)?.[1] ?? "0")
+			return Number.isFinite(major) && major >= 2
+		} catch {
+			// Not readable / not JSON: fall through to the next candidate.
+		}
+	}
+	return false
+}
+
+/** A branch name GitHub will accept: no `@`, no `/` from a scoped package. */
+export function vulnBranchName(plan: VulnFixPlan): string {
+	return `fix/vuln-${unitSlug(plan)}`
 }
 
 /** `https://github.com/<repo>/security/dependabot/<n>` — the page a human opens. */
@@ -349,13 +407,13 @@ export function dependabotUrl(repo: string): string {
  */
 export function buildVulnPrBody(
 	plan: VulnFixPlan,
-	opts: { legacyPeerDeps?: boolean; overrides?: boolean } = {},
+	opts: { legacyPeerDeps?: boolean; overrides?: boolean; yarnBerry?: boolean } = {},
 ): string {
 	const advisories = plan.ghsaIds.length ? plan.ghsaIds.join(", ") : "security advisory"
 	const links = plan.alertNumbers
 		.map((n) => `- [alert #${n}](${alertUrl(plan.repo, n)})`)
 		.join("\n")
-	const command = fixCommandFor(plan)
+	const command = fixCommandFor(plan, { yarnBerry: opts.yarnBerry })
 	const commandLine = "argv" in command ? command.argv.join(" ") : "(no automatic command)"
 	return (
 		`Bumps \`${plan.packageName}\` to **${plan.patchedVersion}** in \`${plan.manifestPath}\` ` +
@@ -469,7 +527,22 @@ async function applyPlan(
 	deps: VulnAutofixDeps,
 	plan: VulnFixPlan,
 	opts: { token: string; defaultBranch: string },
-): Promise<{ ok: boolean; prUrl?: string; detail: string; manual?: boolean }> {
+): Promise<{
+	ok: boolean
+	prUrl?: string
+	detail: string
+	manual?: boolean
+	/**
+	 * True when this plan needed no work because its PR already exists.
+	 *
+	 * The caller's per-repo cap counts PRs it OPENED, not plans it looked at, so
+	 * this must not consume budget — otherwise a repo whose first N plans are
+	 * already open would skip every remaining plan as "left for the next run",
+	 * on this run and every later one, and the genuinely unfixed alerts behind
+	 * them would starve forever.
+	 */
+	alreadyOpen?: boolean
+}> {
 	const { run, exec, workdirs, api } = deps
 	const branch = vulnBranchName(plan)
 	// `_vuln_` INFIX: the lockfix/autofix clones under TMP_BASE are swept by
@@ -477,14 +550,15 @@ async function applyPlan(
 	// that naming would either be swept as an orphan or never swept at all. This
 	// flow removes its own workdir on every exit path, so the infix keeps the two
 	// families apart instead of relying on the sweep to guess.
-	const slug = `${plan.packageName}-${plan.patchedVersion}`
-		.toLowerCase()
-		.replace(/[^a-z0-9._-]+/g, "-")
-		.slice(0, 60)
-	const workdir = `${TMP_BASE}/_vuln_${plan.repo.replace(/\//g, "_")}_${slug}`
+	//
+	// The slug carries the manifest discriminator for the same reason as the
+	// branch: two plans for one package on two manifests must not share a
+	// workdir either, or the second would act on the first's clone.
+	const workdir = `${TMP_BASE}/_vuln_${plan.repo.replace(/\//g, "_")}_${unitSlug(plan)}`
 
 	const existing = await openPrForBranch(api, plan.repo, branch, opts.token)
-	if (existing !== 0) return { ok: true, detail: `already open as PR #${existing}` }
+	if (existing !== 0)
+		return { ok: true, alreadyOpen: true, detail: `already open as PR #${existing}` }
 
 	workdirs.remove(workdir)
 	workdirs.mkdir(workdir)
@@ -494,12 +568,15 @@ async function applyPlan(
 		return { ok: false, detail: `clone failed: ${head(reportable(cloned.stderr), 200)}` }
 	}
 
-	const command = fixCommandFor(plan)
+	// The cwd first, because the Yarn form depends on the tree that was just
+	// cloned (its root `package.json` declares the major).
+	const cwd = plan.directory === "/" ? workdir : `${workdir}${plan.directory}`
+	const yarnBerry = isYarnBerry(workdirs, workdir, cwd)
+	const command = fixCommandFor(plan, { yarnBerry })
 	if (!("argv" in command)) {
 		workdirs.remove(workdir)
 		return { ok: false, manual: true, detail: command.manual }
 	}
-	const cwd = plan.directory === "/" ? workdir : `${workdir}${plan.directory}`
 
 	// npm CANNOT PIN A TRANSITIVE DEPENDENCY FROM THE COMMAND LINE.
 	//
@@ -549,8 +626,34 @@ async function applyPlan(
 			// version is not ahead of what is installed, because then the vulnerable
 			// instance is somewhere else in the tree and bumping its parent is the
 			// fix — a decision with a blast radius this flow cannot judge.
-			const locked = npmLockedVersion(workdirs, `${cwd}/package-lock.json`, plan.packageName)
-			if (locked !== null && compareVersions(plan.patchedVersion, locked) <= 0) {
+			// The lockfile the PLAN names, not a hard-coded `package-lock.json`: an
+			// `npm-shrinkwrap.json` repo has no package-lock at all, and reading the
+			// wrong path returned null — which used to fall through to the forward
+			// move below. See the `locked === null` arm for why that was unsafe.
+			const locked = npmLockedVersion(
+				workdirs,
+				`${cwd}/${basename(plan.manifestPath)}`,
+				plan.packageName,
+			)
+			// CANNOT TELL IS NOT "MOVE IT". `npmLockedVersion` documents that its
+			// null means "do not move it", but the guard below only refused when the
+			// version was READABLE and not ahead — so an unparseable or absent
+			// lockfile fell through to `npm install <pkg>@<patched>`, which rewrites
+			// the DECLARED range. On a direct dependency that can be a DOWNGRADE of
+			// the package the app imports (the BotWa `axios` shape this whole block
+			// exists to prevent), decided on no evidence at all. A human has to look.
+			if (locked === null) {
+				workdirs.remove(workdir)
+				return {
+					ok: false,
+					manual: true,
+					detail:
+						`${plan.packageName} is a direct dependency but its installed version could not be read ` +
+						`from ${basename(plan.manifestPath)} — refusing to move it blind, because npm would ` +
+						`rewrite the declared range and could downgrade the package the app imports`,
+				}
+			}
+			if (compareVersions(plan.patchedVersion, locked) <= 0) {
 				workdirs.remove(workdir)
 				return {
 					ok: false,
@@ -699,7 +802,11 @@ async function applyPlan(
 			title: `fix(deps): bump ${plan.packageName} to ${plan.patchedVersion} (security)`,
 			head: branch,
 			base: opts.defaultBranch,
-			body: buildVulnPrBody(plan, { legacyPeerDeps: usedFallback, overrides: overrideWritten }),
+			body: buildVulnPrBody(plan, {
+				legacyPeerDeps: usedFallback,
+				overrides: overrideWritten,
+				yarnBerry,
+			}),
 		},
 	})
 	workdirs.remove(workdir)
@@ -794,8 +901,8 @@ export async function runVulnAutofix(
 				)
 				break
 			}
-			taken += 1
 			if (deps.dry) {
+				taken += 1
 				summary.skipped += 1
 				say(
 					`   🧪 dry run: would bump ${plan.packageName} -> ${plan.patchedVersion} on ${plan.manifestPath} (${plan.alertNumbers.length} alert(s))`,
@@ -803,6 +910,13 @@ export async function runVulnAutofix(
 				continue
 			}
 			const res = await applyPlan(deps, plan, { token: opts.token, defaultBranch })
+			// A PLAN WHOSE PR ALREADY EXISTS COSTS NOTHING. Counting it against the
+			// cap is how a repo with many open security PRs starves the rest: the
+			// first N plans "consume" the budget without opening anything, the rest
+			// are deferred, and the next run repeats the same N. The cap bounds PRs
+			// OPENED per run, so only a plan that actually reached the point of
+			// opening one may increment it.
+			if (!res.alreadyOpen) taken += 1
 			if (res.ok) {
 				summary.opened += 1
 				perRepo.opened += 1

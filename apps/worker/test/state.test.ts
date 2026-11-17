@@ -176,6 +176,32 @@ describe("fix state", () => {
 		markSkipNotified(s, "o/r", 1, "sha1")
 		expect(wasSkipNotified(s, "o/r", 1, "sha1")).toBe(true)
 	})
+	test("a skip at a NEW head re-arms the notification", () => {
+		// `wasSkipNotified` is `notified && sha === headSha`. Writing the new head
+		// while leaving `notified` set from the OLD one made the pair agree on the
+		// new SHA, so `notifySkipOnce` short-circuited and the operator was never
+		// told this head had been skipped — the exact silent loss the per-head key
+		// exists to avoid.
+		const s: any = {}
+		markSkip(s, "o/r", 1, "sha1", "infra down")
+		markSkipNotified(s, "o/r", 1, "sha1")
+		expect(wasSkipNotified(s, "o/r", 1, "sha1")).toBe(true)
+		// A different head is a different event and must be announced.
+		markSkip(s, "o/r", 1, "sha2", "infra down again")
+		expect(wasSkipNotified(s, "o/r", 1, "sha2")).toBe(false)
+	})
+
+	test("re-recording the SAME skip does not re-arm the notification", () => {
+		// A retried write, or a resolver that fails twice in one tick, must not
+		// post to the channel again: the notice is per head, and the head did not
+		// move.
+		const s: any = {}
+		markSkip(s, "o/r", 1, "sha1", "infra down")
+		markSkipNotified(s, "o/r", 1, "sha1")
+		markSkip(s, "o/r", 1, "sha1", "infra down")
+		expect(wasSkipNotified(s, "o/r", 1, "sha1")).toBe(true)
+	})
+
 	test("markFixed records the head sha", () => {
 		const s: any = {}
 		markFixed(s, "o/r", 1, "sha9")

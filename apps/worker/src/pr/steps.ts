@@ -274,9 +274,24 @@ export async function stepBumpGuard(deps: WorkerDeps, c: Ctx): Promise<boolean> 
  * re-reads reality instead of a stale sha.
  */
 export async function stepAiFix(deps: WorkerDeps, c: Ctx, already: boolean): Promise<void> {
-	if (!AI_FIX_ENABLED || c.noCodeReview) return
+	// THE DETERMINISTIC LOCKFILE REPAIR RUNS EVEN WHEN THE AGENT MAY NOT.
+	//
+	// It used to sit BELOW the `noCodeReview` guard, which is the one state the
+	// PRs it exists for always reach: a lockfile-only bump gets "No code
+	// suggestions found" from PR-Agent, `stepReview` sets `noCodeReview`, and
+	// this function returned before the pre-fix could run. So the deterministic
+	// repair never fired for its own target — the PR fell through to a red CI
+	// and either a stale close or a permanent wait, while `stepLockPrefix`'s
+	// whole dispatch matrix (bun/pnpm/npm/yarn/uv) was dead in production.
+	//
+	// `noCodeReview` means "there is no CODE for the agent to improve". A stale
+	// lockfile is not code, and re-resolving it is a toolchain command, not an
+	// agent run — so the two decisions are independent. The guard below still
+	// stops the agent.
+	//
 	// Python line 1956: `is_trivial_pr(title, author) and not already`.
 	if (isTrivialPr(c.title, c.author) && !already) await stepLockPrefix(deps, c)
+	if (!AI_FIX_ENABLED || c.noCodeReview) return
 
 	if (already) {
 		deps.report.push("   ⏭️  Already fixed at this SHA — skip AI fix")

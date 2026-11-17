@@ -555,6 +555,19 @@ export function markSkip(
 	file?: string,
 ): PrEntry {
 	const entry = prEntry(state, repo, pr)
+	// THE NOTICE IS PER HEAD, so a skip at a NEW head must be announced again.
+	//
+	// `wasSkipNotified` is `entry.notified && entry.sha === headSha`. Writing the
+	// new head here while leaving `notified` set from the PREVIOUS head made the
+	// pair agree on the new SHA, so `notifySkipOnce` short-circuited and the
+	// operator was never told this head had been skipped. Measured: a PR skipped
+	// once at SHA A, then skipped for a different reason at SHA B, produced no
+	// notification at B — the exact silent loss the per-head key exists to avoid.
+	//
+	// Only on a HEAD CHANGE: re-recording the same skip (a resolver that failed
+	// twice in one tick, a retried write) must not re-arm the notice, or every
+	// repeat of the same failure would post to the channel again.
+	if (entry.sha !== headSha) entry.notified = false
 	entry.sha = headSha
 	entry.skip_reason = reason
 	// A skip RESOLVES the condition, so the tally goes with it. Leaving it

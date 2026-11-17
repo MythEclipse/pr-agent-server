@@ -47,8 +47,13 @@ export const CI_WAIT_TIMEOUT_MS = 10 * 60 * 1000
  * `[skip ci]` fix commit produced: one third-party check, zero failing, zero pending,
  * verdict green, on a commit that was never tested. The worker merged that PR.
  *
- * A repo whose job is named differently is simply not covered; the requirement only
- * ever ADDS refusal.
+ * THIS NAME IS AN EXTRA ACCEPTED NAME, NOT THE ONLY ONE. `checkCiWithSuiteRequirement`
+ * also accepts any check run owned by the GitHub Actions app (`app.slug ===
+ * "github-actions"`), which is the evidence `[skip ci]` removes. Pinning the
+ * requirement to this one literal made every OTHER repo's green head read as
+ * "No real CI ran" after an AI fix, so those PRs could never merge. The list stays
+ * because this repo's CI is known by name and naming it is the narrower,
+ * positive check where it applies.
  */
 export const EXPECTED_CI_CHECKS: readonly string[] = ["verify"]
 

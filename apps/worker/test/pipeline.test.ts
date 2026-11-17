@@ -2162,6 +2162,33 @@ describe("the lockfile pre-fix dispatch", () => {
 		expect(preFixedAnything(h)).toBe(false)
 		expect(h.execCalls).toEqual([])
 	})
+
+	test("a lockfile-ONLY PR still gets the deterministic repair", async () => {
+		// THE BUG THIS PINS. The pre-fix used to run below `stepAiFix`'s
+		// `noCodeReview` guard. A lockfile-only bump is exactly the PR that gets
+		// "No code suggestions found" from PR-Agent, which sets `noCodeReview` —
+		// so the deterministic repair never ran for the one class of PR it exists
+		// for, and the whole dispatch matrix was dead in production.
+		//
+		// `noCodeReview` means "no CODE to improve"; a stale lockfile is not code
+		// and re-resolving it is a toolchain command, not an agent run.
+		const h = harness({
+			prs: [makePr({ ...LOCKFILE_BUMP })],
+			comments: [NO_CODE_MARKER],
+			checkRuns: failing(["Lint and format"]),
+			tree: ["package.json", "pnpm-lock.yaml"],
+			dry: true,
+		})
+		await processPr(h.deps, {
+			token: "install-token",
+			repo: REPO,
+			pr: makePr({ ...LOCKFILE_BUMP }),
+		})
+
+		expect(preFixing(h, "pnpm-lock.yaml")).toBe(true)
+		// And the AGENT is still not offered: the guard moved, it was not removed.
+		expect(h.agentPosts).toEqual([])
+	})
 })
 
 describe("the lock is released on every exit", () => {
