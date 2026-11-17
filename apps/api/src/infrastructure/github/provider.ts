@@ -23,6 +23,7 @@ export interface PullRequestData {
 }
 
 export interface GhComment {
+	appId?: number | null
 	id: number
 	body: string
 	htmlUrl: string
@@ -330,6 +331,7 @@ export class GitHubProvider {
 			body: c.body ?? "",
 			htmlUrl: c.html_url,
 			createdAt: c.created_at,
+			appId: c.performed_via_github_app?.id ?? null,
 		}))
 	}
 
@@ -429,7 +431,12 @@ export class GitHubProvider {
 		finalUpdateMessage = true,
 	): Promise<void> {
 		const comments = await this.listIssueComments()
-		const matching = comments.filter((c) => matchesPersistentHeader(c.body, initialHeader))
+		const matching = comments.filter(
+			(c) =>
+				c.appId != null &&
+				String(c.appId) === this.cfg.github.appId &&
+				matchesPersistentHeader(c.body, initialHeader),
+		)
 		// `getLatestCommitUrl` returns the head SHA (not a URL, despite the name
 		// it inherited): the marker is a commit identity, and the worker matches
 		// it against the head it is processing.

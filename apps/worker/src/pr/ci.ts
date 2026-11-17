@@ -18,6 +18,7 @@
  * The `failed[:3]` / `pending[:3]` slice is a cap on a NOTIFICATION, not a
  * filter: a 12-check failure list reports its first three, exactly as Python did.
  */
+import { checkCommitStatus } from "./commit-status.ts"
 import type { GhClient } from "./scan.ts"
 
 /** Python `STALE_CI_CLOSE_DAYS` (line 586) — used in the close comment. */
@@ -210,24 +211,8 @@ export async function checkCiPassed(
 	// `pending` must all describe the repo's real CI, or a merge job that refused
 	// to merge reads as a red test suite.
 	const checks = all.filter((c) => !isSelfCheck(c))
-
-	if (!checks.length) {
-		// Only a 200 proves "this repo has no checks". A non-200 — the transport
-		// sentinel, a 5xx, an error envelope — means we could not read the gate,
-		// and green would be a guess.
-		if (status !== 200)
-			return { ok: false, unknown: true, msg: `⚠️ CI status unavailable (HTTP ${status})` }
-		// A repo whose ONLY check runs are this worker's own merge job has no test
-		// suite, so the gate passes — the same verdict as a head with no checks at
-		// all. Saying so explicitly keeps the report honest about WHY it passed,
-		// and stops the operator reading "no CI configured" on a repo that clearly
-		// has a workflow.
-		if (all.length)
-			return {
-				ok: true,
-				msg: `✅ No test CI configured (only this worker's own merge job) — skipping CI gate`,
-			}
-		return { ok: true, msg: "✅ No CI configured — skipping CI gate" } // line 399
+	if (all.length === 0 && status !== 200) {
+		return { ok: false, unknown: true, msg: `⚠️ CI status unavailable (HTTP ${status})` }
 	}
 
 	// Python lines 400-405. The FAILURE SET, not the single string "failure".
@@ -269,7 +254,17 @@ export async function checkCiPassed(
 			msg: `⚠️ CI partially read (${checks.length} checks seen) — not merging on an incomplete list`,
 		}
 
-	return { ok: true, msg: `✅ ${checks.length} checks green` } // line 406
+	const legacy = await checkCommitStatus(api, token, repo, sha)
+	if (legacy.blocked) return legacy.blocked
+	if (!checks.length && legacy.count === 0) {
+		return {
+			ok: true,
+			msg: all.length
+				? "✅ No test CI configured (only this worker's own merge job) — skipping CI gate"
+				: "✅ No CI configured — skipping CI gate",
+		}
+	}
+	return { ok: true, msg: `✅ ${checks.length + legacy.count} checks green` }
 }
 
 /**

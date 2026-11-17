@@ -14,6 +14,7 @@
 		"issues": "write",
 		"contents": "read",
 		"metadata": "read",
-		"checks": "write"
+		"checks": "write",
+		"statuses": "read"
 	}
 }

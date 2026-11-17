@@ -118,6 +118,21 @@ async function listOpenPrs(api: GhClient, token: string, fullName: string): Prom
 	return out
 }
 
+/** Follow every installation page; Link takes precedence over page length. */
+async function listInstallations(api: GhAppClient): Promise<any[]> {
+	const out: any[] = []
+	for (let page = 1; page <= 100; page++) {
+		const { status, data, link } = await api.request(
+			"GET",
+			`/app/installations?per_page=${PER_PAGE}&page=${page}`,
+		)
+		if (status !== 200 || !Array.isArray(data) || data.length === 0) break
+		out.push(...data)
+		if (link ? !link.includes('rel="next"') : data.length < PER_PAGE) break
+	}
+	return out
+}
+
 /**
  * Python `gather_open_prs()` (lines 301-316).
  *
@@ -132,15 +147,11 @@ async function listOpenPrs(api: GhClient, token: string, fullName: string): Prom
  *     a rate-limit or 404 object is not "zero PRs", but acting on it as such
  *     would silently skip the PRs the worker exists to process.
  *
- * `status` is deliberately NOT branched on, matching the Python: `gh_api`
- * returns the status and the caller ignores it (line 303, 310, 312 discard the
- * first tuple element). Branching here would be a behaviour change, and the
- * shape guards already make the degenerate responses safe.
+ * Installation pages require HTTP 200 before their entries are scanned.
  */
 export async function gatherOpenPrs(api: GhAppClient): Promise<OpenPr[]> {
 	const results: OpenPr[] = []
-	const { data: installs } = await api.request("GET", "/app/installations")
-	if (!Array.isArray(installs)) return results // Python lines 304-305
+	const installs = await listInstallations(api)
 	for (const inst of installs) {
 		const id = (inst as { id?: number })?.id
 		if (typeof id !== "number") continue // guard: `inst["id"]` would throw

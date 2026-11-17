@@ -62,7 +62,13 @@ describe("toolchain pins", () => {
 })
 
 describe("ci gate", () => {
-	const api = (data: unknown) => ({ request: async () => ({ status: 200, data }) }) as any
+	const api = (data: unknown) =>
+		({
+			request: async (_m: string, path: string) => ({
+				status: 200,
+				data: path.endsWith("/status") ? { state: "pending", total_count: 0, statuses: [] } : data,
+			}),
+		}) as any
 	test("no checks configured passes", async () => {
 		expect(await checkCiPassed(api({ check_runs: [] }), "t", "o/r", "sha")).toEqual({
 			ok: true,
@@ -197,6 +203,8 @@ function recorder(
 		async request(method, path, opts) {
 			const call = { method, path, token: opts?.token, json: opts?.json }
 			calls.push(call)
+			if (path.endsWith("/status"))
+				return { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
 			return handler(call, calls.length) as any
 		},
 	}
@@ -475,17 +483,20 @@ describe("ci gate — messages and guard", () => {
 	test("names up to three failures are joined", async () => {
 		const r = await checkCiPassed(
 			{
-				request: async () => ({
-					status: 200,
-					data: {
-						check_runs: [
-							{ name: "typecheck", conclusion: "failure", status: "completed" },
-							{ name: "build", conclusion: "failure", status: "completed" },
-							{ name: "lint", conclusion: "failure", status: "completed" },
-							{ name: "fourth", conclusion: "failure", status: "completed" },
-						],
-					},
-				}),
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: {
+								status: 200,
+								data: {
+									check_runs: [
+										{ name: "typecheck", conclusion: "failure", status: "completed" },
+										{ name: "build", conclusion: "failure", status: "completed" },
+										{ name: "lint", conclusion: "failure", status: "completed" },
+										{ name: "fourth", conclusion: "failure", status: "completed" },
+									],
+								},
+							},
 			},
 			"t",
 			"o/r",
@@ -497,10 +508,13 @@ describe("ci gate — messages and guard", () => {
 	test("pending names up to three are joined", async () => {
 		const r = await checkCiPassed(
 			{
-				request: async () => ({
-					status: 200,
-					data: { check_runs: [{ name: "typecheck", status: "queued" }] },
-				}),
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: {
+								status: 200,
+								data: { check_runs: [{ name: "typecheck", status: "queued" }] },
+							},
 			},
 			"t",
 			"o/r",
@@ -514,15 +528,18 @@ describe("ci gate — messages and guard", () => {
 	test("a failure outranks a pending run", async () => {
 		const r = await checkCiPassed(
 			{
-				request: async () => ({
-					status: 200,
-					data: {
-						check_runs: [
-							{ name: "late", status: "in_progress" },
-							{ name: "boom", conclusion: "failure", status: "completed" },
-						],
-					},
-				}),
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: {
+								status: 200,
+								data: {
+									check_runs: [
+										{ name: "late", status: "in_progress" },
+										{ name: "boom", conclusion: "failure", status: "completed" },
+									],
+								},
+							},
 			},
 			"t",
 			"o/r",
@@ -533,15 +550,18 @@ describe("ci gate — messages and guard", () => {
 	test("all green reports the count", async () => {
 		const r = await checkCiPassed(
 			{
-				request: async () => ({
-					status: 200,
-					data: {
-						check_runs: [
-							{ name: "a", conclusion: "success", status: "completed" },
-							{ name: "b", conclusion: "neutral", status: "completed" },
-						],
-					},
-				}),
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: {
+								status: 200,
+								data: {
+									check_runs: [
+										{ name: "a", conclusion: "success", status: "completed" },
+										{ name: "b", conclusion: "neutral", status: "completed" },
+									],
+								},
+							},
 			},
 			"t",
 			"o/r",
@@ -563,10 +583,13 @@ describe("ci gate — messages and guard", () => {
 		]) {
 			const r = await checkCiPassed(
 				{
-					request: async () => ({
-						status: 200,
-						data: { check_runs: [{ name: "ci", conclusion, status: "completed" }] },
-					}),
+					request: async (_m: string, path: string) =>
+						path.endsWith("/status")
+							? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+							: {
+									status: 200,
+									data: { check_runs: [{ name: "ci", conclusion, status: "completed" }] },
+								},
 				},
 				"t",
 				"o/r",
@@ -583,10 +606,13 @@ describe("ci gate — messages and guard", () => {
 		for (const conclusion of ["success", "neutral", "skipped"]) {
 			const r = await checkCiPassed(
 				{
-					request: async () => ({
-						status: 200,
-						data: { check_runs: [{ name: "a", conclusion, status: "completed" }] },
-					}),
+					request: async (_m: string, path: string) =>
+						path.endsWith("/status")
+							? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+							: {
+									status: 200,
+									data: { check_runs: [{ name: "a", conclusion, status: "completed" }] },
+								},
 				},
 				"t",
 				"o/r",
@@ -597,7 +623,12 @@ describe("ci gate — messages and guard", () => {
 	})
 	test("a transport failure is reported as unknown, never as 'no CI'", async () => {
 		const r = await checkCiPassed(
-			{ request: async () => ({ status: 0, data: {} }) },
+			{
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: { status: 0, data: {} },
+			},
 			"t",
 			"o/r",
 			"sha",
@@ -606,7 +637,12 @@ describe("ci gate — messages and guard", () => {
 	})
 	test("a 500 with an unparseable body is reported as unknown", async () => {
 		const r = await checkCiPassed(
-			{ request: async () => ({ status: 500, data: {} }) },
+			{
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: { status: 500, data: {} },
+			},
 			"t",
 			"o/r",
 			"sha",
@@ -615,7 +651,12 @@ describe("ci gate — messages and guard", () => {
 	})
 	test("an error envelope never reaches the 'no CI configured' pass", async () => {
 		const r = await checkCiPassed(
-			{ request: async () => ({ status: 403, data: { message: "Bad credentials" } }) },
+			{
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: { status: 403, data: { message: "Bad credentials" } },
+			},
 			"t",
 			"o/r",
 			"sha",
@@ -625,7 +666,12 @@ describe("ci gate — messages and guard", () => {
 	})
 	test("a non-object body is treated as no CI", async () => {
 		const r = await checkCiPassed(
-			{ request: async () => ({ status: 200, data: null }) },
+			{
+				request: async (_m: string, path: string) =>
+					path.endsWith("/status")
+						? { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
+						: { status: 200, data: null },
+			},
 			"t",
 			"o/r",
 			"sha",
@@ -644,6 +690,7 @@ describe("ci gate — messages and guard", () => {
 				token: "tok",
 				json: undefined,
 			},
+			{ method: "GET", path: "/repos/o/r/commits/abc123/status", token: "tok", json: undefined },
 		])
 	})
 
@@ -684,7 +731,7 @@ describe("ci gate — messages and guard", () => {
 			data: { check_runs: [{ name: "a", status: "completed", conclusion: "success" }] },
 		}))
 		await checkCiPassed(api, "tok", "o/r", "abc123")
-		expect(calls).toHaveLength(1)
+		expect(calls.filter((c) => c.path.includes("/check-runs"))).toHaveLength(1)
 	})
 
 	test("a failure read on page 1 is not lost when page 2 errors", async () => {
@@ -1073,7 +1120,7 @@ describe("gatherOpenPrs", () => {
 		const api: GhAppClient = {
 			async request(method, path, opts) {
 				calls.push({ method, path, token: opts?.token, json: opts?.json })
-				if (path === "/app/installations") {
+				if (path.startsWith("/app/installations")) {
 					return { status: 200, data: [{ id: 1 }, { id: 2 }] } as any
 				}
 				if (path.startsWith("/installation/repositories")) {
@@ -1101,7 +1148,7 @@ describe("gatherOpenPrs", () => {
 		const { api, calls } = appApi([{ number: 5 }])
 		const out = await gatherOpenPrs(api)
 		expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
-			"GET /app/installations",
+			"GET /app/installations?per_page=100&page=1",
 			"GET /installation/repositories?per_page=100&page=1",
 			"GET /repos/owner/other/pulls?state=open&per_page=100&page=1&sort=updated",
 			"GET /installation/repositories?per_page=100&page=1",
@@ -1131,7 +1178,7 @@ describe("gatherOpenPrs", () => {
 		const api: GhAppClient = {
 			async request(_m, path) {
 				calls.push(path)
-				if (path === "/app/installations") return { status: 200, data: [{ id: 1 }] } as any
+				if (path.startsWith("/app/installations")) return { status: 200, data: [{ id: 1 }] } as any
 				if (path.startsWith("/installation/repositories")) {
 					const page = Number(new URL(`http://x${path}`).searchParams.get("page"))
 					// Simulate a server that caps a page at 30 regardless of `per_page`.
@@ -1162,7 +1209,7 @@ describe("gatherOpenPrs", () => {
 		const api: GhAppClient = {
 			async request(_m, path) {
 				calls.push(path)
-				if (path === "/app/installations") return { status: 200, data: [{ id: 1 }] } as any
+				if (path.startsWith("/app/installations")) return { status: 200, data: [{ id: 1 }] } as any
 				if (path.startsWith("/installation/repositories")) {
 					return {
 						status: 200,
@@ -1203,7 +1250,7 @@ describe("gatherOpenPrs", () => {
 	test("an installation with no token is skipped", async () => {
 		const api: GhAppClient = {
 			request: async (_method, path) =>
-				path === "/app/installations"
+				path.startsWith("/app/installations")
 					? ({ status: 200, data: [{ id: 1 }] } as any)
 					: ({ status: 200, data: { repositories: [{ full_name: "o/r" }] } } as any),
 			installationToken: async () => "",
@@ -1213,7 +1260,7 @@ describe("gatherOpenPrs", () => {
 	test("a missing repositories field is an empty list", async () => {
 		const api: GhAppClient = {
 			request: async (_method, path) =>
-				path === "/app/installations"
+				path.startsWith("/app/installations")
 					? ({ status: 200, data: [{ id: 1 }] } as any)
 					: ({ status: 200, data: {} } as any),
 			installationToken: async () => "tok",
@@ -1487,4 +1534,81 @@ describe("triggerReview", () => {
 		)
 		expect(r).toBe(403)
 	})
+})
+
+describe("commit status CI evidence", () => {
+	const statusApi = (state: string, checks: any[] = [], http = 200): GhClient => ({
+		request: async (_m, path) =>
+			path.endsWith("/status")
+				? {
+						status: http,
+						data: { state, total_count: 101, statuses: [{ context: "ci/travis", state }] },
+					}
+				: { status: 200, data: { check_runs: checks } },
+	})
+	for (const checks of [[], [{ name: "build", status: "completed", conclusion: "success" }]]) {
+		test(`failed commit status blocks even with ${checks.length} green check-runs`, async () => {
+			const result = await checkCiPassed(statusApi("failure", checks), "t", "o/r", "sha")
+			expect(result.ok).toBe(false)
+			expect(result.msg).toContain("ci/travis")
+		})
+	}
+	test("pending status waits", async () => {
+		expect(await checkCiPassed(statusApi("pending"), "t", "o/r", "sha")).toMatchObject({
+			ok: false,
+			pending: true,
+		})
+	})
+	test("combined failure blocks even if the first page contains only successes", async () => {
+		const api: GhClient = {
+			request: async (_m, path) =>
+				path.endsWith("/status")
+					? {
+							status: 200,
+							data: {
+								state: "failure",
+								total_count: 101,
+								statuses: [{ context: "visible", state: "success" }],
+							},
+						}
+					: { status: 200, data: { check_runs: [] } },
+		}
+		expect((await checkCiPassed(api, "t", "o/r", "sha")).ok).toBe(false)
+	})
+	test("an unreadable status blocks green checks", async () => {
+		expect(await checkCiPassed(statusApi("success", [], 403), "t", "o/r", "sha")).toMatchObject({
+			ok: false,
+			unknown: true,
+		})
+	})
+	test("a successful status passes", async () => {
+		expect((await checkCiPassed(statusApi("success"), "t", "o/r", "sha")).ok).toBe(true)
+	})
+})
+
+test("installation pagination follows next links even on a short page", async () => {
+	const calls: string[] = []
+	const api: GhAppClient = {
+		installationToken: async (id) => `token-${id}`,
+		request: async (_m, path, opts) => {
+			calls.push(path)
+			if (path.startsWith("/app/installations")) {
+				const first = new URL(`http://x${path}`).searchParams.get("page") === "1"
+				return {
+					status: 200,
+					data: [{ id: first ? 1 : 2 }],
+					link: first ? '<https://api.github.com/app/installations?page=2>; rel="next"' : "",
+				}
+			}
+			if (path.startsWith("/installation/repositories"))
+				return {
+					status: 200,
+					data: { total_count: 1, repositories: [{ full_name: `o/${opts?.token}` }] },
+				}
+			return { status: 200, data: [{ number: 7 }] }
+		},
+	}
+	const result = await gatherOpenPrs(api)
+	expect(result.map((r) => r.token)).toEqual(["token-1", "token-2"])
+	expect(calls.filter((p) => p.startsWith("/app/installations"))).toHaveLength(2)
 })

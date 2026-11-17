@@ -274,6 +274,8 @@ function harness(opts: Options = {}): Harness {
 	const api: GhAppClient = {
 		async request(method, path, o = {}) {
 			calls.push({ method, path, json: o.json, token: o.token })
+			if (path.endsWith("/status"))
+				return { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
 			if (opts.throwOn?.(path)) throw new Error("boom")
 			if (path.startsWith("/app/installations")) return { status: 200, data: [{ id: 1 }] }
 			if (path.startsWith("/installation/repositories")) {

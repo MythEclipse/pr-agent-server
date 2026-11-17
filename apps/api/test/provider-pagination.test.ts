@@ -106,6 +106,7 @@ describe("listIssueComments pagination", () => {
 		const comment = (id: number) => ({
 			id,
 			body: `comment ${id}`,
+			performed_via_github_app: { id: 4319749 },
 			html_url: `https://gh/${id}`,
 			created_at: "",
 		})
@@ -125,6 +126,7 @@ describe("listIssueComments pagination", () => {
 
 		expect(comments).toHaveLength(101)
 		expect(comments.at(-1).id).toBe(101)
+		expect(comments.at(-1).appId).toBe(4319749)
 		expect(pages).toEqual([1, 2])
 	})
 })

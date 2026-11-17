@@ -6,6 +6,7 @@
 // /api/v1/notify_review over loopback. Their paths, response shapes and
 // fallthrough behaviour are contracts, preserved verbatim from the Bun server.
 
+import { createHmac, timingSafeEqual } from "node:crypto"
 import type { Hono } from "hono"
 import {
 	handleWebhook,
@@ -66,14 +67,23 @@ export function startLegacyRoutes(app: Hono, deps: LegacyRouteDeps): void {
 	app.post("/api/v1/github_webhooks", webhook)
 	app.post("/", webhook)
 
-	// 4. the worker's ops notifier. Unauthenticated by design: loopback only,
-	// and the worker authenticates to GitHub with the App, not to us.
+	// 4. Authenticate notifications even when a proxy makes the API reachable.
 	app.all("/api/v1/notify_review", async (c) => {
 		if (c.req.method !== "POST") {
 			return c.json({ ok: false, error: "method not allowed" }, 405)
 		}
 		try {
-			const body = (await c.req.json()) as {
+			const raw = await c.req.text()
+			const signature = c.req.header("x-pr-agent-signature-256") ?? ""
+			const expected = `sha256=${createHmac("sha256", fullEnv.webhookSecret).update("notify_review\n").update(raw).digest("hex")}`
+			if (
+				!fullEnv.webhookSecret ||
+				!/^sha256=[0-9a-f]{64}$/.test(signature) ||
+				!timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+			) {
+				return c.json({ ok: false, error: "invalid notification signature" }, 403)
+			}
+			const body = JSON.parse(raw) as {
 				repo?: string
 				pr?: string | number
 				status?: string

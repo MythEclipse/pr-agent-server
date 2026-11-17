@@ -45,6 +45,7 @@ const COMMIT_URL = "https://github.com/o/r/commit/abc123"
 const UPDATED_HEADER_NOTE = `#### (Review updated until commit ${COMMIT_URL})`
 
 type PersistentStub = {
+	cfg: { github: { appId: string } }
 	ensureToken: () => Promise<void>
 	listIssueComments: () => Promise<GhComment[]>
 	editComment: (commentId: number, body: string) => Promise<void>
@@ -72,6 +73,7 @@ function stubProvider(initialComments?: GhComment[]): {
 	const deleted: number[] = []
 	const published: string[] = []
 	const provider = Object.create(GitHubProvider.prototype) as PersistentStub
+	provider.cfg = { github: { appId: "4319749" } }
 	provider.ensureToken = async () => {}
 	provider.listIssueComments = async () =>
 		initialComments ?? [
@@ -80,6 +82,7 @@ function stubProvider(initialComments?: GhComment[]): {
 				body: `${INITIAL_HEADER}\n\nprevious review`,
 				htmlUrl: "https://gh/comment/7",
 				createdAt: "",
+				appId: 4319749,
 			},
 		]
 	provider.editComment = async (commentId: number, body: string) => {
@@ -135,6 +138,7 @@ describe("publishPersistentComment header (S9)", () => {
 			body: `### Dependency changes\n\n| Package | From | To | Change |\n\n${INITIAL_HEADER}\n\nprevious review`,
 			htmlUrl: "https://gh/comment/42",
 			createdAt: "",
+			appId: 4319749,
 		}
 		const { provider, edits, published } = stubProvider([existingComment])
 		const newContent = `### Dependency changes\n\n| Package | From | To | Change |\n\n${INITIAL_HEADER}\n\nfresh review`
@@ -171,12 +175,14 @@ describe("publishPersistentComment header (S9)", () => {
 			body: `### Dependency changes\n\n${INITIAL_HEADER}\n\nstale review 1`,
 			htmlUrl: "https://gh/comment/10",
 			createdAt: "",
+			appId: 4319749,
 		}
 		const latestDup = {
 			id: 11,
 			body: `### Dependency changes\n\n${INITIAL_HEADER}\n\nstale review 2`,
 			htmlUrl: "https://gh/comment/11",
 			createdAt: "",
+			appId: 4319749,
 		}
 		const { provider, edits, deleted, published } = stubProvider([staleDup, latestDup])
 		const newContent = `${INITIAL_HEADER}\n\nfresh unified review`
@@ -229,4 +235,33 @@ describe("AppAuthClient installation token cache", () => {
 		expect(await client.installationToken("o", "r")).toBe("tok_2")
 		expect(mints()).toBe(2)
 	})
+})
+
+test("persistent publishing ignores human and other-App copies of the review header", async () => {
+	const comment = (id: number, appId?: number | null): GhComment => ({
+		id,
+		appId,
+		body: `${INITIAL_HEADER}\nCopied review`,
+		htmlUrl: `https://gh/${id}`,
+		createdAt: "",
+	})
+	const { provider, edits, deleted } = stubProvider([
+		comment(1, 4319749),
+		comment(2, null),
+		comment(3, 999),
+		comment(4),
+	])
+	await provider.publishPersistentComment("Fresh review", INITIAL_HEADER, "review", false)
+	expect(edits.map((e) => e.id)).toEqual([1])
+	expect(deleted).toEqual([])
+})
+
+test("publishes a new review when only human copies exist", async () => {
+	const { provider, edits, deleted, published } = stubProvider([
+		{ id: 1, body: INITIAL_HEADER, htmlUrl: "https://gh/1", createdAt: "", appId: null },
+	])
+	await provider.publishPersistentComment("Fresh review", INITIAL_HEADER, "review", false)
+	expect(edits).toEqual([])
+	expect(deleted).toEqual([])
+	expect(published).toHaveLength(1)
 })

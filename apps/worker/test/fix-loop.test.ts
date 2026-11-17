@@ -24,7 +24,9 @@ import type { GhClient } from "../src/pr/scan.ts"
 function sequencedApi(verdicts: Array<{ ok: boolean; msg: string; unknown?: boolean }>): GhClient {
 	let i = 0
 	return {
-		async request() {
+		async request(_m: string, path: string) {
+			if (path.endsWith("/status"))
+				return { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
 			const v = verdicts[Math.min(i, verdicts.length - 1)]
 			i += 1
 			const checks = v.ok

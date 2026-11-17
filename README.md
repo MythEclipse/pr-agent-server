@@ -70,7 +70,7 @@ Mounted in `main.ts`, **in this order** (later entries must not shadow earlier):
 | `/health`                        | liveness; reports the configured review model              |
 | `/setup/callback`                | GitHub App manifest exchange                               |
 | `/api/v1/github_webhooks`        | the HMAC-verified GitHub webhook (`/` is the legacy alias) |
-| `/api/v1/notify_review`          | worker ops notice relayed to Discord (`POST`, loopback)    |
+| `/api/v1/notify_review`          | worker ops notice relayed to Discord (`POST`, HMAC)        |
 | `/api/metrics`, `/api/analytics` | JSONL analytics read-back                                  |
 | `/rpc/*`                         | oRPC procedures (dashboard)                                |
 | `/api/docs`, `/api/docs/spec`    | procedure index page (HTML) + the OpenAPI document         |
@@ -133,6 +133,8 @@ moon run :typecheck         # tsc --noEmit across all three apps
 moon run :test              # 500 tests across apps/api and apps/worker
 pnpm -C apps/api exec tsx src/cli.ts --tool review --repo <owner>/<repo> --pr <n> --no-publish
 ```
+
+GitHub App permissions must include `statuses: read` so the worker can verify legacy CI commit statuses. For existing installations, enable this permission in the App settings and approve the updated permissions.
 
 ### Run server (after setting up secrets)
 
@@ -200,7 +202,7 @@ Secrets required in GitHub Actions:
   written by every finished review in `runJob` — the directory must be writable by the
   service user or the counters stay at 0
 - **Analytics**: `GET /api/analytics` → JSON summary (legacy `pr-agent.*.log` + `pr-agent.bun.jsonl`)
-- **Discord**: `POST /api/v1/notify_review` → pr-agent-ops webhook
+- **Discord**: `POST /api/v1/notify_review` → pr-agent-ops webhook. Requires `x-pr-agent-signature-256`: HMAC-SHA256 of `notify_review\n` followed by the raw body, using `GITHUB_WEBHOOK_SECRET`. The worker signs with `PR_AGENT_WEBHOOK_SECRET` (fallback: `GITHUB_WEBHOOK_SECRET`)
 - **API docs**: `GET /api/docs` for the oRPC surface, `/api/docs/spec` for the OpenAPI document
 - **Admin seed**: `pnpm db:seed` with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — creates the single admin the dashboard authenticates as
 

@@ -15,6 +15,7 @@
  * verbatim between the two files — now lives in `ops-webhook.ts`, so the
  * precedence rule and the production fallback are stated exactly once.
  */
+import { createHmac } from "node:crypto"
 import { opsWebhookUrl } from "./ops-webhook.ts"
 
 /** Python `post_discord_notification`'s default (line 475). */
@@ -70,20 +71,22 @@ export async function notifyReview(
 	url: string,
 ): Promise<void> {
 	const notifyUrl = process.env.PR_AGENT_NOTIFY_URL || PR_AGENT_NOTIFY_URL
+	const secret = process.env.PR_AGENT_WEBHOOK_SECRET || process.env.GITHUB_WEBHOOK_SECRET || ""
+	if (!secret) return
+	const body = JSON.stringify({
+		repo,
+		pr,
+		status,
+		summary: String(summary).slice(0, MAX_SUMMARY),
+		score: String(score),
+		url,
+	})
+	const signature = `sha256=${createHmac("sha256", secret).update("notify_review\n").update(body).digest("hex")}`
 	try {
 		await fetch(notifyUrl, {
 			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				repo,
-				pr,
-				status,
-				// Python slices BEFORE stringifying the score (`str(score)`), so a
-				// number score still arrives as a string on the wire.
-				summary: String(summary).slice(0, MAX_SUMMARY),
-				score: String(score),
-				url,
-			}),
+			headers: { "content-type": "application/json", "x-pr-agent-signature-256": signature },
+			body,
 			signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
 		})
 	} catch {

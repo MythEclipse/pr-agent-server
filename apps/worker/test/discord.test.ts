@@ -1,9 +1,10 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: ported pr_agent code; GitHub payloads are untyped JSON
 // biome-ignore-all lint/style/noNonNullAssertion: test helper asserts immediately after
+import { createHmac } from "node:crypto"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, test } from "vitest"
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 import { notifyReview, PR_AGENT_NOTIFY_URL, postDiscordOps } from "../src/discord.ts"
 import { startHttpStub } from "./helpers/http-stub.ts"
 
@@ -166,15 +167,30 @@ describe("postDiscordOps", () => {
 // ── notifyReview ─────────────────────────────────────────────────────────────
 
 describe("notifyReview", () => {
+	beforeEach(() => {
+		vi.stubEnv("PR_AGENT_WEBHOOK_SECRET", "test-notify-secret")
+	})
+	afterEach(() => {
+		vi.unstubAllEnvs()
+	})
 	// Python lines 472-483: fire-and-forget POST to the server's internal
 	// endpoint, timeout 5s, every exception swallowed.
 	test("posts the review payload and returns without throwing", async () => {
-		const seen: { path: string; method: string; body: any }[] = []
+		const seen: {
+			path: string
+			method: string
+			body: any
+			signature: string | null
+			raw: string
+		}[] = []
 		const server = await startHttpStub(async (req) => {
+			const raw = await req.text()
 			seen.push({
 				path: new URL(req.url).pathname,
 				method: req.method,
-				body: await req.json(),
+				body: JSON.parse(raw),
+				signature: req.headers.get("x-pr-agent-signature-256"),
+				raw,
 			})
 			return new Response("", { status: 200 })
 		})
@@ -196,6 +212,9 @@ describe("notifyReview", () => {
 			expect(seen).toHaveLength(1)
 			expect(seen[0].path).toBe("/api/v1/notify_review")
 			expect(seen[0].method).toBe("POST")
+			expect(seen[0].signature).toBe(
+				`sha256=${createHmac("sha256", "test-notify-secret").update("notify_review\n").update(seen[0].raw).digest("hex")}`,
+			)
 			expect(seen[0].body).toEqual({
 				repo: "o/repo",
 				pr: 42,

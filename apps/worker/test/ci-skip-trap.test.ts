@@ -25,7 +25,9 @@ function apiWith(
 	checks: Array<{ name: string; status?: string; conclusion?: string | null }>,
 ): GhClient {
 	return {
-		async request() {
+		async request(_m: string, path: string) {
+			if (path.endsWith("/status"))
+				return { status: 200, data: { state: "pending", total_count: 0, statuses: [] } }
 			return {
 				status: 200,
 				data: {

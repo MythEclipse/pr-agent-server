@@ -135,15 +135,34 @@ describe("legacy routes — the webhook", () => {
 })
 
 describe("legacy routes — notify_review", () => {
-	test("a POST is accepted", async () => {
+	test("a signed POST is accepted", async () => {
+		const body = JSON.stringify({ repo: "o/r", pr: 1, status: "done", score: "88" })
+		const signature = `sha256=${createHmac("sha256", SECRET).update("notify_review\n").update(body).digest("hex")}`
 		const res = await app.request("/api/v1/notify_review", {
 			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ repo: "o/r", pr: 1, status: "done", score: "88" }),
+			body,
+			headers: { "content-type": "application/json", "x-pr-agent-signature-256": signature },
 		})
 		expect(res.status).toBe(200)
 		expect(await res.json()).toEqual({ ok: true })
 	})
+
+	for (const signature of [
+		"",
+		"sha256=bad",
+		`sha256=${"é".repeat(64)}`,
+		sign("{}"),
+		`sha256=${createHmac("sha256", SECRET).update("notify_review\n").update("{ }").digest("hex")}`,
+	]) {
+		test(`rejects an unsigned or incorrectly signed notification (${signature})`, async () => {
+			const res = await app.request("/api/v1/notify_review", {
+				method: "POST",
+				body: "{}",
+				headers: { "x-pr-agent-signature-256": signature, "x-forwarded-for": "127.0.0.1" },
+			})
+			expect(res.status).toBe(403)
+		})
+	}
 
 	test("a non-POST is 405, as the old if-chain returned", async () => {
 		expect((await app.request("/api/v1/notify_review")).status).toBe(405)
