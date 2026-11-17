@@ -286,6 +286,8 @@ jobs:
           cp deploy/pr-agent-worker.timer         /tmp/pkg-units/
           cp deploy/pr-agent-sync-hooks.service   /tmp/pkg-units/
           cp deploy/pr-agent-sync-hooks.timer     /tmp/pkg-units/
+          cp deploy/pr-agent-vuln-fix.service     /tmp/pkg-units/
+          cp deploy/pr-agent-vuln-fix.timer       /tmp/pkg-units/
           ls -l /tmp/pkg-units/
 
       - name: Package the worker
@@ -513,14 +515,16 @@ jobs:
             mkdir -p /tmp/pkg-units.new
             tar -xzf /tmp/pkg-units.tar.gz -C /tmp/pkg-units.new
             for u in pr-agent-worker.service pr-agent-worker.timer \
-                     pr-agent-sync-hooks.service pr-agent-sync-hooks.timer; do
+                     pr-agent-sync-hooks.service pr-agent-sync-hooks.timer \
+                     pr-agent-vuln-fix.service pr-agent-vuln-fix.timer; do
               if [ -f "/tmp/pkg-units.new/$u" ]; then
                 sudo -n install -m 644 "/tmp/pkg-units.new/$u" "/etc/systemd/system/$u"
                 echo "installed $u"
               fi
             done
             sudo -n systemctl daemon-reload
-            sudo -n systemctl enable pr-agent-worker.timer pr-agent-sync-hooks.timer
+            sudo -n systemctl enable pr-agent-worker.timer pr-agent-sync-hooks.timer \
+              pr-agent-vuln-fix.timer
             rm -rf /tmp/pkg-units.new /tmp/pkg-units.tar.gz
           else
             echo "::warning::no /tmp/pkg-units.tar.gz; the worker units were NOT updated on this box"
@@ -548,6 +552,10 @@ jobs:
           fi
           sudo -n systemctl restart pr-agent-worker.timer
           sudo -n systemctl restart pr-agent-sync-hooks.timer
+          # The vulnerability pass: restarting its TIMER schedules the next run
+          # and never starts one, which is what we want here — a deploy must not
+          # begin cloning repos and opening PRs as a side effect.
+          sudo -n systemctl restart pr-agent-vuln-fix.timer
           REMOTE
 
       # Same poll the old workflow used, on the same port: the health watchdog

@@ -1,0 +1,62 @@
+# PR-Agent vulnerability fixer — the pass that actually MOVES a version.
+#
+# WHY THIS UNIT EXISTS. Two units already ran and neither could close an
+# advisory:
+#   pr-agent-worker.timer      every 5 min — processes PRs that ALREADY exist.
+#   pr-agent-sync-hooks.timer  daily 03:17 — `--sync-hooks` only WRITES config.
+# Nothing ran `--fix-vulns`, the mode that derives the Dependabot lanes AND
+# bumps the vulnerable dependency and opens the PR. It was manual-only, so in
+# practice it never ran.
+#
+# MEASURED 2026-11-17 before this unit existed: 23 open Dependabot alerts across
+# 9 owned repos, `automated-security-fixes` enabled and not paused on every one,
+# Dependabot lanes covering the manifests, a published patch for every alert —
+# and ZERO Dependabot PRs. Configuration that produces no PRs is not a fix, and
+# nothing was invoking the thing that produces them.
+#
+# `--fix-vulns --dry` on the same fleet, for the record: 23 alerts, 9 repos with
+# fixable alerts, 0 needing a human, 13 bumps planned (esbuild, undici, next,
+# minimatch, postcss-selector-parser, phpunit/phpunit, glib) and 1 lane to add
+# (cargo /apps/tauri on zeavis-edu).
+#
+# IT IS IDEMPOTENT, which is what makes a timer safe: a plan whose
+# `fix/vuln-<unit>` branch already has an open PR is reported as
+# `alreadyOpen` and skipped, and the lane work is a config sync.
+[Unit]
+Description=PR-Agent vulnerability autofix (Dependabot lanes + dependency bumps)
+Documentation=file:///opt/pr-agent-worker/run-worker.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pr-agent-worker
+User=pr-agent
+Group=pr-agent
+
+# The gate `--fix-vulns` itself demands, set here rather than passed on the
+# command line: it rewrites Dependabot config across every repo the App can see
+# and opens PRs, so it is switched on deliberately and in one place.
+Environment=PR_AGENT_SYNC_HOOKS=1
+
+Environment=HOME=/var/lib/pr-agent-server
+Environment=PR_AGENT_APP_DIR=/var/lib/pr-agent-server
+Environment=PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem
+Environment=PR_AGENT_WEBHOOK_URL=https://pr-agent.asepharyana.my.id/api/v1/github_webhooks
+
+# 90 MINUTES, because this is not an API scan. Each plan clones the repo and runs
+# the ecosystem's own package manager (pnpm/npm/composer/cargo), which is minutes
+# per repo. The fleet-wide alert scan alone measured 2m24s before a single bump
+# was attempted, and there were 13 plans queued.
+TimeoutStartSec=5400
+
+Nice=10
+NoNewPrivileges=true
+
+# PrivateTmp=false for the same reason the queue worker sets it: every state path
+# this worker owns is an absolute /tmp path, and the lock file that keeps this run
+# out of the queue worker's way lives there. With PrivateTmp=true the two units
+# would each hold a lock nobody else can see.
+PrivateTmp=false
+
+ExecStart=/usr/local/bin/bws-exec pr-agent /opt/pr-agent-worker/run-worker.sh --fix-vulns

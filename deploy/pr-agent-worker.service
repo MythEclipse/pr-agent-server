@@ -7,7 +7,7 @@
 #
 # DEPLOY TARGET: /opt/pr-agent-worker, NOT the repo worktree. The pr-agent user
 # cannot read /home/code (mode 750), so running it from a checkout is impossible.
-# `deploy.yml` ships the compiled dist/ here on every change.
+# ci.yml's `deploy` job ships the compiled dist/ here on every change.
 #
 # SECRETS: bws-exec `pr-agent` is the same app the webhook server uses. The
 # worker needs the App id and the App private key, which already exist there under

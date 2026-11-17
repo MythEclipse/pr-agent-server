@@ -1,0 +1,29 @@
+# Daily PR-Agent vulnerability autofix.
+#
+# TWICE A DAY, not once, and the second slot is the retry. `--fix-vulns` takes
+# the same lock as the 5-minute queue worker and gives up after waiting 2
+# minutes (`acquireWithWait`), so a run that lands while a tick is mid-flight
+# exits non-zero and does nothing. One slot a day would mean one collision costs
+# 24 hours; two slots halve that, and a run with nothing to fix is cheap — the
+# alert scan returns immediately and no repo is cloned.
+#
+# 04:23 is AFTER the 03:17 config sync, on purpose: both units take that lock,
+# and the sync writes the Dependabot files this pass then reads.
+#
+# RandomizedDelaySec spreads the two units apart when a box has just booted and
+# both are overdue, which is exactly when they would otherwise fire together.
+#
+# Persistent=true: a machine that was off replays the missed run once on boot.
+# That is wanted here — unlike the queue worker, where a backlog of ticks would
+# hammer GitHub, a missed vulnerability pass is work that should still happen.
+[Unit]
+Description=Daily PR-Agent vulnerability autofix
+
+[Timer]
+OnCalendar=*-*-* 04,16:23:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=pr-agent-vuln-fix.service
+
+[Install]
+WantedBy=timers.target

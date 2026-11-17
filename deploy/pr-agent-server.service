@@ -5,13 +5,13 @@
 # not reproduce the server half. It is committed now for that reason.
 #
 # DEPLOY TARGET: /opt/pr-agent-server. The pr-agent user cannot read /home/code
-# (mode 750), so running from a checkout is impossible; deploy.yml ships the
+# (mode 750), so running from a checkout is impossible; ci.yml's deploy job ships the
 # compiled dist/ plus a self-contained node_modules.
 #
 # SECRETS: bws-exec `pr-agent` supplies DATABASE_URL, BETTER_AUTH_SECRET, the
 # webhook secret and the LLM key. Nothing sensitive lives in this file.
 #
-# PORT 4023 is load-bearing: the health watchdog cron and deploy.yml's poll
+# PORT 4023 is load-bearing: the health watchdog cron and ci.yml's poll
 # both curl http://127.0.0.1:4023/health.
 [Unit]
 Description=PR-Agent webhook server (Node/TypeScript)
