@@ -17,6 +17,12 @@ name: CI
 #
 # What still runs on every PR is unchanged: biome, typecheck, tests, build and
 # the Drizzle drift check. What still ships is unchanged: push to main only.
+#
+# There is no `cleanup` job any more. It existed to run `nix-gc-vps.sh` on the
+# box, and that is a remnant of the Nix build the runtime left behind: the box
+# has no `/nix`, no `nix` binary, no `/etc/nix`, and no `nixbld` accounts, and
+# the script it invoked (`/usr/local/bin/nix-gc-vps.sh`) does not exist either —
+# so the job ssh'd in, ran a missing file, and was kept green by `|| true`.
 
 on:
   pull_request:
@@ -598,23 +604,3 @@ jobs:
           done
 
           echo "::error::the Node server did not take :4023 within 30s — either it is crash-looping or another unit holds the port (see the owner above). The previously running server was left untouched."
-
-  cleanup:
-    needs: deploy
-    # Runs after an ATTEMPTED deploy, never on a PR. `needs.deploy.result` is
-    # `skipped` when the deploy job did not apply, which is exactly the PR case —
-    # without this the nix-gc would ssh to the box on every pull request.
-    if: always() && needs.deploy.result != 'skipped'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Reap leftover Nix store entries
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        run: |
-          install -m 600 -D /dev/null ~/.ssh/id_ed25519
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
-          # Non-fatal: the runtime no longer depends on Nix.
-          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'sudo /usr/local/bin/nix-gc-vps.sh' || true

@@ -28,8 +28,9 @@ describe("api build entrypoints", () => {
 
 	test("builds the server and the migrator the deploy invokes", () => {
 		const config = readBuildConfig()
-		// Both are called out by name in .github/workflows/deploy.yml:
-		// `node dist/migrate.js` before the restart, `dist/main.js` as ExecStart.
+		// Both are called out by name in .github/workflows/ci.yml (the `deploy`
+		// job): `node dist/migrate.js` before the restart, `dist/main.js` as
+		// ExecStart.
 		expect(config).toContain("src/main.ts")
 		expect(config).toContain("src/migrate.ts")
 	})
@@ -62,7 +63,7 @@ describe("api build entrypoints", () => {
 		const invoked = [...invocations.matchAll(/dist\/([A-Za-z0-9_/-]+)\.js/g)].map((m) => m[1])
 		expect(invoked.length).toBeGreaterThan(0)
 		for (const entry of invoked) {
-			expect(built, `deploy.yml runs dist/${String(entry)}.js`).toContain(entry)
+			expect(built, `a workflow runs dist/${String(entry)}.js`).toContain(entry)
 		}
 	})
 })

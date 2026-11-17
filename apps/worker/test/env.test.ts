@@ -33,14 +33,13 @@ describe("bootstrapEnv", () => {
 		process.env.PATH = "/usr/bin"
 		bootstrapEnv()
 		const dirs = process.env.PATH?.split(":")
-		expect(dirs.slice(0, 5)).toEqual([
+		expect(dirs.slice(0, 4)).toEqual([
 			"/home/code/.bun/bin",
 			"/home/code/.local/bin",
 			"/home/code/.hermes/bin",
 			"/usr/local/bin",
-			"/nix/var/nix/profiles/default/bin",
 		])
-		expect(dirs[5]).toBe("/usr/bin")
+		expect(dirs[4]).toBe("/usr/bin")
 	})
 
 	test("prepends to an empty PATH without losing the separator", () => {

@@ -21,8 +21,9 @@ RUN_TICK=1
 echo "==> syncing $SRC -> $DEST"
 sudo install -d -m 0755 "$DEST"
 
-# The deployed tree is COMPILED OUTPUT since the Node migration: deploy.yml (or
-# a local `pnpm run build`) produces dist/, and that is what the unit execs.
+# The deployed tree is COMPILED OUTPUT since the Node migration: ci.yml's
+# `verify` job (or a local `pnpm run build`) produces dist/, and that is what
+# the unit execs.
 if [[ ! -d "$SRC/dist" ]]; then
   echo "deploy-worker: $SRC/dist missing — run 'pnpm run build' first" >&2
   exit 1

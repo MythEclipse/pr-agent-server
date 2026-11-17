@@ -177,7 +177,6 @@ Deploy is fully automated via GitHub Actions on push to `main`:
    → swap /opt/pr-agent-server/{dist,node_modules,drizzle,web-dist}
    → node dist/migrate.js → restart pr-agent-server.service
    → health check on :4023
-3. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
 ```
 
 The gates run ONCE. `deploy` is a job in the same workflow that `needs: verify`,
@@ -188,8 +187,11 @@ before it could ship anything, which is what made a push take ~4.5 minutes.
 The production server is compiled output run by Node
 (`/opt/node/bin/node /opt/pr-agent-server/dist/main.js`) as a systemd service
 (`pr-agent-server.service`, port 4023, secrets via `bws-exec pr-agent`). The
-previous tree is kept as `.prev` for a manual rollback. The runtime has no Nix
-dependency — the `cleanup` job only reaps leftover Nix store entries on the VPS.
+previous tree is kept as `.prev` for a manual rollback.
+
+There is no Nix left anywhere: the runtime is pnpm + systemd, the box has no
+`/nix`, no `nix` binary, no `/etc/nix` and no `nixbld` accounts, and the workflow
+no longer carries a `cleanup` job for a GC script that was never there.
 
 Secrets required in GitHub Actions:
 

@@ -20,13 +20,24 @@ import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-/** Python `_EXTRA_BIN_DIRS` (lines 19-25), in the same order. */
+/**
+ * Python `_EXTRA_BIN_DIRS` (lines 19-25), in the same order — MINUS the Nix
+ * profile.
+ *
+ * `/nix/var/nix/profiles/default/bin` was the last entry, and it is gone
+ * because the box is Nix-free: `ls -d /nix` answers ENOENT, there is no `nix`
+ * binary, no `/etc/nix`, and the `nixbld` users were deleted. Every tool this
+ * worker spawns resolves elsewhere — `claude` and `pnpm` from `.local/bin`,
+ * `gh`/`node`/`git` from `/usr/bin`, `bws-exec` from `/usr/local/bin` — so the
+ * entry only ever contributed a path that does not exist to every child's
+ * environment. The other four are checked present on the box, which is why
+ * they stay.
+ */
 const EXTRA_BIN_DIRS = [
 	"/home/code/.bun/bin",
 	"/home/code/.local/bin",
 	"/home/code/.hermes/bin",
 	"/usr/local/bin",
-	"/nix/var/nix/profiles/default/bin",
 ]
 
 /**
