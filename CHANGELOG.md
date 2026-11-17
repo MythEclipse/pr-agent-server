@@ -1,3 +1,10 @@
+## [1.12.13](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.12...v1.12.13) (2026-11-17)
+
+
+### Bug Fixes
+
+* **worker:** force the vulnerable version instead of asking a human ([3e681e5](https://github.com/MythEclipse/pr-agent-server/commit/3e681e53d54cf7b0ef71137b63481c51380430f3))
+
 ## [1.12.12](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.11...v1.12.12) (2026-11-17)
 
 
