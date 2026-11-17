@@ -81,6 +81,17 @@ export type VulnFixPlan = {
 	 * `applyPlan`.
 	 */
 	transitive: boolean
+	/**
+	 * The advisory's own vulnerable range, e.g. `<11.0.1` or `>=4.0.0 <5.2.2`.
+	 *
+	 * Carried because a FORCED version sometimes has to be scoped to the copies
+	 * that are actually vulnerable. An unscoped override pins every copy of the
+	 * package, including the one the app imports — and when that copy is already
+	 * at or above the patched version, pinning it is a DOWNGRADE. npm and pnpm
+	 * both accept `"<pkg>@<range>": "<version>"` as an override key, so this range
+	 * is what makes the force precise instead of blunt.
+	 */
+	vulnerableRange: string
 }
 
 const SEVERITY_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 }
@@ -163,13 +174,21 @@ export function planVulnFixes(repo: string, alerts: readonly DependabotAlert[]):
 				alertNumbers: [alert.number],
 				ghsaIds: alert.security_advisory?.ghsa_id ? [alert.security_advisory.ghsa_id] : [],
 				transitive: alert.dependency?.relationship === "transitive",
+				vulnerableRange: alert.security_vulnerability?.vulnerable_version_range ?? "",
 			})
 			continue
 		}
 		// Several advisories can sit on one package. Take the HIGHEST patch (the
 		// lower one would leave the other advisory open) and keep every advisory
 		// id, because the PR body is what a reviewer uses to check the fix.
-		if (compareVersions(patched, existing.patchedVersion) > 0) existing.patchedVersion = patched
+		if (compareVersions(patched, existing.patchedVersion) > 0) {
+			existing.patchedVersion = patched
+			// The range that belongs to the patch we keep: scoping a force to the
+			// range of a LOWER patch would leave the other advisory reachable.
+			existing.vulnerableRange = alert.security_vulnerability?.vulnerable_version_range ?? ""
+		} else if (existing.vulnerableRange === "") {
+			existing.vulnerableRange = alert.security_vulnerability?.vulnerable_version_range ?? ""
+		}
 		// A group is "transitive" only if EVERY advisory in it is: one direct
 		// advisory means the manifest already names the package, and the plain
 		// install is the right command.
@@ -333,6 +352,163 @@ export function npmLockedVersion(workdirs: Workdirs, lockPath: string, pkg: stri
 }
 
 /**
+ * The install command that re-resolves a lockfile after a forced version has
+ * been written into `package.json`.
+ *
+ * LOCKFILE-ONLY, for the same reason `fixCommandFor` uses those forms: the
+ * branch only ever commits the lockfile, and a full install on the worker would
+ * spend minutes populating a `node_modules` nobody keeps.
+ */
+function installOnlyFor(file: string): string[] {
+	switch (file) {
+		case "package-lock.json":
+		case "npm-shrinkwrap.json":
+			return [
+				"npm",
+				"install",
+				"--package-lock-only",
+				"--ignore-scripts",
+				"--no-audit",
+				"--no-fund",
+			]
+		case "pnpm-lock.yaml":
+			return ["pnpm", "install", "--lockfile-only", "--ignore-scripts"]
+		case "yarn.lock":
+			return ["yarn", "install"]
+		default:
+			return []
+	}
+}
+
+/**
+ * Write the ecosystem's own "resolve this package to that version" entry into
+ * `package.json`.
+ *
+ * WHY THIS EXISTS AS A SHARED HELPER. The npm path has always used `overrides`
+ * for a transitive dependency; pnpm's equivalent (`pnpm.overrides`) was reported
+ * as "a human's call" instead, and yarn's (`resolutions`) was not attempted at
+ * all. That was a policy the flow does not get to make: an open advisory with a
+ * published patch is work, not a decision. The entry lives in `package.json`, so
+ * it is committed with the branch and CI's `--frozen-lockfile` accepts the
+ * lockfile that comes out of it.
+ *
+ * `scopeToRange` is the safety valve. npm and pnpm accept
+ * `"<pkg>@<range>": "<version>"`, which forces only the copies whose declaring
+ * range matches — so a package that is ALSO a direct dependency at a safe
+ * version keeps that version instead of being dragged down to the patch.
+ * Yarn's `resolutions` has no such selector, so a scoped force returns null
+ * there rather than silently downgrading a direct dependency.
+ *
+ * THE FILE'S OWN INDENTATION IS KEPT. Re-serialising with a fixed indent
+ * rewrites every line of `package.json` — measured on BotWa, whose four-space
+ * file came back as tabs — and a reviewer cannot see the two lines that matter
+ * through a whole-file diff.
+ */
+export function writeForcedVersion(
+	raw: string,
+	file: string,
+	pkg: string,
+	patchedVersion: string,
+	opts: { scopeToRange?: string } = {},
+): { text: string; label: string; key: string } | null {
+	let field: string[]
+	let label: string
+	switch (file) {
+		case "package-lock.json":
+		case "npm-shrinkwrap.json":
+			field = ["overrides"]
+			label = "overrides"
+			break
+		case "pnpm-lock.yaml":
+			field = ["pnpm", "overrides"]
+			label = "pnpm.overrides"
+			break
+		case "yarn.lock":
+			if (opts.scopeToRange) return null
+			field = ["resolutions"]
+			label = "resolutions"
+			break
+		default:
+			return null
+	}
+
+	let manifest: Record<string, unknown>
+	try {
+		manifest = JSON.parse(raw) as Record<string, unknown>
+	} catch {
+		return null
+	}
+	if (manifest === null || typeof manifest !== "object") return null
+
+	// Walk (and create) every container except the last segment.
+	let block = manifest
+	for (const segment of field.slice(0, -1)) {
+		const current = block[segment]
+		if (current === null || typeof current !== "object") block[segment] = {}
+		block = block[segment] as Record<string, unknown>
+	}
+	const leaf = field[field.length - 1] ?? "overrides"
+	const existing =
+		block[leaf] !== null && typeof block[leaf] === "object"
+			? (block[leaf] as Record<string, unknown>)
+			: {}
+	const key = opts.scopeToRange ? `${pkg}@${opts.scopeToRange}` : pkg
+	block[leaf] = { ...existing, [key]: patchedVersion }
+
+	const indent = /\n([^\S\n]+)"/.exec(raw)?.[1] ?? "\t"
+	return { text: `${JSON.stringify(manifest, null, indent)}\n`, label, key }
+}
+
+/**
+ * Every version of `pkg` a lockfile still resolves, or `null` when the format is
+ * not one this can read (cargo, composer, gem, go, uv).
+ *
+ * THE POINT IS DISTINGUISHING TWO OUTCOMES THAT LOOK THE SAME. When a forced
+ * version produces no diff, either the lockfile still carries a vulnerable copy
+ * (a real failure worth a ⚠️) or it carries none at all (the repo is already
+ * fixed and the advisory is stale — nobody's work). Reporting both as "needs a
+ * human" is what made 6 of 23 alerts sit in a queue nobody could action.
+ */
+export function lockedVersionsOf(
+	workdirs: Workdirs,
+	lockPath: string,
+	pkg: string,
+): string[] | null {
+	let raw: string
+	try {
+		raw = workdirs.readFile(lockPath)
+	} catch {
+		return null
+	}
+	if (/^(package-lock\.json|npm-shrinkwrap\.json)$/i.test(basename(lockPath))) {
+		try {
+			const lock = JSON.parse(raw) as { packages?: Record<string, { version?: string }> }
+			const out: string[] = []
+			for (const [path, entry] of Object.entries(lock.packages ?? {})) {
+				// Every nesting depth, not just the root: the whole reason this check
+				// exists is a vulnerable copy nested under another package.
+				if (!path.endsWith(`node_modules/${pkg}`)) continue
+				if (typeof entry?.version === "string") out.push(entry.version)
+			}
+			return out
+		} catch {
+			return null
+		}
+	}
+	if (/^pnpm-lock\.yaml$/i.test(basename(lockPath))) {
+		// pnpm writes one key per resolved instance — `  minimatch@10.0.1:` — under
+		// `packages:` (v6) or `snapshots:` (v9). Both are indented keys, so one
+		// pattern covers both without a YAML parser (this bundle has none).
+		const escaped = pkg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+		const re = new RegExp(`^\\s+'?${escaped}@([^:'"\\s(]+)'?:`, "gm")
+		const out: string[] = []
+		for (const match of raw.matchAll(re)) if (match[1]) out.push(match[1])
+		return out
+	}
+	return null
+}
+
+/**
  * A short, stable discriminator for a plan's MANIFEST, or "" for the legacy case.
  *
  * THE UNIT OF WORK IS `(manifest, package)`, so the branch must identify the
@@ -487,7 +663,10 @@ export type RepoAutofixResult = {
 export type VulnAutofixSummary = {
 	opened: number
 	skipped: number
+	/** Plans that genuinely need a decision (no command, unreadable manifest, …). */
 	manual: number
+	/** Plans whose advisory is stale: the lockfile resolves nothing vulnerable. */
+	alreadyPatched: number
 	failed: number
 	lines: string[]
 	perRepo: RepoAutofixResult[]
@@ -614,6 +793,16 @@ async function applyPlan(
 	detail: string
 	manual?: boolean
 	/**
+	 * True when the lockfile resolves NO vulnerable copy of the package: the
+	 * advisory is stale and there is nothing for anyone to do.
+	 *
+	 * Distinct from `manual` on purpose. `manual` means "a decision is needed";
+	 * this means "the question is already closed", and the two used to be reported
+	 * with the same ℹ️ line — which is how 6 of 23 alerts looked like a backlog
+	 * when they were either fixed already or one override away from being fixed.
+	 */
+	alreadyPatched?: boolean
+	/**
 	 * True when this plan needed no work because its PR already exists.
 	 *
 	 * The caller's per-repo cap counts PRs it OPENED, not plans it looked at, so
@@ -678,8 +867,11 @@ async function applyPlan(
 	// the fix would be a no-op. `overrides` is npm's own idiom for this exact
 	// case — the dependency list stays as it is, the lockfile resolves the
 	// vulnerable package to the patched version, and `npm ci` honours it.
-	const isNpmLock = /^(package-lock\.json|npm-shrinkwrap\.json)$/i.test(basename(plan.manifestPath))
+	const file = basename(plan.manifestPath).toLowerCase()
+	const pkgPath = `${cwd}/package.json`
+	const isNpmLock = /^(package-lock\.json|npm-shrinkwrap\.json)$/i.test(file)
 	let overrideWritten = false
+	let overrideLabel = ""
 	let argv = command.argv
 	// The peer-conflict retry has to follow the SAME route. Carrying the original
 	// `argv` into the retry after switching to `overrides` re-runs the plain
@@ -687,6 +879,50 @@ async function applyPlan(
 	// exists to avoid. Measured on BotWa #24: the override landed AND
 	// `"brace-expansion": "^1.1.21"` was added to `dependencies` by the retry.
 	let fallback: string[] | undefined = "fallback" in command ? command.fallback : undefined
+
+	/**
+	 * Write the forced version into `package.json` and switch the command to a
+	 * plain install.
+	 *
+	 * SCOPED WHEN THE PACKAGE IS ALSO A DIRECT DEPENDENCY, because an unscoped
+	 * override pins EVERY copy — including the one the app imports. When that copy
+	 * is already at or above the patched version, pinning it is a DOWNGRADE: the
+	 * BotWa `axios` shape this flow was built to prevent. Scoped to the advisory's
+	 * own vulnerable range, only the copies that are actually vulnerable move.
+	 *
+	 * Returns the field it wrote (`overrides`, `pnpm.overrides`, `resolutions`), or
+	 * null when this ecosystem has no override mechanism — cargo, composer, gem,
+	 * go and uv have none, and for those the caller keeps the manual report.
+	 */
+	const forceVersion = (): string | null => {
+		let raw: string
+		try {
+			raw = workdirs.readFile(pkgPath)
+		} catch {
+			return null
+		}
+		let direct: string | null = null
+		try {
+			direct = npmDirectRange(JSON.parse(raw) as Record<string, unknown>, plan.packageName)
+		} catch {
+			return null
+		}
+		const written = writeForcedVersion(raw, file, plan.packageName, plan.patchedVersion, {
+			...(direct !== null && plan.vulnerableRange !== ""
+				? { scopeToRange: plan.vulnerableRange }
+				: {}),
+		})
+		if (!written) return null
+		workdirs.writeFile(pkgPath, written.text)
+		overrideWritten = true
+		overrideLabel = written.label
+		argv = installOnlyFor(file)
+		// npm's peer-conflict escape hatch only exists for npm; carrying it into a
+		// pnpm command would be a flag pnpm rejects outright.
+		fallback = file === "pnpm-lock.yaml" ? undefined : [...argv, "--legacy-peer-deps"]
+		return written.label
+	}
+
 	if (isNpmLock) {
 		const pkgPath = `${cwd}/package.json`
 		let manifest: Record<string, unknown>
@@ -744,42 +980,39 @@ async function applyPlan(
 				}
 			}
 			if (compareVersions(plan.patchedVersion, locked) <= 0) {
-				workdirs.remove(workdir)
-				return {
-					ok: false,
-					manual: true,
-					detail:
-						`${plan.packageName} is a direct dependency already at ${locked}; the vulnerable copy is ` +
-						`nested under another package, so forcing ${plan.patchedVersion} would DOWNGRADE it — ` +
-						`the parent that pulls the old copy has to be bumped`,
+				// THE NESTED CASE, AND IT IS FIXABLE WITHOUT A HUMAN. The direct copy
+				// is already safe; the vulnerable one is somewhere below it, pulled by
+				// another package. An UNSCOPED override would drag the safe copy DOWN
+				// to the patch — which is why this used to stop here — but a scoped
+				// one (`minimatch@<11.0.1`) only touches the copies whose declaring
+				// range can still resolve a vulnerable version. Measured on web1's
+				// `minimatch`: direct 11.0.1, vulnerable copy nested under a parent.
+				const forced = forceVersion()
+				if (forced === null) {
+					workdirs.remove(workdir)
+					return {
+						ok: false,
+						manual: true,
+						detail:
+							`${plan.packageName} is a direct dependency already at ${locked}; the vulnerable copy is ` +
+							`nested under another package, and this manifest has no override field to force it with`,
+					}
 				}
 			}
 			// Forward move: npm rewrites the declared range and the lockfile together.
 		} else {
-			const existingOverrides =
-				manifest.overrides !== null && typeof manifest.overrides === "object"
-					? (manifest.overrides as Record<string, unknown>)
-					: {}
-			manifest.overrides = { ...existingOverrides, [plan.packageName]: plan.patchedVersion }
-			// KEEP THE FILE'S OWN INDENTATION. Re-serialising with a fixed indent
-			// rewrites every line of package.json — measured on BotWa, whose four-space
-			// file came back as tabs — and a reviewer cannot see the two lines that
-			// matter through a whole-file diff. The indent is read from the file.
-			// `[^\S\n]` is "whitespace except a newline" — the same class without a
-			// literal control character, which the linter rejects in a regex.
-			const indent = /\n([^\S\n]+)"/.exec(raw)?.[1] ?? "	"
-			workdirs.writeFile(pkgPath, `${JSON.stringify(manifest, null, indent)}\n`)
-			overrideWritten = true
-			// The override drives resolution, so the command takes no package argument.
-			argv = [
-				"npm",
-				"install",
-				"--package-lock-only",
-				"--ignore-scripts",
-				"--no-audit",
-				"--no-fund",
-			]
-			fallback = [...argv, "--legacy-peer-deps"]
+			// TRANSITIVE: npm cannot pin it from the command line without promoting
+			// it to a direct dependency, so the override is the fix. `forceVersion`
+			// writes it with the file's own indentation and switches the command to a
+			// plain install.
+			if (forceVersion() === null) {
+				workdirs.remove(workdir)
+				return {
+					ok: false,
+					manual: true,
+					detail: `could not write an overrides entry for ${plan.packageName} into ${basename(pkgPath)}`,
+				}
+			}
 		}
 	}
 
@@ -811,22 +1044,43 @@ async function applyPlan(
 		}
 		// PNPM WILL NOT PIN A TRANSITIVE DEPENDENCY, and says so:
 		// `ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP — "<pkg>" (requested "X") is not a
-		// direct dependency`. Measured on Pemrograman-web-1's `minimatch`. There is
-		// no lockfile-scoped way around it (`pnpm.overrides` would have to stay in
-		// package.json for CI's `--frozen-lockfile` to accept the result, which
-		// changes the repo's contract), so this is reported as MANUAL with the
-		// reason instead of being retried into the same wall.
-		if (/ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP/.test(why)) {
+		// direct dependency`. Measured on Pemrograman-web-1's `minimatch`.
+		//
+		// ITS OWN ANSWER IS `pnpm.overrides`, so use it. This used to stop here with
+		// "which is a human's call", which was the wrong reading: the entry lives in
+		// `package.json` and is committed with the branch, so CI's
+		// `--frozen-lockfile` accepts the resulting lockfile — the same mechanism the
+		// npm path has always used for the identical situation.
+		if (/ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP/.test(why) && !overrideWritten) {
+			const forced = forceVersion()
+			if (forced === null) {
+				workdirs.remove(workdir)
+				return {
+					ok: false,
+					manual: true,
+					detail: `${plan.packageName} is a TRANSITIVE dependency — pnpm will not pin it, and ${basename(pkgPath)} could not take a pnpm.overrides entry`,
+				}
+			}
+			const [fprogram, ...fargs] = argv
+			updated = exec([fprogram ?? "", ...fargs], cwd, UPDATE_TIMEOUT_SEC)
+			if (updated.code !== 0) {
+				workdirs.remove(workdir)
+				const failWhy = reportable((updated.stderr || updated.stdout || "").trim())
+				return {
+					ok: false,
+					detail: `${fprogram} exited ${updated.code} after writing ${forced}: ${head(failWhy, 300)}`,
+				}
+			}
+		} else if (/ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP/.test(why)) {
 			workdirs.remove(workdir)
 			return {
 				ok: false,
-				manual: true,
-				detail: `${plan.packageName} is a TRANSITIVE dependency — pnpm will not pin a version for it (needs a pnpm.overrides entry, which is a human's call)`,
+				detail: `${plan.packageName} is still refused by pnpm as an indirect dependency after ${overrideLabel}`,
 			}
 		}
 		// One retry, only for the peer-conflict flag. Anything else is the repo's
 		// own problem and retrying it just doubles the run time.
-		if (fallback && /ERESOLVE|peer dep/i.test(why)) {
+		else if (fallback && /ERESOLVE|peer dep/i.test(why)) {
 			const [fprogram, ...fargs] = fallback
 			updated = exec([fprogram ?? "", ...fargs], cwd, UPDATE_TIMEOUT_SEC)
 			usedFallback = updated.code === 0
@@ -861,16 +1115,72 @@ async function applyPlan(
 	// silent half-fix the (manifest, package) grouping exists to prevent. Each
 	// porcelain line is `XY <path>`, so the path is compared as a whole segment
 	// (a rename line's `old -> new` form counts when either side matches).
-	const status = run(["status", "--porcelain"], workdir, 60)
-	if (status.code !== 0 || !porcelainTouches(status.stdout, plan.manifestPath)) {
+	const moved = (): boolean => {
+		const status = run(["status", "--porcelain"], workdir, 60)
+		return status.code === 0 && porcelainTouches(status.stdout, plan.manifestPath)
+	}
+
+	// ATTEMPT 2: FORCE IT.
+	//
+	// A plain update exits 0 having resolved NOTHING when the manifest does not
+	// name the package and a parent's range pins the copy it keeps — measured on
+	// GMW's `esbuild` and `undici`, TeleUploader's and zeavis-edu's `esbuild`. The
+	// command is not wrong; there is simply nothing for it to move. The override
+	// is the answer, and it is the same entry the npm and pnpm routes above write.
+	//
+	// This used to be the end of the line ("needs a human"), which put 6 of 23
+	// alerts in a queue that nothing ever drained.
+	let forcedNow = false
+	if (!moved() && !overrideWritten) {
+		const label = forceVersion()
+		if (label !== null) {
+			const [fprogram, ...fargs] = argv
+			const forced = exec([fprogram ?? "", ...fargs], cwd, UPDATE_TIMEOUT_SEC)
+			forcedNow = forced.code === 0
+			if (!forcedNow) {
+				workdirs.remove(workdir)
+				const failWhy = reportable((forced.stderr || forced.stdout || "").trim())
+				return {
+					ok: false,
+					detail: `${fprogram} exited ${forced.code} after writing ${label}: ${head(failWhy, 300)}`,
+				}
+			}
+		}
+	}
+
+	if (!moved()) {
+		// NOTHING MOVED, EVEN WITH THE FORCE. Two outcomes that look identical and
+		// are not:
+		//   - the lockfile still resolves a vulnerable copy → a real failure, and
+		//     the versions are named so the next run has something to go on;
+		//   - the lockfile resolves nothing vulnerable → the repo is ALREADY FIXED
+		//     and the advisory is stale. That is not work for a human, it is a
+		//     closed question.
+		const versions = lockedVersionsOf(
+			workdirs,
+			`${cwd}/${basename(plan.manifestPath)}`,
+			plan.packageName,
+		)
+		const vulnerable = (versions ?? []).filter((v) => compareVersions(v, plan.patchedVersion) < 0)
 		workdirs.remove(workdir)
-		// `pnpm` exits 0 having resolved nothing when the package is transitive and
-		// the parent's range already pins the version it keeps — measured on GMW's
-		// `esbuild`. Naming both possibilities saves the reader a re-run.
+		if (versions !== null && vulnerable.length === 0) {
+			return {
+				ok: false,
+				alreadyPatched: true,
+				detail:
+					versions.length === 0
+						? `${basename(plan.manifestPath)} resolves no copy of ${plan.packageName} at all — the advisory is stale`
+						: `${basename(plan.manifestPath)} resolves only ${[...new Set(versions)].join(", ")}, all at or above ${plan.patchedVersion} — the advisory is stale`,
+			}
+		}
 		return {
 			ok: false,
 			manual: true,
-			detail: `the package manager resolved nothing (${program} exited 0): already at the patched version, or pinned by a parent's range`,
+			detail:
+				`the package manager resolved nothing (${program} exited 0)${forcedNow ? ` even with ${overrideLabel}` : ""}` +
+				(vulnerable.length > 0
+					? `, and ${basename(plan.manifestPath)} still resolves ${[...new Set(vulnerable)].join(", ")}`
+					: ", and the lockfile could not be read to tell whether anything is still vulnerable"),
 		}
 	}
 
@@ -950,6 +1260,7 @@ export async function runVulnAutofix(
 		opened: 0,
 		skipped: 0,
 		manual: 0,
+		alreadyPatched: 0,
 		failed: 0,
 		lines: [],
 		perRepo: [],
@@ -1033,6 +1344,15 @@ export async function runVulnAutofix(
 				perRepo.opened += 1
 				say(
 					`   ✅ ${repo}: ${plan.packageName} -> ${plan.patchedVersion} (${plan.alertNumbers.length} alert(s)) ${res.prUrl ?? res.detail}`,
+				)
+			} else if (res.alreadyPatched) {
+				// Not a failure and not a decision: the lockfile no longer resolves
+				// anything vulnerable, so the alert is stale. Reported as its own line
+				// so the operator can dismiss it (or ignore it) instead of reading it
+				// as work the tool refused to do.
+				summary.alreadyPatched += 1
+				say(
+					`   ✔️ ${repo}: ${plan.packageName} ${plan.patchedVersion} — nothing vulnerable left, advisory stale (${plan.alertNumbers.length} alert(s))`,
 				)
 			} else if (res.manual) {
 				// NOT a failure: the tooling answered "a human has to decide". Counting

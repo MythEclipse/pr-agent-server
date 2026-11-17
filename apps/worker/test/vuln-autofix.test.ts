@@ -9,10 +9,12 @@ import {
 	dependabotUrl,
 	directoryOf,
 	fixCommandFor,
+	lockedVersionsOf,
 	planVulnFixes,
 	runVulnAutofix,
 	type VulnFixPlan,
 	vulnBranchName,
+	writeForcedVersion,
 } from "../src/ops/vulnAutofix.ts"
 
 const alert = (over: Partial<DependabotAlert> & { number: number }): DependabotAlert => ({
@@ -187,6 +189,112 @@ describe("planVulnFixes", () => {
 	})
 })
 
+describe("writeForcedVersion", () => {
+	const pkgJson = (over: Record<string, unknown> = {}): string =>
+		`${JSON.stringify({ name: "r", dependencies: { express: "^4.0.0" }, ...over }, null, 2)}\n`
+
+	it("writes pnpm.overrides, creating the pnpm block when it is absent", () => {
+		const out = writeForcedVersion(pkgJson(), "pnpm-lock.yaml", "minimatch", "11.0.1")
+		expect(out?.label).toBe("pnpm.overrides")
+		const manifest = JSON.parse(out?.text ?? "{}") as { pnpm?: { overrides?: unknown } }
+		expect(manifest.pnpm?.overrides).toEqual({ minimatch: "11.0.1" })
+	})
+
+	it("keeps an existing pnpm block and its other fields", () => {
+		const out = writeForcedVersion(
+			pkgJson({ pnpm: { onlyBuiltDependencies: ["esbuild"], overrides: { undici: "7.30.1" } } }),
+			"pnpm-lock.yaml",
+			"minimatch",
+			"11.0.1",
+		)
+		const manifest = JSON.parse(out?.text ?? "{}") as {
+			pnpm?: { onlyBuiltDependencies?: string[]; overrides?: Record<string, string> }
+		}
+		expect(manifest.pnpm?.onlyBuiltDependencies).toEqual(["esbuild"])
+		expect(manifest.pnpm?.overrides).toEqual({ undici: "7.30.1", minimatch: "11.0.1" })
+	})
+
+	it("scopes the key to the advisory range when asked", () => {
+		const out = writeForcedVersion(pkgJson(), "pnpm-lock.yaml", "minimatch", "11.0.1", {
+			scopeToRange: "<11.0.1",
+		})
+		expect(out?.key).toBe("minimatch@<11.0.1")
+	})
+
+	it("refuses a SCOPED force on yarn, whose resolutions have no selector", () => {
+		// An unscoped `resolutions` entry would pin the direct copy too — the
+		// downgrade this flow exists to prevent. Null keeps it as a manual report
+		// instead of silently doing the wrong thing.
+		expect(
+			writeForcedVersion(pkgJson(), "yarn.lock", "minimatch", "11.0.1", { scopeToRange: "<11" }),
+		).toBeNull()
+		expect(writeForcedVersion(pkgJson(), "yarn.lock", "minimatch", "11.0.1")?.label).toBe(
+			"resolutions",
+		)
+	})
+
+	it("keeps the file's own indentation so the diff is two lines", () => {
+		const fourSpace = `{\n    "name": "r"\n}\n`
+		const out = writeForcedVersion(fourSpace, "package-lock.json", "axios", "1.2.0")
+		expect(out?.text).toContain('\n    "overrides"')
+		// No new dependency entry: the override is the whole change.
+		expect(JSON.parse(out?.text ?? "{}")).toEqual({ name: "r", overrides: { axios: "1.2.0" } })
+	})
+
+	it("returns null for a lockfile format with no override mechanism", () => {
+		expect(writeForcedVersion(pkgJson(), "cargo.lock", "glib", "0.20.0")).toBeNull()
+		expect(writeForcedVersion("not json", "package-lock.json", "axios", "1.2.0")).toBeNull()
+	})
+})
+
+describe("lockedVersionsOf", () => {
+	const fake = (files: Record<string, string>) =>
+		({
+			readFile: (p: string) => {
+				const v = files[p]
+				if (v === undefined) throw new Error(`ENOENT: ${p}`)
+				return v
+			},
+		}) as never
+
+	it("finds a NESTED npm copy, not just the root one", () => {
+		// The whole reason the check exists: a vulnerable copy under another package
+		// while the root copy is already safe.
+		const lock = JSON.stringify({
+			packages: {
+				"node_modules/minimatch": { version: "11.0.1" },
+				"node_modules/glob/node_modules/minimatch": { version: "3.0.4" },
+			},
+		})
+		expect(
+			lockedVersionsOf(fake({ "/w/package-lock.json": lock }), "/w/package-lock.json", "minimatch"),
+		).toEqual(["11.0.1", "3.0.4"])
+	})
+
+	it("finds pnpm's resolved keys, including scoped packages", () => {
+		const lock = [
+			"lockfileVersion: '9.0'",
+			"snapshots:",
+			"  minimatch@10.0.1:",
+			"    resolution: {integrity: sha512-x}",
+			"  '@types/node@26.6.6':",
+			"    resolution: {integrity: sha512-y}",
+			"",
+		].join("\n")
+		expect(
+			lockedVersionsOf(fake({ "/w/pnpm-lock.yaml": lock }), "/w/pnpm-lock.yaml", "minimatch"),
+		).toEqual(["10.0.1"])
+		expect(
+			lockedVersionsOf(fake({ "/w/pnpm-lock.yaml": lock }), "/w/pnpm-lock.yaml", "@types/node"),
+		).toEqual(["26.6.6"])
+	})
+
+	it("returns null when the format is not one it can read", () => {
+		expect(lockedVersionsOf(fake({ "/w/Cargo.lock": "x" }), "/w/Cargo.lock", "glib")).toBeNull()
+		expect(lockedVersionsOf(fake({}), "/w/package-lock.json", "minimatch")).toBeNull()
+	})
+})
+
 describe("fixCommandFor", () => {
 	const plan = (manifestPath: string, ecosystem = "npm"): VulnFixPlan => ({
 		repo: "o/r",
@@ -198,6 +306,7 @@ describe("fixCommandFor", () => {
 		severity: "high",
 		alertNumbers: [1],
 		ghsaIds: ["GHSA-aaaa-bbbb-cccc"],
+		vulnerableRange: "<4.17.21",
 		transitive: false,
 	})
 
@@ -282,6 +391,7 @@ describe("branch names, URLs and PR body", () => {
 		alertNumbers: [12, 13],
 		ghsaIds: ["GHSA-67hx-6x53-jw92"],
 		transitive: false,
+		vulnerableRange: "<7.23.2",
 	}
 
 	it("a scoped package becomes a branch name GitHub accepts", () => {
@@ -390,6 +500,11 @@ function harness(opts: {
 	execResults?: GitResult[]
 	/** Files the fake filesystem starts with, keyed by absolute path. */
 	files?: Record<string, string>
+	/**
+	 * Successive `git status --porcelain` bodies, so a test can model "the first
+	 * attempt changed nothing, the forced retry did". The last entry repeats.
+	 */
+	diffSequence?: string[]
 	/** The `packageManager` field the default `package.json` reports. */
 	packageManager?: string
 	/** The remote head a `git/ref/heads/<branch>` read reports, when any. */
@@ -429,6 +544,11 @@ function harness(opts: {
 		gitCalls.push(args)
 		if (args[0] === "clone" || args[0] === "config") return { code: 0, stdout: "", stderr: "" }
 		if (args[0] === "status") {
+			const seq = opts.diffSequence
+			if (seq?.length) {
+				const next = seq.length > 1 ? (seq.shift() as string) : (seq[0] as string)
+				return { code: 0, stdout: next, stderr: "" }
+			}
 			return { code: 0, stdout: opts.diff ?? " M package-lock.json\n", stderr: "" }
 		}
 		if (args[0] === "commit") return { code: 0, stdout: "", stderr: "" }
@@ -478,7 +598,9 @@ function harness(opts: {
 		dry: false,
 		report: (l: string) => lines.push(l),
 	}
-	return { deps, requests, gitCalls, execCalls, lines }
+	// The fake filesystem itself, so a test can assert on what a flow WROTE
+	// without hard-coding the workdir name (it carries a manifest hash).
+	return { deps, requests, gitCalls, execCalls, lines, files: workdirs }
 }
 
 describe("runVulnAutofix", () => {
@@ -753,11 +875,29 @@ describe("runVulnAutofix", () => {
 		})
 		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
 
-		expect(summary.manual).toBe(1)
-		expect(summary.opened).toBe(0)
-		// npm is never run: the decision is made before touching the tree.
-		expect(h.execCalls).toEqual([])
-		expect(h.lines.join("\n")).toContain("DOWNGRADE")
+		// THE FIX IS NOW A SCOPED FORCE, NOT A REFUSAL. An unscoped override would
+		// pin the direct copy down to 0.33.0 — the same downgrade by another route —
+		// but `axios@< 0.33.0` only touches the copies whose declaring range can
+		// still resolve a vulnerable version, so the app's own `^1.21.1` survives.
+		expect(summary.opened).toBe(1)
+		expect(summary.manual).toBe(0)
+
+		const manifest = JSON.parse(
+			h.deps.workdirs.readFile("/tmp/pr-queue-work/_vuln_o_r_axios-0.33.0/package.json"),
+		) as { dependencies?: Record<string, string>; overrides?: Record<string, string> }
+		// The declared range is UNTOUCHED — that is the whole point.
+		expect(manifest.dependencies?.axios).toBe("^1.21.1")
+		expect(manifest.overrides).toEqual({ "axios@< 0.33.0": "0.33.0" })
+
+		// And the command names no package: naming one is what rewrites the range.
+		expect(h.execCalls[0]).toEqual([
+			"npm",
+			"install",
+			"--package-lock-only",
+			"--ignore-scripts",
+			"--no-audit",
+			"--no-fund",
+		])
 	})
 
 	it("refuses to move a direct dependency when its installed version is unreadable", async () => {
@@ -856,9 +996,16 @@ describe("runVulnAutofix", () => {
 		})
 		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
 
+		// No PR and no push: the branch would claim a remediation it does not carry.
 		expect(summary.opened).toBe(0)
-		expect(summary.manual).toBe(1)
 		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
+		// And it is NOT a human decision any more. The lockfile the fake serves has
+		// no `brace-expansion` entry at all, so there is nothing vulnerable left to
+		// fix — the advisory is stale. That is a closed question, and it is reported
+		// as one instead of being queued for a person who cannot action it either.
+		expect(summary.alreadyPatched).toBe(1)
+		expect(summary.manual).toBe(0)
+		expect(h.lines.join("\n")).toContain("advisory stale")
 	})
 
 	it("an npm peer conflict is retried once with --legacy-peer-deps", async () => {
@@ -883,12 +1030,135 @@ describe("runVulnAutofix", () => {
 		expect(JSON.stringify(pr?.json)).toContain("legacy-peer-deps")
 	})
 
-	it("a pnpm transitive dependency is MANUAL, not a retried failure", async () => {
-		// MEASURED on Pemrograman-web-1's `minimatch`: pnpm refuses to pin a
-		// version for a transitive dependency, and there is no lockfile-scoped way
-		// around it. Reported as a human decision, not as a broken run.
+	it("a plain update that resolves nothing is FORCED, not left for a human", async () => {
+		// MEASURED on GMW's `esbuild` (and TeleUploader's, and zeavis-edu's): pnpm
+		// exits 0 having changed nothing, because the manifest does not name the
+		// package and a parent's range pins the copy it keeps. There is nothing for
+		// the command to move — the override is the answer, and this used to stop
+		// with "needs a human" and leave the advisory open forever.
 		const h = harness({
-			alerts: [alert({ number: 1 })],
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "esbuild" },
+						manifest_path: "pnpm-lock.yaml",
+						relationship: "transitive",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "esbuild" },
+						severity: "medium",
+						vulnerable_version_range: "<0.25.0",
+						first_patched_version: { identifier: "0.25.0" },
+					},
+				}),
+			],
+			// First status: nothing moved. Second: the forced install did move the
+			// lockfile.
+			diffSequence: ["", " M pnpm-lock.yaml\n"],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(1)
+		expect(summary.manual).toBe(0)
+		// Attempt 1 names the package (pnpm refuses or ignores it), attempt 2 is the
+		// override-driven install with no package argument.
+		expect(h.execCalls[0]).toEqual([
+			"pnpm",
+			"update",
+			"esbuild@0.25.0",
+			"--lockfile-only",
+			"--ignore-scripts",
+		])
+		expect(h.execCalls[1]).toEqual(["pnpm", "install", "--lockfile-only", "--ignore-scripts"])
+		const pkgJson = [...h.files.keys()].find((k) => k.endsWith("/package.json"))
+		const manifest = JSON.parse(h.files.get(pkgJson as string) as string) as {
+			pnpm?: { overrides?: Record<string, string> }
+		}
+		expect(manifest.pnpm?.overrides).toEqual({ esbuild: "0.25.0" })
+	})
+
+	it("a lockfile that resolves nothing vulnerable is STALE, not manual", async () => {
+		// The other half of "resolved nothing": the repo is already fixed and
+		// GitHub's alert is behind. Nobody can action that, so it must not be
+		// reported as a decision someone has to make.
+		const plan: VulnFixPlan = {
+			repo: "o/r",
+			ecosystem: "npm",
+			manifestPath: "pnpm-lock.yaml",
+			directory: "/",
+			packageName: "minimatch",
+			patchedVersion: "11.0.1",
+			severity: "high",
+			alertNumbers: [1],
+			ghsaIds: ["GHSA-aaaa-bbbb-cccc"],
+			transitive: true,
+			vulnerableRange: "<11.0.1",
+		}
+		const workdir = `/tmp/pr-queue-work/_vuln_o_r_${vulnBranchName(plan).replace("fix/vuln-", "")}`
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "minimatch" },
+						manifest_path: "pnpm-lock.yaml",
+						relationship: "transitive",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "minimatch" },
+						severity: "high",
+						vulnerable_version_range: "<11.0.1",
+						first_patched_version: { identifier: "11.0.1" },
+					},
+				}),
+			],
+			files: {
+				[`${workdir}/pnpm-lock.yaml`]: [
+					"lockfileVersion: '9.0'",
+					"snapshots:",
+					"  minimatch@11.0.1:",
+					"    resolution: {integrity: sha512-x}",
+					"",
+				].join("\n"),
+			},
+			// Nothing ever moves, before or after the force.
+			diffSequence: [""],
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(summary.manual).toBe(0)
+		expect(summary.alreadyPatched).toBe(1)
+		expect(summary.failed).toBe(0)
+		expect(h.lines.join("\n")).toContain("advisory stale")
+		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
+	})
+
+	it("a pnpm transitive dependency is FORCED through pnpm.overrides", async () => {
+		// MEASURED on Pemrograman-web-1's `minimatch`: pnpm refuses to pin a
+		// version for an indirect dependency
+		// (`ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP`). Its own answer is
+		// `pnpm.overrides`, which is a package.json entry committed with the branch
+		// — so CI's `--frozen-lockfile` accepts the resulting lockfile. This used to
+		// stop as "a human's call", which left the advisory open forever.
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "npm", name: "minimatch" },
+						manifest_path: "pnpm-lock.yaml",
+						relationship: "transitive",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "npm", name: "minimatch" },
+						severity: "high",
+						vulnerable_version_range: "<11.0.1",
+						first_patched_version: { identifier: "11.0.1" },
+					},
+				}),
+			],
 			execResults: [
 				{
 					code: 1,
@@ -896,13 +1166,27 @@ describe("runVulnAutofix", () => {
 					stderr:
 						'ERR_PNPM_UPDATE_VERSION_ON_INDIRECT_DEP  "minimatch" (requested "11.0.1") is not a direct dependency',
 				},
+				{ code: 0, stdout: "", stderr: "" },
 			],
+			diff: " M pnpm-lock.yaml\n",
 		})
 		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
 
-		expect(summary.manual).toBe(1)
+		expect(summary.opened).toBe(1)
+		expect(summary.manual).toBe(0)
 		expect(summary.failed).toBe(0)
-		expect(h.lines.join("\n")).toContain("TRANSITIVE dependency")
+
+		// The entry pnpm itself asks for, in the field pnpm reads.
+		const pkgJson = [...h.files.keys()].find((k) => k.endsWith("/package.json"))
+		expect(pkgJson, "no package.json was written").toBeDefined()
+		const manifest = JSON.parse(h.files.get(pkgJson as string) as string) as {
+			pnpm?: { overrides?: Record<string, string> }
+		}
+		expect(manifest.pnpm?.overrides).toEqual({ minimatch: "11.0.1" })
+
+		// The retry is a lockfile-only install with NO package argument: naming the
+		// package is the thing pnpm refuses.
+		expect(h.execCalls[1]).toEqual(["pnpm", "install", "--lockfile-only", "--ignore-scripts"])
 	})
 
 	it("a missing tool is reported as a HOST problem, not a lockfile one", async () => {

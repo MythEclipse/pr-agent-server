@@ -154,7 +154,11 @@ export async function fixVulns(argv: string[], context: WorkerCliContext): Promi
 		console.log(
 			dry
 				? `vuln-fix: DRY RUN — ${fixes.perRepo.filter((r) => r.fixable > 0).length} repo(s) have fixable alerts; ${fixes.manual} need a human. Nothing pushed.`
-				: `vuln-fix: ${fixes.opened} PR(s) opened, ${fixes.manual} left for a human, ${fixes.failed} failed, across ${list.repos.length} repo(s).`,
+				: // `alreadyPatched` is its own number because it is not work: the
+					// lockfile resolves nothing vulnerable and the alert is stale. Folding
+					// it into "left for a human" is what made a closed question look like
+					// a backlog.
+					`vuln-fix: ${fixes.opened} PR(s) opened, ${fixes.alreadyPatched} already fixed (stale advisory), ${fixes.manual} left for a human, ${fixes.failed} failed, across ${list.repos.length} repo(s).`,
 		)
 		// THE PAGES TO OPEN, per repo, for whatever is still open — the fixer only
 		// clears what it could apply, and an operator chasing the rest needs the
