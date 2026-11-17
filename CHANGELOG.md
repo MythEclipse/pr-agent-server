@@ -1,3 +1,10 @@
+## [1.12.10](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.9...v1.12.10) (2026-11-17)
+
+
+### Bug Fixes
+
+* **worker:** schedule the vulnerability pass that actually moves a version ([8d23950](https://github.com/MythEclipse/pr-agent-server/commit/8d239506b50880c484e1bea81fda7d353591c970))
+
 ## [1.12.9](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.8...v1.12.9) (2026-11-17)
 
 ## [1.12.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.7...v1.12.8) (2026-11-17)
