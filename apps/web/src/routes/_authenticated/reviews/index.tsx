@@ -24,6 +24,27 @@ export const Route = createFileRoute("/_authenticated/reviews/")({
 const STATUSES = ["", "success", "failed", "running", "queued"] as const
 const PAGE_SIZE = 25
 
+/**
+ * How often the live counters are re-read.
+ *
+ * The header is the only place `queued` and `running` are visible as NUMBERS, so
+ * it has to be able to notice a review that starts or finishes on its own. Ten
+ * seconds against one `GROUP BY` is cheap; the alternative — a header that only
+ * moves when the operator clicks Refresh — is what made the old numbers look
+ * frozen and wrong.
+ */
+const COUNTS_POLL_MS = 10_000
+
+/**
+ * How often the LIST is re-read, and only while there is live work.
+ *
+ * A row used to sit on `queued` until somebody pressed Refresh, because the
+ * transition to `running`/`success` happened server-side after the fetch. The
+ * status column was therefore correct at fetch time and wrong from then on,
+ * which reads as a broken queue rather than a stale page.
+ */
+const LIVE_POLL_MS = 4_000
+
 function ReviewsPage() {
 	const navigate = useNavigate()
 	const { status } = Route.useSearch()
@@ -37,8 +58,24 @@ function ReviewsPage() {
 		offset: page * PAGE_SIZE,
 	}
 
+	// Per-status counts, from the same table the list reads, so the header and
+	// the rows cannot disagree.
+	const { data: counts } = useSuspenseQuery(
+		orpc.review.counts.queryOptions({
+			queryKey: reviewKeys.counts(),
+			refetchInterval: COUNTS_POLL_MS,
+		}),
+	)
+	const live = (counts?.queued ?? 0) + (counts?.running ?? 0)
+
 	const { data, isFetching, refetch } = useSuspenseQuery(
-		orpc.review.list.queryOptions({ input, queryKey: reviewKeys.list(input) }),
+		orpc.review.list.queryOptions({
+			input,
+			queryKey: reviewKeys.list(input),
+			// Only while something is actually in flight: an idle history page
+			// must not poll a database every 4 seconds forever.
+			refetchInterval: live > 0 ? LIVE_POLL_MS : false,
+		}),
 	)
 
 	// A query refetch, NOT `window.location.reload()`. A full reload re-downloads
@@ -59,6 +96,15 @@ function ReviewsPage() {
 					<h1 className="text-xl font-semibold">Review history</h1>
 					<p className="text-sm text-slate-500">
 						{total} review{total === 1 ? "" : "s"}
+						{/* The live counts, which used to be nowhere: the list can only
+						    show one status at a time, so "2 running, 3 queued" had no
+						    surface at all — and `running` could never have shown a row
+						    because nothing wrote that status. */}
+						{live > 0 ? (
+							<span className="ml-2 text-slate-700">
+								· {counts?.running ?? 0} running · {counts?.queued ?? 0} queued
+							</span>
+						) : null}
 					</p>
 				</div>
 				<Button variant="outline" size="sm" onClick={onRefresh} disabled={isFetching}>
@@ -87,6 +133,11 @@ function ReviewsPage() {
 						}}
 					>
 						{s || "all"}
+						{/* The count beside each filter, so a status with no rows says so
+						    instead of looking like a filter that does not work. */}
+						{s && counts ? (
+							<span className="ml-1.5 tabular-nums opacity-60">{counts[s]}</span>
+						) : null}
 					</Button>
 				))}
 			</div>

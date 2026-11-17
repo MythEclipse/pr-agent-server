@@ -1,4 +1,4 @@
-// Record a finished review in the history table.
+// Record a review's life in the history table.
 //
 // WHY THIS EXISTS. `reviews` is the table the dashboard reads, and NOTHING WROTE
 // TO IT. Measured on the live database: 88 rows in `review_queue_jobs` with
@@ -7,15 +7,22 @@
 // accurate and permanent. The queue recorded that work happened; the history of
 // what was said was never stored.
 //
-// Two rows are written per attempt, not one:
+// THREE STATES, EACH WRITTEN BY THE MOMENT IT DESCRIBES:
 //
-//   - a `queued` row at enqueue time, so a review that is still running (or that
-//     hard-killed the process) is visible rather than absent;
-//   - then that same row is moved to `success` or `failed`.
+//   `queued`   when a delivery creates work (webhook → `enqueue`). This is what
+//              "waiting in the queue" means, and it is the only state in which a
+//              row is allowed to have no `startedAt`.
+//   `running`  when the queue hands the job to `runJob` (`start`), which flips
+//              the queued row rather than inserting a second one.
+//   `success` / `failed`  at `finish`.
 //
-// That ordering is what makes `startedAt`/`finishedAt` meaningful on the detail
-// page; writing only the terminal row would leave a finished review with no
-// measurable duration, and a crashed one with no trace at all.
+// BEFORE THIS, `start` inserted the row as `queued` and nothing ever wrote
+// `running`: the status existed in the schema, in the API's enum and in the
+// dashboard's filter buttons, and no row could ever carry it. Meanwhile the
+// `queued` filter listed rows that were executing, and — measured on the live
+// database, 9 of them — rows whose process had died days earlier and whose
+// `finished_at` stayed NULL forever. Both filters were lies in opposite
+// directions.
 
 import type { TReviewStatus } from "../../domain/review/review.ts"
 import type { ReviewRepository } from "../../domain/review/review-repository.ts"
@@ -77,10 +84,40 @@ export function makeRecordReview(deps: RecordReviewDeps) {
 
 	return {
 		/**
-		 * Insert the `queued` row and return its id, or `null` if the insert failed.
+		 * Insert the `queued` row for a delivery that created work.
+		 *
+		 * `startedAt` is deliberately NOT set: the review has not started. The
+		 * dashboard reads that absence as "waiting", and `start()` fills it in
+		 * when the queue hands the job over — which is also what makes the
+		 * duration on the detail page measure the RUN, not the wait.
+		 */
+		async enqueue(input: RecordReviewStartInput): Promise<number | null> {
+			try {
+				const row = await deps.reviews.insertReview({
+					owner: input.owner,
+					repo: input.repo,
+					pr: input.pr,
+					kind: input.kind ?? "review",
+					status: "queued",
+					startedAt: null,
+				})
+				return row.id
+			} catch (err) {
+				console.error(
+					`[history] failed to queue review row for ${input.owner}/${input.repo}#${input.pr}:`,
+					err,
+				)
+				return null
+			}
+		},
+
+		/**
+		 * Mark the review RUNNING: flip the queued row this job belongs to, or
+		 * insert a `running` row when there is none (a job re-armed from `failed`,
+		 * a coalesced re-run, or a queue fed by something that wrote no row).
 		 *
 		 * `null` rather than a throw, because this runs BEFORE the review:
-		 * `main.ts` calls `start()` outside its try block, so a rejected INSERT
+		 * `main.ts` calls `start()` outside its try block, so a rejected write
 		 * would abort `runJob` before `runReview` was ever reached — no comment on
 		 * the PR, the job marked `failed`, and the cause a bookkeeping table rather
 		 * than the review. Measured with a failing store: `start()` rejected with
@@ -91,14 +128,18 @@ export function makeRecordReview(deps: RecordReviewDeps) {
 		 * update — the history is degraded, the review itself is unaffected.
 		 */
 		async start(input: RecordReviewStartInput): Promise<number | null> {
+			const startedAt = now()
 			try {
+				const flipped = await deps.reviews.markRunning(input.owner, input.repo, input.pr, startedAt)
+				if (flipped) return flipped.id
+
 				const row = await deps.reviews.insertReview({
 					owner: input.owner,
 					repo: input.repo,
 					pr: input.pr,
 					kind: input.kind ?? "review",
-					status: "queued",
-					startedAt: now(),
+					status: "running",
+					startedAt,
 				})
 				return row.id
 			} catch (err) {

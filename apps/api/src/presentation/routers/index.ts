@@ -49,6 +49,11 @@ export function buildRouter() {
 			get: adminProcedure
 				.input(z.object({ id: z.number().int().positive() }))
 				.handler(({ context, input }) => context.useCases.review.get(input)),
+
+			// Counts per status. A single round-trip so the dashboard can show
+			// `queued` and `running` without one list call per status — the two
+			// statuses that were previously invisible or permanently stale.
+			counts: adminProcedure.handler(({ context }) => context.useCases.review.counts()),
 		},
 
 		queue: {

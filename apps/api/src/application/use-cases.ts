@@ -5,6 +5,7 @@
 import type { TReview } from "../domain/review/review.ts"
 import type { ReviewRepository } from "../domain/review/review-repository.ts"
 import type { ReviewResult } from "../legacy/tools/review.ts"
+import { makeCountReviews } from "./review/count-reviews.ts"
 import { makeGetReview } from "./review/get-review.ts"
 import { makeListReviews } from "./review/list-reviews.ts"
 
@@ -40,6 +41,9 @@ export function buildUseCases(deps: UseCaseDeps) {
 		review: {
 			list: makeListReviews({ reviews: deps.reviews }),
 			get: makeGetReview({ reviews: deps.reviews }),
+			// Per-status counters for the dashboard header. Without these the two
+			// LIVE statuses (`queued`, `running`) had no visible count anywhere.
+			counts: makeCountReviews({ reviews: deps.reviews }),
 		},
 		legacy: deps.legacy,
 	}

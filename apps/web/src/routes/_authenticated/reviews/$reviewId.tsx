@@ -20,7 +20,18 @@ function ReviewDetail() {
 	const id = Number(reviewId)
 
 	const { data: row } = useSuspenseQuery(
-		orpc.review.get.queryOptions({ input: { id }, queryKey: reviewKeys.detail(id) }),
+		orpc.review.get.queryOptions({
+			input: { id },
+			queryKey: reviewKeys.detail(id),
+			// Follow a review that is still moving. Without this the page is a
+			// snapshot: opened on a `queued` row it says `queued` forever, however
+			// long ago the review actually finished — the same staleness the list
+			// had, on the page an operator opens precisely to watch one run.
+			refetchInterval: (query) => {
+				const s = query.state.data?.status
+				return s === "queued" || s === "running" ? 3_000 : false
+			},
+		}),
 	)
 
 	const started = row.startedAt ? new Date(row.startedAt) : null

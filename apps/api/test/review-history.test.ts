@@ -35,9 +35,11 @@ describe("review history", () => {
 		const id = await history.start({ owner: "o", repo: "r", pr: 5 })
 		expect(id, "insert returned no id").not.toBeNull()
 		if (id === null) return
-		// Visible while it is still running, not only after it finishes: a review
-		// that takes the process down must not be absent from the history.
-		expect((await reviews.getReview(id))?.status).toBe("queued")
+		// `running`, not `queued`: `start()` runs when the queue has already handed
+		// the job over, so the row it writes describes a review that is executing.
+		// It used to say `queued`, which made the status `running` unreachable and
+		// made `queued` mean "executing, or abandoned".
+		expect((await reviews.getReview(id))?.status).toBe("running")
 
 		await history.finish(id, {
 			owner: "o",
@@ -100,6 +102,91 @@ describe("review history", () => {
 		expect(page.rows.map((r) => r.headSha)).toEqual(["second", "first"])
 	})
 
+	test("a delivery writes `queued`, then the run flips that SAME row to `running`", async () => {
+		const reviews = createReviewRepository(store.db)
+		const history = makeRecordReview({ reviews })
+
+		const queuedId = await history.enqueue({ owner: "o", repo: "r", pr: 9 })
+		expect(queuedId, "enqueue returned no id").not.toBeNull()
+		if (queuedId === null) return
+
+		const queued = await reviews.getReview(queuedId)
+		expect(queued?.status).toBe("queued")
+		// No start time: the wait is not part of the run, and the detail page's
+		// duration must measure the run.
+		expect(queued?.startedAt).toBeNull()
+
+		const runningId = await history.start({ owner: "o", repo: "r", pr: 9 })
+
+		// THE SAME ROW. A second row would be listed as a second review that never
+		// finishes, and it would inflate the `running` counter permanently.
+		expect(runningId).toBe(queuedId)
+		const running = await reviews.getReview(queuedId)
+		expect(running?.status).toBe("running")
+		expect(running?.startedAt).toBeInstanceOf(Date)
+	})
+
+	test("countByStatus reports every status, including the ones with no rows", async () => {
+		const reviews = createReviewRepository(store.db)
+		const history = makeRecordReview({ reviews })
+
+		// One running, one queued, one finished.
+		const running = await history.start({ owner: "o", repo: "r", pr: 1 })
+		if (running !== null) {
+			await history.finish(running, { owner: "o", repo: "r", pr: 1, status: "success" })
+		}
+		const stillQueued = await history.enqueue({ owner: "o", repo: "r", pr: 2 })
+		expect(stillQueued).not.toBeNull()
+		const inFlight = await history.enqueue({ owner: "o", repo: "r", pr: 3 })
+		if (inFlight !== null) await history.start({ owner: "o", repo: "r", pr: 3 })
+
+		// Every key present: the dashboard renders a counter per status and a
+		// missing key would make the counter disappear rather than read zero.
+		expect(await reviews.countByStatus()).toEqual({
+			queued: 1,
+			running: 1,
+			success: 1,
+			failed: 0,
+		})
+	})
+
+	test("an open row left by a dead process is failed on the next boot", async () => {
+		const reviews = createReviewRepository(store.db)
+		const history = makeRecordReview({ reviews })
+
+		const id = await history.start({ owner: "o", repo: "r", pr: 11 })
+		expect(id, "insert returned no id").not.toBeNull()
+		if (id === null) return
+		// The process dies here: `finish()` never runs, which is exactly the state
+		// 9 rows were found in on the live database — the oldest five days old,
+		// and the entire content of the dashboard's `queued` filter.
+		const healed = await reviews.markInterrupted(
+			new Date(Date.now() + 1_000),
+			"interrupted: the process exited while this review was running",
+		)
+		expect(healed).toBe(1)
+
+		const row = await reviews.getReview(id)
+		expect(row?.status).toBe("failed")
+		expect(row?.error).toContain("interrupted")
+		expect(row?.finishedAt).toBeInstanceOf(Date)
+	})
+
+	test("markInterrupted leaves a review that is still running alone", async () => {
+		const reviews = createReviewRepository(store.db)
+		const history = makeRecordReview({ reviews })
+
+		const id = await history.start({ owner: "o", repo: "r", pr: 12 })
+		expect(id, "insert returned no id").not.toBeNull()
+		if (id === null) return
+
+		// A sweep whose cutoff predates the row: another process's boot must not
+		// fail work that this process is still running.
+		const healed = await reviews.markInterrupted(new Date(Date.now() - 60_000), "interrupted")
+		expect(healed).toBe(0)
+		expect((await reviews.getReview(id))?.status).toBe("running")
+	})
+
 	test("a history write failure never fails the review it describes", async () => {
 		// The comment is already on the PR by the time this runs. Turning a
 		// successful review into a thrown error because one UPDATE failed would
@@ -112,6 +199,11 @@ describe("review history", () => {
 				updateReview: async () => {
 					throw new Error("db down")
 				},
+				markRunning: async () => {
+					throw new Error("db down")
+				},
+				markInterrupted: async () => 0,
+				countByStatus: async () => ({ queued: 0, running: 0, success: 0, failed: 0 }),
 				getReview: async () => null,
 				listReviews: async () => ({ rows: [], total: 0 }),
 			},

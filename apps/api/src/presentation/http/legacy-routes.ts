@@ -21,6 +21,12 @@ import { setupCallback } from "./setup.ts"
 
 export interface LegacyRouteDeps {
 	queue: IReviewQueuePort
+	/**
+	 * Records a `queued` history row when a delivery creates work. Passed in from
+	 * the composition root, which is the only place that owns the repository —
+	 * and optional, because the webhook path must work without a history table.
+	 */
+	onQueued?: (job: { owner: string; repo: string; pr: number }) => Promise<unknown> | unknown
 }
 
 export function startLegacyRoutes(app: Hono, deps: LegacyRouteDeps): void {
@@ -61,7 +67,7 @@ export function startLegacyRoutes(app: Hono, deps: LegacyRouteDeps): void {
 		const body = await c.req.text()
 		const sig = c.req.header("x-hub-signature-256") ?? null
 		const event = c.req.header("x-github-event") || ""
-		const result = await handleWebhook(fullEnv, body, sig, event, queue)
+		const result = await handleWebhook(fullEnv, body, sig, event, queue, deps.onQueued)
 		return c.json(result.body, result.status as never)
 	}
 	app.post("/api/v1/github_webhooks", webhook)

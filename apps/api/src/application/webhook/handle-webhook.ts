@@ -42,6 +42,17 @@ export async function handleWebhook(
 	signatureHeader: string | null,
 	event: string,
 	queue: IReviewQueuePort,
+	/**
+	 * Called when the delivery CREATED WORK, so the dashboard can show the review
+	 * as `queued` before it runs.
+	 *
+	 * A port rather than a direct repository call, and optional: the history is
+	 * bookkeeping, and a webhook must never fail because a bookkeeping table did.
+	 * The verdict below is what decides — `deduped` means the queue already has
+	 * this job, so a second row would be a duplicate the operator would read as a
+	 * second review.
+	 */
+	onQueued?: (job: { owner: string; repo: string; pr: number }) => Promise<unknown> | unknown,
 ): Promise<{ status: number; body: unknown }> {
 	// HMAC verification (sha256)
 	if (!signatureHeader) {
@@ -120,11 +131,27 @@ export async function handleWebhook(
 	// reviewed in production. Absent on some payload shapes — the queue then
 	// falls back to deduping, which is the old behaviour.
 	const headSha = typeof pr.head?.sha === "string" ? pr.head.sha : undefined
+	let verdict: "queued" | "deduped"
 	try {
-		await queue.enqueue({ owner, repo, pr: pr.number, headSha })
+		verdict = await queue.enqueue({ owner, repo, pr: pr.number, headSha })
 	} catch (err) {
 		console.error(`[webhook] enqueue failed for ${owner}/${repo}#${pr.number}:`, err)
 		return { status: 500, body: { error: "enqueue failed" } }
+	}
+
+	// The history row, AFTER the queue accepted the job and only when it created
+	// work. Awaited (so it lands before the review can start and flip it to
+	// `running`) but never fatal: the job is already queued at this point, and a
+	// 500 here would make GitHub redeliver a delivery that was in fact handled.
+	if (verdict === "queued" && onQueued) {
+		try {
+			await onQueued({ owner, repo, pr: pr.number })
+		} catch (err) {
+			console.error(
+				`[webhook] failed to record queued review for ${owner}/${repo}#${pr.number}:`,
+				err,
+			)
+		}
 	}
 	return { status: 200, body: { ok: true, triggered: true } }
 }

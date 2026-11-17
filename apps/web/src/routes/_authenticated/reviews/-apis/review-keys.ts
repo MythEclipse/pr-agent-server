@@ -19,6 +19,8 @@ export const reviewKeys = {
 	list: (params?: TListReviewParams) => [...reviewKeys.lists(), params ?? {}] as const,
 	details: () => [...reviewKeys.all, "detail"] as const,
 	detail: (id: number) => [...reviewKeys.details(), id] as const,
+	/** Per-status counters — see `counts` on the review router. */
+	counts: () => [...reviewKeys.all, "counts"] as const,
 }
 
 export const queueKeys = {

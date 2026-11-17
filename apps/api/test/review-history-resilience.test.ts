@@ -28,6 +28,11 @@ const brokenReviews = (): ReviewRepository =>
 	({
 		insertReview: () => Promise.reject(FAILING_STORE),
 		updateReview: () => Promise.reject(FAILING_STORE),
+		// `start()` asks this first: no queued row to flip means it inserts a
+		// `running` one, which is the write that fails below.
+		markRunning: () => Promise.reject(FAILING_STORE),
+		markInterrupted: () => Promise.reject(FAILING_STORE),
+		countByStatus: () => Promise.resolve({ queued: 0, running: 0, success: 0, failed: 0 }),
 		listReviews: () => Promise.resolve({ rows: [], total: 0 }),
 		getReview: () => Promise.resolve(null),
 	}) as unknown as ReviewRepository
@@ -63,11 +68,15 @@ describe("history write failures", () => {
 		// every history write while all the tests above still pass.
 		let inserted = 0
 		const repo = {
+			// No queued row to flip, so `start()` inserts the `running` row itself.
+			markRunning: () => Promise.resolve(null),
 			insertReview: () => {
 				inserted += 1
 				return Promise.resolve({ id: 42 })
 			},
 			updateReview: () => Promise.resolve(),
+			markInterrupted: () => Promise.resolve(0),
+			countByStatus: () => Promise.resolve({ queued: 0, running: 0, success: 0, failed: 0 }),
 			listReviews: () => Promise.resolve({ rows: [], total: 0 }),
 			getReview: () => Promise.resolve(null),
 		} as unknown as ReviewRepository
@@ -75,5 +84,57 @@ describe("history write failures", () => {
 		const history = makeRecordReview({ reviews: repo })
 		await expect(history.start({ owner: "o", repo: "r", pr: 1 })).resolves.toBe(42)
 		expect(inserted).toBe(1)
+	})
+
+	test("start() flips the queued row instead of inserting a second one", async () => {
+		// The whole point of the three-state model: a delivery writes `queued`,
+		// the run flips THAT row to `running`. Two rows for one review is what the
+		// dashboard would read as two reviews, one of which never finishes.
+		let inserted = 0
+		let flippedFor: unknown = null
+		const repo = {
+			markRunning: (owner: string, repo2: string, pr: number, at: Date) => {
+				flippedFor = { owner, repo: repo2, pr, at }
+				return Promise.resolve({ id: 7 })
+			},
+			insertReview: () => {
+				inserted += 1
+				return Promise.resolve({ id: 99 })
+			},
+			updateReview: () => Promise.resolve(),
+			markInterrupted: () => Promise.resolve(0),
+			countByStatus: () => Promise.resolve({ queued: 0, running: 0, success: 0, failed: 0 }),
+			listReviews: () => Promise.resolve({ rows: [], total: 0 }),
+			getReview: () => Promise.resolve(null),
+		} as unknown as ReviewRepository
+
+		const at = new Date("2026-11-17T10:00:00.000Z")
+		const history = makeRecordReview({ reviews: repo, now: () => at })
+
+		await expect(history.start({ owner: "o", repo: "r", pr: 3 })).resolves.toBe(7)
+		expect(inserted).toBe(0)
+		expect(flippedFor).toEqual({ owner: "o", repo: "r", pr: 3, at })
+	})
+
+	test("enqueue() writes a queued row with no start time", async () => {
+		// `startedAt` must stay null: the review has not started, and the duration
+		// on the detail page measures the run, not the wait in the queue.
+		let written: Record<string, unknown> | null = null
+		const repo = {
+			insertReview: (row: Record<string, unknown>) => {
+				written = row
+				return Promise.resolve({ id: 5 })
+			},
+			markRunning: () => Promise.resolve(null),
+			updateReview: () => Promise.resolve(),
+			markInterrupted: () => Promise.resolve(0),
+			countByStatus: () => Promise.resolve({ queued: 1, running: 0, success: 0, failed: 0 }),
+			listReviews: () => Promise.resolve({ rows: [], total: 0 }),
+			getReview: () => Promise.resolve(null),
+		} as unknown as ReviewRepository
+
+		const history = makeRecordReview({ reviews: repo })
+		await expect(history.enqueue({ owner: "o", repo: "r", pr: 2 })).resolves.toBe(5)
+		expect(written).toMatchObject({ status: "queued", startedAt: null, pr: 2 })
 	})
 })

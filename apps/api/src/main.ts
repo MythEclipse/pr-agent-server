@@ -132,8 +132,14 @@ export async function startApp(options: StartOptions = {}) {
 	// Review HISTORY is written here, around the run. `reviews` is what the
 	// dashboard reads and nothing used to write to it — measured on the live
 	// database: 88 completed queue jobs, 0 review rows, so the UI was empty
-	// forever. The `queued` row goes in first so a run that is in flight (or that
-	// takes the process down) is visible, then it moves to success/failed.
+	// forever.
+	//
+	// The row now follows the job through three states instead of two: `queued`
+	// when the webhook creates work, `running` when the queue hands it to
+	// `runJob`, then success/failed. Before this, `start()` inserted `queued` and
+	// NOTHING wrote `running` — so the dashboard's `running` filter could never
+	// match a row while `queued` listed reviews that were executing, and (9 rows
+	// on the live database) reviews whose process had died days earlier.
 	const history = makeRecordReview({ reviews })
 
 	const runJob = async (job: { owner: string; repo: string; pr: number }): Promise<void> => {
@@ -203,7 +209,29 @@ export async function startApp(options: StartOptions = {}) {
 			? makeDbReviewQueue({ store: queueStore, concurrency: 2, run: runJob })
 			: new ReviewQueue({ concurrency: 2, run: runJob })
 
-	startLegacyRoutes(app, { queue })
+	startLegacyRoutes(app, { queue, onQueued: history.enqueue })
+
+	// HEAL THE HISTORY ROWS A DEAD PROCESS LEFT OPEN, before the queue can claim
+	// anything. `markInterrupted` fails every row with no `finished_at` that
+	// started before now — and "now" is safe as a bound precisely because this
+	// process has not run a review yet: the only thing that can own an open row
+	// is a process that is gone.
+	//
+	// Without this, a crash left a row `queued`/`running` forever. Measured on
+	// the live database before this: 9 such rows, the oldest five days old, all
+	// with `finished_at IS NULL` while the queue itself had nothing pending and
+	// nothing running — and they were the entire content of the dashboard's
+	// `queued` filter.
+	try {
+		const healed = await reviews.markInterrupted(
+			new Date(),
+			"interrupted: the process exited while this review was running",
+		)
+		if (healed > 0) console.log(`[history] marked ${healed} interrupted review(s) as failed`)
+	} catch (err) {
+		console.error("[history] failed to mark interrupted reviews:", err)
+	}
+
 	if (env.QUEUE_BACKEND === "db") await (queue as { start(): Promise<void> }).start()
 
 	// The admin stats endpoint must describe the queue that is RUNNING. The
