@@ -336,6 +336,25 @@ export function codeqlLanguagesFor(rootNames: readonly string[]): string[] {
 	return langs
 }
 
+/**
+ * The CodeQL workflow body for a set of languages.
+ *
+ * A FUNCTION, and `replaceAll`, because the first version used a bare
+ * `String.replace` against a template whose comment ALSO mentioned the placeholder
+ * token: it substituted the comment and left `language: [__LANGUAGES__]` in the
+ * matrix. Measured on the fleet — 20 repos got a workflow that cannot parse, and
+ * the sync reported `✅ created` for every one of them. A substitution that silently
+ * does nothing is the exact failure mode this module exists to prevent, so the
+ * result is asserted rather than assumed.
+ */
+export function codeqlWorkflowBody(template: string, languages: readonly string[]): string {
+	const body = template.replaceAll("__LANGUAGES__", languages.map((l) => `'${l}'`).join(", "))
+	if (body.includes("__LANGUAGES__")) {
+		throw new Error("codeql template still contains the language placeholder after substitution")
+	}
+	return body
+}
+
 /** The Dependabot config a repo gets: GMW has its own, everything else shares. */
 const dependabotFileFor = (repo: string) =>
 	repo === GMW_REPO ? GMW_DEPENDABOT_FILE : DEPENDABOT_FILE
@@ -785,10 +804,7 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 			if (root.status === 200) {
 				const languages = codeqlLanguagesFor(rootNames)
 				if (languages.length > 0) {
-					const body = templateBody(CODEQL_FILE).replace(
-						"__LANGUAGES__",
-						languages.map((l) => `'${l}'`).join(", "),
-					)
+					const body = codeqlWorkflowBody(templateBody(CODEQL_FILE), languages)
 					record(await syncFile(api, repo, `${WORKFLOWS_DIR}/${CODEQL_FILE}`, body, token, dry))
 				}
 			}

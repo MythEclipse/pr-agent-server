@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { looksFlaky, runIdFromDetailsUrl, runTriage } from "../src/ops/ciTriage.ts"
 import { formatBytes, guardDisk, reapWorkdirs } from "../src/ops/diskGuard.ts"
 import { packageFromTitle, runHygiene, supersededPrs } from "../src/ops/hygiene.ts"
 import { enforceRepoSettings, readSettings } from "../src/ops/repoSettings.ts"
-import { codeqlLanguagesFor } from "../src/ops/syncHooks.ts"
+import { codeqlLanguagesFor, codeqlWorkflowBody } from "../src/ops/syncHooks.ts"
 
 /** A GitHub client that answers from a script and records every call. */
 function fakeApi(routes: Record<string, { status: number; data?: any }>) {
@@ -437,6 +439,29 @@ describe("ciTriage", () => {
 			log: () => {},
 		})
 		expect(second.commented).toBe(0)
+	})
+})
+
+describe("codeqlWorkflowBody", () => {
+	it("substitutes the language matrix and never leaves the placeholder", () => {
+		// THE BUG THIS GUARDS: the template's own comment mentioned the placeholder
+		// token, so a bare `String.replace` substituted the COMMENT and left
+		// `language: [__LANGUAGES__]` in the matrix — 20 repos got an unparseable
+		// workflow while the sync reported success for each one.
+		const template = readFileSync(
+			join(import.meta.dirname, "..", "src", "ops", "templates", "codeql.yml"),
+			"utf8",
+		)
+		const body = codeqlWorkflowBody(template, ["javascript-typescript", "python"])
+		expect(body).toContain("language: ['javascript-typescript', 'python']")
+		expect(body).not.toContain("__LANGUAGES__")
+	})
+
+	it("never leaves the token behind, even with nothing to substitute", () => {
+		// The invariant is "no placeholder in the output", not "throw on empty":
+		// `replaceAll` handles both occurrences, and an empty list produces an empty
+		// matrix rather than a body that cannot parse.
+		expect(codeqlWorkflowBody("language: [__LANGUAGES__]", [])).toBe("language: []")
 	})
 })
 
