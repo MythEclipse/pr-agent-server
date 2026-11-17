@@ -483,7 +483,7 @@ describe("codeqlWorkflowBody", () => {
 			"utf8",
 		)
 		const body = codeqlWorkflowBody(template, ["javascript-typescript", "python"])
-		expect(body).toContain("language: ['javascript-typescript', 'python']")
+		expect(body).toContain('language: ["javascript-typescript", "python"]')
 		expect(body).not.toContain("__LANGUAGES__")
 	})
 

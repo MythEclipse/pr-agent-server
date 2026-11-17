@@ -348,7 +348,12 @@ export function codeqlLanguagesFor(rootNames: readonly string[]): string[] {
  * result is asserted rather than assumed.
  */
 export function codeqlWorkflowBody(template: string, languages: readonly string[]): string {
-	const body = template.replaceAll("__LANGUAGES__", languages.map((l) => `'${l}'`).join(", "))
+	// DOUBLE QUOTES, and that is not cosmetic. This repo is one of the repos the
+	// sync writes to, and its CI runs biome over every YAML file — a single-quoted
+	// matrix made `verify` fail on the generated workflow itself. Prettier and
+	// biome both emit double quotes for YAML, so this is also the shape a
+	// formatter-stable repo expects.
+	const body = template.replaceAll("__LANGUAGES__", languages.map((l) => `"${l}"`).join(", "))
 	if (body.includes("__LANGUAGES__")) {
 		throw new Error("codeql template still contains the language placeholder after substitution")
 	}
