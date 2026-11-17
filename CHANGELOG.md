@@ -1,3 +1,10 @@
+## [1.13.2](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.1...v1.13.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **sync:** the CodeQL substitution was replacing the comment, not the matrix ([3257fd4](https://github.com/MythEclipse/pr-agent-server/commit/3257fd449c54a76bf91b78a8036be091b7b973c4))
+
 ## [1.13.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.0...v1.13.1) (2026-11-17)
 
 
