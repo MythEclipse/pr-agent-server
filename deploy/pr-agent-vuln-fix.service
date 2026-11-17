@@ -44,6 +44,29 @@ Environment=PR_AGENT_APP_DIR=/var/lib/pr-agent-server
 Environment=PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem
 Environment=PR_AGENT_WEBHOOK_URL=https://pr-agent.asepharyana.my.id/api/v1/github_webhooks
 
+# THE NON-NODE TOOLCHAINS, because the fixer shells out to the ecosystem's own
+# package manager and two of them were not reachable from this user:
+#
+#   composer  was not installed at all. `spawnSync composer EACCES` was the
+#             symptom on AETHRA-Organizer-Website and projectpweb2 (phpunit), and
+#             both plans failed on every run. php-cli + composer are now apt
+#             packages; nothing else about the box changed.
+#   cargo     WAS installed, under /home/code/.cargo — and /home/code is mode 750,
+#             so pr-agent could not even stat it (EACCES again, on zeavis-edu's
+#             glib). The toolchain is hardlink-copied to /opt/rust so no second
+#             2.2G is spent on a disk that is 90% full, and made world-readable.
+#
+# CARGO_HOME points at a WRITABLE directory of its own rather than the toolchain
+# copy: cargo writes its registry cache there, and /opt/rust is deliberately
+# read-only (it shares inodes with the operator's own toolchain).
+#
+# If the operator upgrades Rust with `rustup update`, /opt/rust keeps the old
+# toolchain — it is a copy, not a link into /home/code. Re-run the hardlink copy
+# (or bump the pinned version here) when that matters.
+Environment=PATH=/opt/rust/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=RUSTUP_HOME=/opt/rust/rustup
+Environment=CARGO_HOME=/var/lib/pr-agent-cargo
+
 # 90 MINUTES, because this is not an API scan. Each plan clones the repo and runs
 # the ecosystem's own package manager (pnpm/npm/composer/cargo), which is minutes
 # per repo. The fleet-wide alert scan alone measured 2m24s before a single bump
