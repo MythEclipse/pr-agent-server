@@ -242,9 +242,13 @@ export function nodeDiskDeps(
 		// turning a housekeeping run into a hang.
 		scan: (path) => {
 			try {
+				// stderr is DISCARDED: the scan runs as the service user, which cannot
+				// read /home/* or /etc/ssl/private, and `du` prints one line per denied
+				// directory — measured, that buried the report it was meant to produce.
 				const out = execFileSync("du", ["-xh", "--max-depth=1", path], {
 					timeout: 120_000,
 					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
 				})
 				return out
 					.split("\n")
