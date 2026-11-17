@@ -65,7 +65,7 @@ describe("composition root wiring", () => {
 	})
 
 	// Only ONE liveness surface. `GET /health` reports the real configured model
-	// and is what the systemd watchdog and deploy.yml poll; the oRPC
+	// and is what the systemd watchdog and ci.yml's deploy job poll; the oRPC
 	// `health.check` that used to sit beside it answered a hardcoded
 	// `model: "configured"` that could never disagree with anything.
 	test("liveness has a single surface, and it reports the real model", () => {

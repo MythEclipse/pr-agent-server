@@ -1,21 +1,57 @@
 name: CI
 
-# The old workflow only ran on push to main, which meant a PR was never
-# validated before it landed. This one gates every PR.
+# ONE WORKFLOW, TWO JOBS, AND THE GATES RUN EXACTLY ONCE.
+#
+# It used to be two files: ci.yml ran the gates, and deploy.yml hung off
+# `workflow_run: workflows: [CI]` and ran install + lint + typecheck + the whole
+# test suite + build + drizzle drift a SECOND time before it could ship. That is
+# ~4.5 minutes for a push, and the second run could only ever agree with the
+# first: `workflow_run` hands the downstream workflow a CONCLUSION, not
+# artifacts, so the only way to be sure the tree was still good was to re-check
+# it from scratch. Every gate ran twice, for one answer.
+#
+# Here `deploy` needs `verify` directly. Same run, same commit, and the dist
+# directories the gates just built are handed over as an artifact — so what
+# ships is byte-for-byte what the tests ran against, and the gate is a job
+# dependency rather than a second execution of the same checks.
+#
+# What still runs on every PR is unchanged: biome, typecheck, tests, build and
+# the Drizzle drift check. What still ships is unchanged: push to main only.
 
 on:
   pull_request:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      # A dispatch runs the gates on whatever ref it is aimed at. Shipping is a
+      # separate decision, so it is asked for explicitly instead of being a side
+      # effect of pressing "Run workflow".
+      deploy:
+        description: "Ship this commit to production after the gates pass"
+        type: boolean
+        default: false
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+# NO WORKFLOW-LEVEL CONCURRENCY, ON PURPOSE.
+#
+# It used to be `group: ci-${{ github.ref }}` with `cancel-in-progress: true`,
+# which is right for the gates (a superseded push has nothing left to prove) and
+# WRONG once a deploy lives in the same run: a second push would cancel a deploy
+# mid-SSH and leave the box half-updated. So the two jobs carry their own:
+# `verify` cancels superseded runs, `deploy` is serialised and never cancelled.
 
 jobs:
   verify:
+    # The job NAME is load-bearing beyond this file: the worker's CI gate accepts
+    # a check named `verify` for this repo (apps/worker/src/pr/ci.ts), and the
+    # check-run name comes from this key. Renaming it would make that extra
+    # accepted name stop matching.
+    name: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-verify-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       # fetch-depth: 0 — moon is a VCS-aware task runner and needs real history.
       #
@@ -27,7 +63,7 @@ jobs:
       #
       # Push runs were unaffected because `main` IS the checked-out branch
       # there, which is why every green run so far was a push and the PR gate
-      # stayed red. deploy.yml already sets this for the same reason.
+      # stayed red.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -101,3 +137,484 @@ jobs:
             git diff --stat -- drizzle/
             exit 1
           fi
+
+      # Gated HERE rather than in the deploy job because this is the step that
+      # builds the bundle: a missing template is a broken build, not a broken
+      # deploy, and catching it before the artifact exists means a bad bundle is
+      # never uploaded in the first place.
+      #
+      # The sync-hooks run reads its Dependabot/workflow templates from disk at
+      # runtime, and the bundle resolves them relative to its own emitted file
+      # inside `dist/` — i.e. `dist/templates`. A build that ships only
+      # `dist/ops/templates` produces a worker that starts fine and then reports
+      # ENOENT for the template on EVERY fork, syncing nothing, with the timer
+      # still looking green.
+      - name: Verify the worker bundle ships its templates
+        run: |
+          for t in dependabot.yml dependabot-gmw.yml dependabot-auto-merge.yml; do
+            if [ ! -f "apps/worker/dist/templates/$t" ]; then
+              echo "::error::apps/worker/dist/templates/$t is missing — the bundle resolves templates from dist/templates, and sync-hooks would sync nothing"
+              exit 1
+            fi
+          done
+
+      # THE ARTIFACT IS THE HANDOFF. Deploy downloads these exact bytes instead
+      # of rebuilding, which is the whole point of folding the two workflows
+      # together: one build, tested once, shipped as tested.
+      #
+      # Only on main: a PR run builds to prove the build works, and nothing
+      # downstream consumes it, so uploading would be pure cost.
+      #
+      # tar rather than three `path:` entries: upload-artifact derives the
+      # archive root from the paths' common ancestor, and a tarball of the three
+      # dist directories extracts back to exactly these paths with no ambiguity
+      # about where the files land.
+      - name: Package the build for deploy
+        if: github.ref == 'refs/heads/main'
+        run: tar -czf /tmp/build-dist.tar.gz apps/api/dist apps/web/dist apps/worker/dist
+
+      - uses: actions/upload-artifact@v7
+        if: github.ref == 'refs/heads/main'
+        with:
+          name: build-dist
+          path: /tmp/build-dist.tar.gz
+          retention-days: 3
+          # A silent empty upload would hand the deploy job nothing and the
+          # failure would surface as a confusing `tar: not found` later.
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to production
+    needs: verify
+    # ONLY A GREEN RUN ON main SHIPS.
+    #
+    # `github.ref` is NOT redundant with the event name: a manual dispatch RUNS
+    # THIS FILE FROM THE DISPATCHED REF and DOES receive the repository secrets,
+    # so `event_name == 'workflow_dispatch'` alone would let a dispatch aimed at
+    # a branch deploy that branch — `github.sha` resolves to the dispatched ref,
+    # not to main. Verified on mcpedia on 2026-10-17, where exactly that flipped
+    # production to a dependabot branch.
+    #
+    # `inputs.deploy` is the explicit opt-in for a manual run (see `on:` above):
+    # pressing "Run workflow" to check a build must not touch the box.
+    if: >-
+      needs.verify.result == 'success' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Serialised repo-wide and NEVER cancelled: a deploy interrupted between
+    # "rm -rf dist" and "systemctl restart" is a box running half of two builds.
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit the gates ran on. On a push this is the pushed head; on a
+          # dispatch it is the dispatched ref — which the `if:` above has already
+          # pinned to main.
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+          cache: pnpm
+
+      # Install is not a gate here, it is what `pnpm deploy` needs to exist: it
+      # walks the workspace graph and writes a self-contained node_modules.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-dist
+          path: /tmp
+
+      # The dists land back on exactly the paths the verify job built them at,
+      # so `pnpm deploy` and the worker packaging below read the tested bytes.
+      - name: Unpack the tested build
+        run: |
+          tar -xzf /tmp/build-dist.tar.gz
+          for d in apps/api/dist apps/web/dist apps/worker/dist; do
+            [ -d "$d" ] || { echo "::error::$d is missing from the build artifact"; exit 1; }
+          done
+
+      # `pnpm deploy` writes a self-contained node_modules, so the box needs no
+      # pnpm and the installed tree is exactly what CI resolved.
+      #
+      # Two things here are not optional:
+      #   --filter  pnpm deploy selects nothing without it (`-C apps/api` changes
+      #             directory but picks no project, and pnpm exits with
+      #             ERR_PNPM_NOTHING_TO_DEPLOY).
+      #   --legacy  pnpm 10 refuses a non-injected workspace; without this it
+      #             exits with ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE.
+      - name: Package the API
+        run: pnpm --filter=@pr-agent/api deploy --prod --legacy /tmp/pkg-api
+
+      # The unit travels with the packages. It was committed to the repo in 8fe99de
+      # but never shipped, which is why the box was still running
+      # pr-agent-bun.service while the deploy restarted a name systemd had never
+      # heard of.
+      - name: Add the API runtime files
+        run: |
+          cp -r apps/api/drizzle /tmp/pkg-api/drizzle
+          cp -r apps/web/dist /tmp/pkg-api/web-dist
+          cp deploy/pr-agent-server.service /tmp/pkg-pr-agent-server.service
+
+      # The WORKER half's units travel the same way, and for the same reason the
+      # server unit does: a unit that only exists in git is a unit the box has
+      # never heard of. Before this step the deploy restarted
+      # `pr-agent-sync-hooks.timer` while nothing installed its `.service`, so
+      # every edit to `deploy/pr-agent-sync-hooks.service` — including the
+      # PR_AGENT_SYNC_HOOKS gate variable without which the run is refused —
+      # stayed in the repo and never reached the box. The timer fired nightly
+      # into a unit that refused to do anything.
+      - name: Stage the worker units
+        run: |
+          mkdir -p /tmp/pkg-units
+          cp deploy/pr-agent-worker.service       /tmp/pkg-units/
+          cp deploy/pr-agent-worker.timer         /tmp/pkg-units/
+          cp deploy/pr-agent-sync-hooks.service   /tmp/pkg-units/
+          cp deploy/pr-agent-sync-hooks.timer     /tmp/pkg-units/
+          ls -l /tmp/pkg-units/
+
+      - name: Package the worker
+        run: |
+          mkdir -p /tmp/pkg-worker
+          cp -r apps/worker/dist /tmp/pkg-worker/dist
+          cp apps/worker/package.json /tmp/pkg-worker/package.json
+          cp apps/worker/run-worker.sh /tmp/pkg-worker/run-worker.sh
+          chmod +x /tmp/pkg-worker/run-worker.sh
+
+      - name: Archive
+        # tar, not `cp -r`. The deployed node_modules is 476 symlinks pointing
+        # into node_modules/.pnpm; a plain copy dereferences them and turns a
+        # 202M tree into 838M on the wire while destroying the store layout.
+        run: |
+          tar -czf /tmp/pkg-api.tar.gz -C /tmp/pkg-api .
+          tar -czf /tmp/pkg-worker.tar.gz -C /tmp/pkg-worker .
+
+      - name: Setup SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
+
+      # `accept-new` on every call below, not just the ssh heredoc: a fresh
+      # runner has an empty known_hosts, so the first connection to the box is
+      # unverifiable and scp dies with "Host key verification failed". Only the
+      # heredoc ssh carried the flag, so the two scps ahead of it failed first.
+      #
+      # `accept-new`, not `no`: the first connection is recorded, so a host key
+      # that later CHANGES still fails loudly instead of being silently accepted.
+      # Everything in the heredoc below runs under sudo. Two independent
+      # reasons, both observed on the box:
+      #   1. /opt/pr-agent-server is root:root, so the unprivileged deploy user
+      #      cannot create .prev in it — that was the "mkdir: Permission denied"
+      #      that stopped the deploy. /opt/pr-agent-worker is pr-agent-owned and
+      #      is NOT sudo'd: the worker half must keep working for the plain user.
+      #   2. systemctl restart and daemon-reload need root regardless.
+      #
+      # `sudo -n` throughout: a password prompt in a non-tty heredoc would hang
+      # until the step timed out rather than failing fast.
+      # A full box turns the deploy into a single opaque line:
+      #
+      #   scp: write remote "/tmp/pkg-api.tar.gz": Failure
+      #
+      # That is ENOSPC, and it says nothing about which filesystem ran out or
+      # why. /tmp is a tmpfs here, so it is bounded by RAM and is filled by the
+      # worker's own PR clones (/tmp/pr-queue-work); / is what the extracted
+      # package lands on. Check BOTH before transferring, and name the shortfall.
+      - name: Check disk space on the box
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          # 200MB of slack on top of the ~70MB api tarball plus the worker one.
+          NEED_MB=300
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" "NEED_MB=$NEED_MB bash -s" <<'REMOTE'
+          set -euo pipefail
+          rc=0
+          for mount in /tmp /; do
+            avail_mb=$(df -Pm "$mount" | awk 'NR==2 {print $4}')
+            if [ "$avail_mb" -lt "$NEED_MB" ]; then
+              echo "::error::$mount has ${avail_mb}MB free, need ${NEED_MB}MB. The deploy would fail at scp with 'write remote ...: Failure' (ENOSPC). Free space first: /tmp is a tmpfs held by the worker's own clones in /tmp/pr-queue-work."
+              rc=1
+            else
+              echo "$mount: ${avail_mb}MB free (ok)"
+            fi
+          done
+          df -h /tmp / || true
+          exit $rc
+          REMOTE
+
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-api.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-api.tar.gz"
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-worker.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-worker.tar.gz"
+          # The unit is a plain file, not part of either tarball, so it needs its
+          # own scp. Without this the `if [ -f … ]` install below never matched
+          # and the restart was skipped with a warning that read like a
+          # non-event rather than a missing file.
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-pr-agent-server.service "$VPS_USER@$VPS_HOST:/tmp/pkg-pr-agent-server.service"
+          # The four worker units, shipped as a directory so the remote side can
+          # install whatever is present without naming each file twice.
+          tar -czf /tmp/pkg-units.tar.gz -C /tmp/pkg-units .
+          scp -o StrictHostKeyChecking=accept-new /tmp/pkg-units.tar.gz "$VPS_USER@$VPS_HOST:/tmp/pkg-units.tar.gz"
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" <<'REMOTE'
+          set -euo pipefail
+
+          # --- node, for both halves ----------------------------------------
+          # The Node migration commit (8fe99de) assumed node already lived at
+          # /opt/node; nothing ever installed it and the box had none, so both
+          # `/opt/node/bin/node dist/migrate.js` and the unit's ExecStart would
+          # fail with "No such file or directory".
+          #
+          # Under /opt, not a user home: the pr-agent user cannot read /home/code
+          # (mode 750), which apps/worker/run-worker.sh also calls out.
+          NODE_VERSION=24.21.0
+          if [ ! -x /opt/node/bin/node ]; then
+            arch=$(uname -m)
+            case "$arch" in
+              x86_64) node_arch=x64 ;;
+              aarch64) node_arch=arm64 ;;
+              *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+            esac
+            echo "installing node $NODE_VERSION ($node_arch) to /opt/node"
+            curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-$node_arch.tar.xz" \
+              | sudo -n tar -xJ -C /opt
+            sudo -n ln -sfn "/opt/node-v$NODE_VERSION-linux-$node_arch" /opt/node
+          fi
+          /opt/node/bin/node --version
+
+          # --- the webhook server -------------------------------------------
+          cd /opt/pr-agent-server
+          sudo -n rm -rf .prev
+          sudo -n mkdir -p .prev
+          for item in dist node_modules drizzle web-dist package.json; do
+            [ -e "$item" ] && sudo -n cp -a "$item" .prev/ || true
+          done
+          sudo -n rm -rf dist node_modules drizzle web-dist package.json
+          mkdir -p /tmp/pkg-api.new
+          tar -xzf /tmp/pkg-api.tar.gz -C /tmp/pkg-api.new
+          for item in dist node_modules drizzle web-dist package.json; do
+            sudo -n mv "/tmp/pkg-api.new/$item" ./"$item"
+          done
+          sudo -n chmod -R a+rX /opt/pr-agent-server
+          rm -rf /tmp/pkg-api.new /tmp/pkg-api.tar.gz
+
+          # Migrations run as their own step, decoupled from application boot,
+          # so a schema rollback and a code rollback stay independent.
+          #
+          # This is the step that first needs DATABASE_URL, and it is required
+          # with no default (apps/api/src/infrastructure/config/env.ts). It is
+          # NOT in the Bitwarden `pr-agent` project yet, so as of this writing
+          # this line exits non-zero — checked on the box, the vault holds
+          # neither DATABASE_URL nor BETTER_AUTH_SECRET. The explicit check
+          # below turns that into a named error instead of a zod stack trace.
+          #
+          # Migrate BEFORE the restart: a schema the new code needs but the old
+          # code lacks would take the server down on boot.
+          if [ -z "${DATABASE_URL:-}" ] && ! sudo -n -u pr-agent /usr/local/bin/bws-exec pr-agent printenv DATABASE_URL >/dev/null 2>&1; then
+            echo "::error::DATABASE_URL is not available to bws-exec pr-agent. migrate.js requires it and cannot run without it. Add it to the Bitwarden 'pr-agent' project before deploying the Node server."
+            exit 1
+          fi
+          # `bws-exec`, not a bare node. migrate.js reads DATABASE_URL from the
+          # environment, and the only thing that exports it is the bws-exec
+          # wrapper — run as a bare `/opt/node/bin/node` it gets an empty env and
+          # dies with "Invalid environment: - DATABASE_URL: expected string,
+          # received undefined", even though the secret is in the vault.
+          #
+          # As pr-agent, matching User= in the unit, so the migration applies as
+          # the role that will own the tables.
+          sudo -n -u pr-agent /usr/local/bin/bws-exec pr_agent \
+            /opt/node/bin/node /opt/pr-agent-server/dist/migrate.js
+
+          # --- the unit ------------------------------------------------------
+          # Nothing in git history ever installed the unit (8fe99de shipped
+          # restart calls for a unit that was never placed on the box), so
+          # `systemctl restart` was a no-op against a missing unit and the
+          # running server was pr-agent-bun.service all along.
+          #
+          # Installed only when the file exists in the repo, and always
+          # daemon-reload'd, so an edited unit actually takes effect.
+          if [ -f /tmp/pkg-pr-agent-server.service ]; then
+            sudo -n install -m 644 /tmp/pkg-pr-agent-server.service \
+              /etc/systemd/system/pr-agent-server.service
+            sudo -n systemctl daemon-reload
+          fi
+
+          # Restart only if the unit is actually present. Restarting a name
+          # systemd does not know fails the step, and — more importantly — this
+          # must not pretend to have replaced the live server when it has not.
+          #
+          # The legacy Bun server MUST be stopped and disabled first. It holds
+          # :4023, so starting Node alongside it gives EADDRINUSE and a
+          # Restart= crash-loop — and `systemctl is-active` still reads `active`
+          # for a unit that is looping, because systemd sees the start succeed
+          # and the process die seconds later. That is how this shipped a
+          # "successful" cutover that never happened (NRestarts hit 55 while Bun
+          # kept serving). Disable, not just stop, so it cannot come back on
+          # reboot and re-take the port.
+          if sudo -n systemctl cat pr-agent-bun.service >/dev/null 2>&1; then
+            sudo -n systemctl stop pr-agent-bun.service
+            sudo -n systemctl disable pr-agent-bun.service
+            echo "stopped and disabled the legacy pr-agent-bun.service"
+          fi
+
+          if sudo -n systemctl cat pr-agent-server.service >/dev/null 2>&1; then
+            sudo -n systemctl enable pr-agent-server.service
+            sudo -n systemctl restart pr-agent-server.service
+          else
+            echo "::warning::pr-agent-server.service is not installed on this box; the server half was NOT restarted. Whatever is serving :4023 is unchanged."
+          fi
+
+          # --- the PR worker -------------------------------------------------
+          # sudo, against the earlier comment on this block that said not to:
+          # /opt/pr-agent-worker is pr-agent-owned 0755 and the deploy user is
+          # `code`, so unprivileged `rm` of package.json and run-worker.sh fails
+          # with "Permission denied" and `set -e` kills the deploy. sudo is the
+          # fix; chown'ing to the deploy user would be worse, since the worker
+          # units run as pr-agent and would then lose write access.
+          cd /opt/pr-agent-worker
+          sudo -n rm -rf dist package.json run-worker.sh
+          mkdir -p /tmp/pkg-worker.new
+          tar -xzf /tmp/pkg-worker.tar.gz -C /tmp/pkg-worker.new
+          for item in dist package.json run-worker.sh; do
+            sudo -n mv "/tmp/pkg-worker.new/$item" ./"$item"
+          done
+          # Back to pr-agent, matching User= in the worker units.
+          sudo -n chown -R pr-agent:pr-agent /opt/pr-agent-worker
+          sudo -n chmod +x /opt/pr-agent-worker/run-worker.sh
+          rm -rf /tmp/pkg-worker.new /tmp/pkg-worker.tar.gz
+
+          # --- the worker units ---------------------------------------------
+          # Installed BEFORE the timer is restarted, and daemon-reload'd, so the
+          # restart below actually runs the unit this commit defines rather than
+          # whatever was hand-edited on the box months ago. `install` only when
+          # the file is present, matching the server unit's rule: a checkout that
+          # predates a unit must not blank the live one.
+          if [ -f /tmp/pkg-units.tar.gz ]; then
+            mkdir -p /tmp/pkg-units.new
+            tar -xzf /tmp/pkg-units.tar.gz -C /tmp/pkg-units.new
+            for u in pr-agent-worker.service pr-agent-worker.timer \
+                     pr-agent-sync-hooks.service pr-agent-sync-hooks.timer; do
+              if [ -f "/tmp/pkg-units.new/$u" ]; then
+                sudo -n install -m 644 "/tmp/pkg-units.new/$u" "/etc/systemd/system/$u"
+                echo "installed $u"
+              fi
+            done
+            sudo -n systemctl daemon-reload
+            sudo -n systemctl enable pr-agent-worker.timer pr-agent-sync-hooks.timer
+            rm -rf /tmp/pkg-units.new /tmp/pkg-units.tar.gz
+          else
+            echo "::warning::no /tmp/pkg-units.tar.gz; the worker units were NOT updated on this box"
+          fi
+          rm -f /tmp/pkg-pr-agent-server.service
+
+          # Restarting the TIMER is not a restart. `pr-agent-worker.service` is
+          # `Type=oneshot` driven by a timer, and a tick that is mid-run keeps
+          # the OLD code in memory for its entire lifetime — a tick can hold the
+          # worker for 30+ minutes of agent work. So `restart <timer>` returned
+          # success while every in-flight job kept running the previous build,
+          # and the next tick would not start until the current one finished.
+          # Observed exactly that after shipping the model change: the dist on
+          # disk said `claude-sonnet-5-5` while the running agent still spawned
+          # `--model claude-opus-5-5`, and the old process kept picking up new
+          # jobs.
+          #
+          # Stopping the SERVICE is safe: `running` queue rows are reset to
+          # `pending` on boot (at-least-once), so an interrupted job is retried
+          # by the next tick rather than lost. The timer is restarted after, so
+          # the next tick starts from a clean process on the new code.
+          if sudo -n systemctl cat pr-agent-worker.service >/dev/null 2>&1; then
+            sudo -n systemctl stop pr-agent-worker.timer
+            sudo -n systemctl stop pr-agent-worker.service || true
+          fi
+          sudo -n systemctl restart pr-agent-worker.timer
+          sudo -n systemctl restart pr-agent-sync-hooks.timer
+          REMOTE
+
+      # Same poll the old workflow used, on the same port: the health watchdog
+      # and the systemd unit both expect :4023/health.
+      - name: Wait for health
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          # :4023 stays the probe — the health watchdog depends on it — but it
+          # does NOT prove the Node deploy landed. On this box something else
+          # (pr-agent-bun.service) already answered that port, so a green poll
+          # only ever meant "something answers", not "the new code serves".
+          # `systemctl is-active pr-agent-server.service` is the check that
+          # actually distinguishes the two.
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" "curl -fsS -m 2 http://127.0.0.1:4023/health" 2>/dev/null; then
+              echo "healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          # Which process owns the port, so the log says which server is
+          # actually serving rather than leaving it ambiguous.
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'echo "--- pr-agent-server.service: $(systemctl is-active pr-agent-server.service 2>&1)"; echo "--- pr-agent-bun.service:    $(systemctl is-active pr-agent-bun.service 2>&1)"; echo "--- :4023 owner:"; sudo -n ss -ltnp 2>/dev/null | grep ":4023" || true' || true
+
+          # Wait for the PORT to be held by the Node server, not merely for
+          # systemd to say the unit started.
+          #
+          # `is-active` is not sufficient and was the reason a broken cutover
+          # looked fine: a unit in a Restart= crash-loop reads `active` because
+          # the start succeeded and the process died afterwards. The trustworthy
+          # signal is the port being held while the unit's MainPID stays put and
+          # /health answers.
+          #
+          # Matching on the SOCKET OWNER PID against the unit's MainPID, not on
+          # a process name: node's listener shows up as "MainThread" in
+          # ss -ltnp, so grepping for `pr-agent-server` there never matches and
+          # the wait would always time out. Comparing PIDs is what actually
+          # proves this unit is the thing serving.
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" '
+              main=$(sudo -n systemctl show -p MainPID --value pr-agent-server.service 2>/dev/null)
+              [ "$main" != "0" ] || exit 1
+              sudo -n ss -ltnp 2>/dev/null | grep -q ":4023.*pid=$main" || exit 1
+              curl -fsS -m 2 http://127.0.0.1:4023/health
+            ' 2>/dev/null; then
+              echo "node server (unit MainPID) owns :4023 after ${i}s"
+              ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'echo "node: $(sudo -n systemctl is-active pr-agent-server.service) restarts=$(sudo -n systemctl show -p NRestarts --value pr-agent-server.service)"; echo "bun:  $(sudo -n systemctl is-active pr-agent-bun.service 2>&1) (disabled=$(sudo -n systemctl is-enabled pr-agent-bun.service 2>&1))"; sudo -n ss -ltnp 2>/dev/null | grep ":4023"' || true
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::the Node server did not take :4023 within 30s — either it is crash-looping or another unit holds the port (see the owner above). The previously running server was left untouched."
+
+  cleanup:
+    needs: deploy
+    # Runs after an ATTEMPTED deploy, never on a PR. `needs.deploy.result` is
+    # `skipped` when the deploy job did not apply, which is exactly the PR case —
+    # without this the nix-gc would ssh to the box on every pull request.
+    if: always() && needs.deploy.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reap leftover Nix store entries
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          # Non-fatal: the runtime no longer depends on Nix.
+          ssh -o StrictHostKeyChecking=accept-new "$VPS_USER@$VPS_HOST" 'sudo /usr/local/bin/nix-gc-vps.sh' || true

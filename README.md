@@ -109,7 +109,7 @@ pr-agent-server/
 │   ├── deploy-worker.sh
 │   └── smoke_hermes_api_server.py
 ├── templates/manifest.json  # GitHub App manifest template
-├── .github/workflows/       # ci.yml (PR gate), deploy.yml
+├── .github/workflows/       # ci.yml (gates + deploy), release.yml
 ├── .editorconfig
 ├── .gitignore
 ├── CONTRIBUTING.md
@@ -169,14 +169,21 @@ pnpm -C apps/api exec tsx src/cli.ts --tool improve  --repo <owner>/<repo> --pr 
 Deploy is fully automated via GitHub Actions on push to `main`:
 
 ```text
-# .github/workflows/deploy.yml
-1. build-and-deploy → pnpm install → lint → typecheck → tests → build
-   → pnpm deploy --prod (self-contained node_modules) → tar → scp to VPS
+# .github/workflows/ci.yml
+1. verify → pnpm install → lint → typecheck → tests → build → drizzle drift
+   → upload the built dist/ (the deploy ships these exact bytes)
+2. deploy → needs: verify → pnpm install → download dist → pnpm deploy --prod
+   (self-contained node_modules) → tar → scp to VPS
    → swap /opt/pr-agent-server/{dist,node_modules,drizzle,web-dist}
    → node dist/migrate.js → restart pr-agent-server.service
    → health check on :4023
-2. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
+3. cleanup → Nix GC on VPS (`nix-gc-vps.sh`, non-fatal)
 ```
+
+The gates run ONCE. `deploy` is a job in the same workflow that `needs: verify`,
+not a second workflow chained by `workflow_run` — that chain re-ran install,
+lint, typecheck, the full test suite, the build and the drizzle drift check
+before it could ship anything, which is what made a push take ~4.5 minutes.
 
 The production server is compiled output run by Node
 (`/opt/node/bin/node /opt/pr-agent-server/dist/main.js`) as a systemd service
@@ -191,7 +198,9 @@ Secrets required in GitHub Actions:
 - `SSH_PRIVATE_KEY` — SSH private key for deploy user
 - `GITEA_TOKEN` — for `mirror-gitea.yml` (pushes a mirror to the Gitea backup)
 
-`ci.yml` needs no secrets — it builds and tests only.
+`ci.yml` needs no secrets to run the gates — it builds and tests only. The
+`deploy` job inside it is the only part that reads `VPS_*`/`SSH_PRIVATE_KEY`,
+and it only runs on push to `main` (or an explicit dispatch on `main`).
 
 ## Ops
 

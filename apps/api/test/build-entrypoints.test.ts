@@ -12,7 +12,7 @@
 // emitted) and neither can any runtime test of the seed logic. So the assertion
 // belongs here, against the build config itself.
 
-import { readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, test } from "vitest"
 
@@ -38,10 +38,16 @@ describe("api build entrypoints", () => {
 		// Cross-check the two files rather than trusting the list above: a future
 		// `node dist/<something>.js` in the deploy must correspond to a real
 		// entryPoint, or the deploy fails on the box instead of in CI.
-		const deploy = readFileSync(
-			join(repoRoot, "..", "..", ".github", "workflows", "deploy.yml"),
-			"utf8",
-		)
+		//
+		// EVERY workflow file, not one named file. The deploy used to live in
+		// `deploy.yml` and now lives in `ci.yml`'s `deploy` job; a test pinned to
+		// a single filename would have gone red on that move and taught the next
+		// person to delete the guard instead of following it. Reading the
+		// directory means a future rename cannot silently drop the check.
+		const workflowsDir = join(repoRoot, "..", "..", ".github", "workflows")
+		const files = readdirSync(workflowsDir).filter((f) => /\.ya?ml$/.test(f))
+		expect(files.length).toBeGreaterThan(0)
+		const deploy = files.map((f) => readFileSync(join(workflowsDir, f), "utf8")).join("\n")
 		const built = ["main", "migrate", "db/seed"]
 		// WHOLE-LINE COMMENTS ARE NOT INVOCATIONS. The check is about what the
 		// deploy RUNS, and a comment explaining the bundle layout names a path

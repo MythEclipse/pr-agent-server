@@ -165,8 +165,8 @@ scripts/deploy-worker.sh --no-tick    # deploy without ticking
 ```
 
 It needs `/opt/node/bin/node` and a built `apps/worker/dist/`, and it refuses to
-deploy if the suite fails. The workflow (`deploy.yml`) does the same thing for
-real; this script is the local path.
+deploy if the suite fails. The workflow (`ci.yml`'s `deploy` job) does the same
+thing for real; this script is the local path.
 
 Do not hand-roll an `rsync` here. The old recipe in this file pointed at
 `/home/code/pr-agent-server-wt/`, a git worktree that no longer exists, so it
@@ -174,7 +174,8 @@ would have failed for anyone who followed it.
 
 CI (`.github/workflows/ci.yml`) lints, typechecks and tests `apps/worker/` on
 every pull request, so a break is caught before it reaches the timer.
-`deploy.yml` is what ships, and only runs on push to main or a manual dispatch.
+Its `deploy` job is what ships, and only runs on push to main (or a dispatch on
+main that asks for it).
 
 ## Python history
 

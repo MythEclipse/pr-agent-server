@@ -34,7 +34,8 @@
 - **Model names**: Must be tested live against 9router before committing (strip the
   `openai/` provider prefix)
 - **CI is the gate**: `.github/workflows/ci.yml` runs biome, typecheck, tests, build
-  and a Drizzle drift check on every pull request. `deploy.yml` is what ships.
+  and a Drizzle drift check on every pull request. Its `deploy` job is what ships,
+  and it runs only after those gates pass on `main`.
 - **The CI runner is a clean slate**: verify with
   `env PATH=/usr/bin:/bin pnpm run typecheck --force` (or `--force` on any moon
   task). A cached moon task is not evidence the command works, and a moonup

@@ -12,8 +12,8 @@ import { adminProcedure, protectedProcedure } from "../orpc/middleware.ts"
 // probe reading it would conclude the API was healthy no matter what
 // PR_AGENT_MODEL_REVIEW said. It was a SECOND liveness answer next to the real
 // one at `GET /health`, which reports the actual `cfg.modelReview` and is what
-// the systemd watchdog and deploy.yml's "Wait for health" step poll. And nothing
-// consumed it: not the SPA, not any test, not any ops script.
+// the systemd watchdog and ci.yml's deploy job ("Wait for health") poll. And
+// nothing consumed it: not the SPA, not any test, not any ops script.
 //
 // Two health endpoints that can disagree is worse than one, so the duplicate is
 // gone rather than kept in sync. `GET /health` is the single liveness surface.
