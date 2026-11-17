@@ -19,7 +19,7 @@
 // with it, and "we could not read GitHub's annotations" is not a reason to skip a
 // review.
 
-import { listCheckRuns } from "./ci.ts"
+import { isSelfCheck, listCheckRuns } from "./ci.ts"
 import type { GhClient } from "./scan.ts"
 
 /** One failing job, reduced to what a prompt can use. */
@@ -108,7 +108,19 @@ export async function collectCiFailures(
 		const { status, runs } = await listCheckRuns(api, token, repo, sha)
 		if (status !== 200 && runs.length === 0) return []
 
+		// THE WORKER'S OWN MERGE JOB IS NOT CI EVIDENCE.
+		//
+		// `ci.ts` filters these names before judging a head, because the
+		// auto-merge workflow reports `failure` when it DECLINED to merge and
+		// `cancelled` when `concurrency.cancel-in-progress` superseded a run —
+		// neither of which says anything about the code. This reader had no such
+		// filter, so a PR whose only red check was the worker's own merge job got
+		// a prompt saying "CI IS FAILING … ### Auto-merge dependency PR —
+		// cancelled", and the agent was invited to "fix" the merge tooling. The
+		// two sides must agree on the name, which is why the predicate is shared
+		// rather than re-spelled here.
 		const failing = runs
+			.filter((r) => !isSelfCheck(r))
 			.filter((r) => r.status === "completed" && RED.has(strOf(r.conclusion)))
 			.slice(0, MAX_FAILING_JOBS)
 

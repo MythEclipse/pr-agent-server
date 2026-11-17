@@ -254,6 +254,28 @@ describe("ops/security", () => {
 			expect(res.alerts).toHaveLength(150)
 		})
 
+		test("the PAGE CAP ending the walk is NOT reported as a complete read", async () => {
+			// A full last page that still advertises `rel="next"` means there are
+			// more alerts than the cap allows. `ok: true` there would let the audit
+			// count a truncated fleet as whole and `--fix-vulns` treat the alerts it
+			// never read as absent — the same lie the single-page bug told.
+			let calls = 0
+			const endless = {
+				async request() {
+					calls += 1
+					return {
+						status: 200,
+						data: Array.from({ length: 100 }, (_, i) => ({ number: calls * 100 + i })),
+						link: '<https://api.github.com/repos/o/r/dependabot/alerts?after=zzz>; rel="next"',
+					}
+				},
+			}
+			const res = await fetchOpenDependabotAlertsResult(endless as any, "o/r", "t")
+			expect(res.ok).toBe(false)
+			// What was read is kept: it is real work, just not the whole answer.
+			expect(res.alerts.length).toBeGreaterThan(0)
+		})
+
 		test("a 400 is a FAILURE, never an empty fleet", async () => {
 			// The exact production symptom: 62 repos, 62 x HTTP 400, and the old
 			// audit printed "No open vulnerabilities found".

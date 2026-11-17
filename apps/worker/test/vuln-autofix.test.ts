@@ -253,6 +253,16 @@ describe("fixCommandFor", () => {
 		})
 	})
 
+	it("a uv repo gets a TARGETED re-resolve, not MANUAL", () => {
+		// `pr/managers.ts` already re-resolves a uv repo with `uv lock` for the
+		// lockfile pre-fix, so reporting uv MANUAL here was an inconsistency, not a
+		// policy — a uv repo's alerts could never become a PR. `--upgrade-package`
+		// is the targeted form: a bare `uv lock` re-resolves the whole graph.
+		expect(fixCommandFor(plan("uv.lock", "pip"))).toEqual({
+			argv: ["uv", "lock", "--upgrade-package", "lodash==4.17.21"],
+		})
+	})
+
 	it("an ecosystem with no single-command update is MANUAL, not attempted", () => {
 		const maven = fixCommandFor(plan("pom.xml", "maven"))
 		expect("manual" in maven).toBe(true)
@@ -320,6 +330,18 @@ describe("branch names, URLs and PR body", () => {
 		expect(h.execCalls[0]).not.toContain("upgrade")
 	})
 
+	it("an override PR body does NOT tell the reviewer to run the promoting command", async () => {
+		// The body used to print `fixCommandFor`'s plain form
+		// (`npm install … <pkg>@<version>`), which is exactly the PROMOTION the
+		// paragraph above it says was avoided. A reviewer re-running it would add
+		// the package to `dependencies` and reproduce a different diff.
+		const body = buildVulnPrBody({ ...plan, packageName: "brace-expansion" }, { overrides: true })
+		expect(body).toContain("Pinned with `overrides`")
+		const rerun = body.slice(body.indexOf("Re-run locally with:"))
+		expect(rerun).toContain("npm install --package-lock-only")
+		expect(rerun).not.toContain("brace-expansion@")
+	})
+
 	it("two manifests for ONE package get DIFFERENT branches", () => {
 		// THE BUG THIS PINS. A plan is one (manifest, package) pair, but the branch
 		// used to be `pkg@version` alone. The same package on `package-lock.json`
@@ -370,6 +392,10 @@ function harness(opts: {
 	files?: Record<string, string>
 	/** The `packageManager` field the default `package.json` reports. */
 	packageManager?: string
+	/** The remote head a `git/ref/heads/<branch>` read reports, when any. */
+	branchHead?: string
+	/** Answer the existing-PR lookup with a row that carries no numeric number. */
+	malformedExistingPr?: boolean
 }) {
 	const requests: Recorded[] = []
 	const gitCalls: string[][] = []
@@ -383,11 +409,17 @@ function harness(opts: {
 				return status === 200 ? { status, data: opts.alerts ?? [] } : { status, data: {} }
 			}
 			if (path.includes("/pulls?state=open&head=")) {
+				if (opts.malformedExistingPr) return { status: 200, data: [{ title: "no number" }] }
 				const n = opts.existingPrFor?.(path) ?? opts.existingPr
 				return { status: 200, data: n ? [{ number: n }] : [] }
 			}
 			if (method === "POST" && path.endsWith("/pulls")) {
 				return { status: opts.prStatus ?? 201, data: { number: 77 } }
+			}
+			if (path.includes("/git/ref/heads/")) {
+				return opts.branchHead
+					? { status: 200, data: { object: { sha: opts.branchHead } } }
+					: { status: 404, data: {} }
 			}
 			// GET /repos/{repo}
 			return { status: 200, data: { default_branch: opts.defaultBranch ?? "main" } }
@@ -482,6 +514,57 @@ describe("runVulnAutofix", () => {
 		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
 		expect(h.requests.some((r) => r.method === "POST")).toBe(false)
 		expect(h.lines.join("\n")).toContain("resolved nothing")
+	})
+
+	it("a branch left by a failed PR create is replaced under a lease, not wedged", async () => {
+		// A previous run can push the branch and then fail to open the PR. The next
+		// run re-clones the DEFAULT branch and pushes to a branch that now exists
+		// with a different commit — a non-fast-forward, rejected on every later run,
+		// so the plan is wedged forever with nothing in the report to say why.
+		// A force-with-lease on the branch this flow owns replaces it; the lease
+		// means a human's push on top is never discarded.
+		const prior = "e".repeat(40)
+		const h = harness({ alerts: [alert({ number: 1 })], branchHead: prior })
+		await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		const push = h.gitCalls.find((c) => c[0] === "push")
+		expect(push?.join(" ")).toContain(
+			`--force-with-lease=refs/heads/fix/vuln-lodash-4.17.21:${prior}`,
+		)
+	})
+
+	it("a ROOT manifest is not 'fixed' by a change to a NESTED one", async () => {
+		// `status.stdout.includes(manifestPath)` matched a nested path, so a plan for
+		// the root `package-lock.json` "found" its change in
+		// `apps/web/package-lock.json` and opened a PR claiming the root was fixed
+		// when it had not moved — the silent half-fix the grouping rule forbids.
+		const h = harness({
+			alerts: [alert({ number: 1 })],
+			// Only the nested lockfile moved.
+			diff: " M apps/web/package-lock.json\n",
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(summary.manual).toBe(1)
+		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
+	})
+
+	it("an unreadable existing-PR lookup does NOT report the fix as done", async () => {
+		// `openPrForBranch` used to fold "the answer could not be read" into `-1`,
+		// and the caller treated any non-zero as "already open". A malformed reply
+		// therefore printed `already open as PR #-1` and counted the plan as
+		// DONE — a fix never attempted, reported as one that was.
+		const h = harness({
+			alerts: [alert({ number: 1 })],
+			malformedExistingPr: true,
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(summary.failed).toBe(1)
+		expect(h.lines.join("\n")).not.toContain("PR #-1")
+		expect(h.gitCalls.some((c) => c[0] === "clone")).toBe(false)
 	})
 
 	it("a plan whose PR already exists does NOT consume the per-repo cap", async () => {

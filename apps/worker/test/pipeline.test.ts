@@ -636,6 +636,26 @@ describe("attempt tally — failures are recorded, never written off", () => {
 	})
 })
 
+describe("a DRAFT PR is left alone", () => {
+	test("a draft is not reviewed, fixed, approved or merged", async () => {
+		// Nothing filtered `draft`, so a WIP PR went through the whole pipeline: a
+		// review was triggered, the agent ran (up to 1800s), and `stepMerge`
+		// published a PUBLIC approval — then GitHub refused the merge with 405
+		// because a draft cannot be merged. The approval outlives the failed merge,
+		// so the worker left a permanent endorsement on an unfinished PR.
+		const draft = makePr({ draft: true })
+		const h = harness({ prs: [draft], comments: [reviewComment(SAFE_REVIEW)] })
+
+		const out = await processPr(h.deps, { token: "install-token", repo: REPO, pr: draft })
+
+		expect(out).toEqual({ merged: false, triggered: false, fixed: false, skipped: true })
+		expect(approves(h.calls)).toBe(0)
+		expect(merges(h.calls)).toBe(0)
+		expect(h.agentPosts).toEqual([])
+		expect(h.lines).toContain("   ⏭️  Draft PR — not reviewing or merging until it is marked ready")
+	})
+})
+
 describe("case 2 — review + clean safety + green CI + mergeable merges once", () => {
 	test("a green Dependabot PR merges before review and never calls the agent", async () => {
 		const h = harness({
@@ -1193,6 +1213,32 @@ describe("case 7 — mergeable:false resolves once, then skips permanently", () 
 		expect(out).toEqual({ merged: false, triggered: false, fixed: true, skipped: true })
 		expect(h.lines).toContain("   ✨ Conflict resolved: Claude Code pushed 1 improvement commit(s)")
 		expect(merges(h.calls)).toBe(0)
+	})
+
+	test("a resolve that PUSHED records its commit count, so the suite gate applies", async () => {
+		// `checkHeadCi` demands a real suite only when the recorded fix pushed
+		// something (`fix_commits > 0`). The resolver called `markFixed` WITHOUT a
+		// commit count, so it recorded 0 even when it had just pushed a commit —
+		// and the merge gate then treated that head as untested-but-trustworthy,
+		// mergeable on a third-party app's green check alone. That is the `[skip
+		// ci]` trap reachable through the conflict path.
+		const PUSHED = "d".repeat(40)
+		const conflicted = makePr({ ...LOCKFILE_BUMP, user: { login: "alice" }, mergeable: false })
+		const h = harness({
+			prs: [conflicted],
+			comments: [NO_CODE_MARKER],
+			agent: [{ ok: true, snippet: "resolved" }],
+			pushedSha: PUSHED,
+			pullReplySeq: [
+				{ status: 200, data: conflicted },
+				{ status: 200, data: makePr({ mergeable: true, head: { sha: PUSHED, ref: "f" } }) },
+			],
+		})
+
+		await processPr(h.deps, { token: "install-token", repo: REPO, pr: conflicted })
+
+		expect(h.fixState[REPO][String(PR_NUM)].sha).toBe(PUSHED)
+		expect(h.fixState[REPO][String(PR_NUM)].fix_commits).toBeGreaterThan(0)
 	})
 
 	test("mergeable:null is NOT the conflict branch — Python tests `is False`", async () => {

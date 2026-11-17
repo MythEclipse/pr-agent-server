@@ -1459,6 +1459,45 @@ describe("triggerReview", () => {
 		expect(JSON.parse(calls[0].init.body).installation.id).toBe(5)
 	})
 
+	test("a repo past a server-capped page still resolves its installation id", async () => {
+		// GitHub caps `/installation/repositories` at 30 items even for
+		// `per_page=100`, so a 51-repo installation answers 30 items plus a
+		// `total_count` of 51. The walk used `list.length < 100` as "last page"
+		// and stopped, so a target repo on page 2 resolved to id 0 — the exact
+		// silent loss of the installation token the paging exists to prevent.
+		const api: GhAppClient = {
+			request: async (_method, path) => {
+				if (path.startsWith("/app/installations")) return { status: 200, data: [{ id: 1 }] } as any
+				if (path.startsWith("/installation/repositories")) {
+					const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? "1")
+					return {
+						status: 200,
+						data: {
+							total_count: 51,
+							repositories:
+								page === 1
+									? Array.from({ length: 30 }, (_, i) => ({ full_name: `o/r${i}` }))
+									: [{ full_name: REPO }],
+						},
+					} as any
+				}
+				return { status: 200, data: {} } as any
+			},
+			installationToken: async () => "itok",
+		}
+		const { fetchImpl, calls } = fakeFetch()
+		await triggerReview(
+			{ api, fetchImpl, webhookSecret: SECRET, webhookUrl: "https://hook.test/hook", nowSec: NOW },
+			REPO,
+			PR,
+			"t",
+			"s",
+			"h",
+			"b",
+		)
+		expect(JSON.parse(calls[0].init.body).installation.id).toBe(1)
+	})
+
 	test("a failed installation lookup degrades to id 0 and still posts", async () => {
 		const api: GhAppClient = {
 			request: async (_method, path) => {
@@ -1584,6 +1623,19 @@ describe("commit status CI evidence", () => {
 	})
 	test("a successful status passes", async () => {
 		expect((await checkCiPassed(statusApi("success"), "t", "o/r", "sha")).ok).toBe(true)
+	})
+
+	test("combined state `error` is a FAILURE, not an unreadable gate", async () => {
+		// GitHub's combined state has FOUR values: pending | success | failure |
+		// error. Excluding `error` made every such head answer `unknown`, and an
+		// unknown gate refuses to merge — so a PR whose CI had definitively ERRORED
+		// waited forever with a message claiming the status was invalid.
+		const result = await checkCiPassed(statusApi("error"), "t", "o/r", "sha")
+		expect(result.ok).toBe(false)
+		expect(result.unknown).toBeUndefined()
+		expect(result.pending).toBeUndefined()
+		expect(result.msg).toContain("CI FAILED")
+		expect(result.msg).toContain("ci/travis")
 	})
 })
 

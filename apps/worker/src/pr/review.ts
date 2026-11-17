@@ -280,8 +280,17 @@ const MAX_INSTALL_PAGES = 20
  * (30 by default) and `/installation/repositories?per_page=100` — so an app
  * installed on more than a page of accounts, or a target repo past the first
  * hundred, resolved to id 0 and every review for it silently lost its
- * installation token. A short page ends each walk, and the caps stop a server
- * that ignores `page` from spinning.
+ * installation token.
+ *
+ * A SHORT PAGE IS NOT THE END, and this is the subtle half. GitHub caps
+ * `/installation/repositories` at 30 items regardless of `per_page=100`, so a
+ * 51-repo installation answers 30 items and a `total_count` of 51. The old
+ * `list.length < INSTALL_PAGE_SIZE` test read that as "last page" and stopped —
+ * so a target repo on page 2 resolved to id 0, which is exactly the silent
+ * token loss the paging was added to prevent. `total_count` is the authority
+ * when the body carries it; the page-length heuristic is only the fallback for
+ * a response that does not. Same rule as `listInstallationRepos` in ./scan, and
+ * for the same measured reason.
  */
 async function resolveInstallId(api: GhAppClient, repo: string): Promise<number> {
 	try {
@@ -296,6 +305,7 @@ async function resolveInstallId(api: GhAppClient, repo: string): Promise<number>
 				const id = (inst as { id?: number })?.id
 				if (typeof id !== "number") continue
 				const token = await api.installationToken(id)
+				let seen = 0
 				for (let rp = 1; rp <= MAX_INSTALL_PAGES; rp++) {
 					const { data: repos } = await api.request(
 						"GET",
@@ -304,17 +314,23 @@ async function resolveInstallId(api: GhAppClient, repo: string): Promise<number>
 					)
 					// Python line 425 guards the dict before `.get`, and filters non-dict
 					// entries; both are reproduced so a malformed entry cannot throw here.
-					const list =
-						repos !== null &&
-						typeof repos === "object" &&
-						Array.isArray((repos as any).repositories)
-							? (repos as any).repositories
-							: []
-					const fulls = (list as any[])
+					const body =
+						repos !== null && typeof repos === "object"
+							? (repos as { repositories?: unknown; total_count?: unknown })
+							: {}
+					const list = Array.isArray(body.repositories) ? (body.repositories as any[]) : []
+					if (!list.length) break
+					seen += list.length
+					const fulls = list
 						.filter((r: any) => r !== null && typeof r === "object")
 						.map((r: any) => r.full_name)
 					if (fulls.includes(repo)) return id
-					if (list.length < INSTALL_PAGE_SIZE) break
+					// `total_count` wins when present: a server that caps the page below
+					// `per_page` would otherwise look short and end the walk early.
+					const total = typeof body.total_count === "number" ? body.total_count : 0
+					if (total > 0) {
+						if (seen >= total) break
+					} else if (list.length < INSTALL_PAGE_SIZE) break
 				}
 			}
 			if (installs.length < INSTALL_PAGE_SIZE) break

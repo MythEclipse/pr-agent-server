@@ -42,6 +42,33 @@ const failure = (over: Partial<TCiFailure> = {}): TCiFailure => ({
 })
 
 describe("collectCiFailures", () => {
+	it("does NOT hand the worker's own merge job to the agent as CI evidence", async () => {
+		// The auto-merge workflow reports `failure` when it DECLINED to merge and
+		// `cancelled` when a newer run superseded it — neither says anything about
+		// the code. `ci.ts` filters these names before judging a head; this reader
+		// had no such filter, so a PR whose only red check was the worker's own
+		// merge job got a prompt saying "CI IS FAILING … ### Auto-merge dependency
+		// PR — cancelled", and the agent was invited to "fix" merge tooling.
+		const api = stubApi({
+			"/repos/o/r/commits/abc/check-runs": {
+				status: 200,
+				data: {
+					check_runs: [
+						{
+							id: 9,
+							name: "Auto-merge dependency PR",
+							status: "completed",
+							conclusion: "cancelled",
+						},
+						{ id: 7, name: "api:test", status: "completed", conclusion: "failure" },
+					],
+				},
+			},
+		})
+		const got = await collectCiFailures(api, "t", "o/r", "abc")
+		expect(got.map((f) => f.name)).toEqual(["api:test"])
+	})
+
 	it("reads a failing check and its annotations", async () => {
 		const api = stubApi({
 			"/repos/o/r/commits/abc/check-runs": {

@@ -261,6 +261,13 @@ export async function resolveConflict(
 				// `stepAiFix`, and for the same reason: a record naming the head the
 				// agent started from is invalidated by the resolve's own push, and
 				// the next tick then offers the agent the branch all over again.
+				// `commits` IS PART OF THE RECORD, and leaving it out was a hole in
+				// the merge gate. `checkHeadCi` demands a real suite run only when
+				// the recorded fix pushed something (`fix_commits > 0`); a conflict
+				// resolve that pushed a commit recorded 0 by default, so the gate
+				// treated the head as untested-but-trustworthy and could merge it on
+				// a third-party app's green check alone — the `[skip ci]` trap this
+				// whole mechanism exists to close, reachable through the resolver.
 				markFixed(c.fixState, c.repo, c.prNum, tipSha || c.headSha, commits)
 				persist(deps, c.fixState)
 				c.out.fixed = true

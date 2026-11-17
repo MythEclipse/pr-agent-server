@@ -173,6 +173,16 @@ export async function fetchOpenDependabotAlertsResult(
 		path =
 			(res.data as DependabotAlert[]).length < ALERT_PAGE_SIZE ? undefined : nextPagePath(res.link)
 	}
+	// THE CAP ENDING THE WALK IS NOT A COMPLETE ANSWER.
+	//
+	// A full last page that still advertises a `rel="next"` means there are MORE
+	// alerts than `ALERT_MAX_PAGES * ALERT_PAGE_SIZE`. Reporting `ok: true` for
+	// that is the same lie the single-page bug told: the audit would count a
+	// truncated fleet as whole, and `--fix-vulns` would treat the alerts it never
+	// read as absent. The cap is a bound on a malformed cursor, not a claim that
+	// 5000 alerts is everything — so it is reported as a failure with what was
+	// read, exactly like a failed later page.
+	if (path !== undefined) return { ok: false, status: 200, alerts: all }
 	return { ok: true, alerts: all }
 }
 

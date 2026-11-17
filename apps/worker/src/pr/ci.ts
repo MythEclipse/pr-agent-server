@@ -90,8 +90,15 @@ export const SELF_CHECK_NAMES: readonly string[] = [
 	"Dependabot auto-merge",
 ]
 
-/** True when a check run belongs to the worker's own auto-merge tooling. */
-const isSelfCheck = (check: any): boolean =>
+/**
+ * True when a check run belongs to the worker's own auto-merge tooling.
+ *
+ * EXPORTED because `ci-evidence.ts` must apply the SAME filter before handing a
+ * failure to the agent: a red self-check is a merge job that declined, not a
+ * failing test, and inviting the agent to "fix" it wastes a paid run on tooling
+ * it must not touch. One predicate, so the two readers cannot drift.
+ */
+export const isSelfCheck = (check: any): boolean =>
 	SELF_CHECK_NAMES.includes(typeof check?.name === "string" ? check.name : "")
 
 /**

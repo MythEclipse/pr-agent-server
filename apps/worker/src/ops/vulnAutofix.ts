@@ -268,6 +268,18 @@ export function fixCommandFor(plan: VulnFixPlan, opts: { yarnBerry?: boolean } =
 			return { argv: ["cargo", "update", "-p", pkg, "--precise", ver] }
 		case "gemfile.lock":
 			return { argv: ["bundle", "update", pkg, "--conservative"] }
+		case "uv.lock":
+			// UV IS SUPPORTED ELSEWHERE IN THIS WORKER, so reporting it MANUAL here
+			// was an inconsistency, not a policy. `pr/managers.ts` already
+			// re-resolves a uv repo with `uv lock` for the lockfile pre-fix, and
+			// `uv.lock` is a lockfile whose only writer is that command — it does
+			// not touch the manifests. `uv lock --upgrade-package <pkg>` is the
+			// targeted form: a bare `uv lock` re-resolves the whole graph and would
+			// change versions nobody asked about, on a PR that is supposed to move
+			// one package.
+			return {
+				argv: ["uv", "lock", "--upgrade-package", `${pkg}==${ver}`],
+			}
 		case "go.sum":
 		case "go.mod":
 			return { argv: ["go", "get", `${pkg}@${ver}`] }
@@ -413,8 +425,23 @@ export function buildVulnPrBody(
 	const links = plan.alertNumbers
 		.map((n) => `- [alert #${n}](${alertUrl(plan.repo, n)})`)
 		.join("\n")
+	// THE COMMAND IN THE BODY MUST BE THE ONE THAT WAS RUN.
+	//
+	// On the `overrides` route the worker runs `npm install --package-lock-only`
+	// with NO package argument, because the override in `package.json` is what
+	// drives resolution. The body used to print `fixCommandFor`'s plain form —
+	// `npm install … <pkg>@<version>` — which is precisely the PROMOTION the
+	// paragraph above it says was avoided. A reviewer re-running that command
+	// would add the package to `dependencies` and reproduce a different diff
+	// from the one under review.
 	const command = fixCommandFor(plan, { yarnBerry: opts.yarnBerry })
-	const commandLine = "argv" in command ? command.argv.join(" ") : "(no automatic command)"
+	const argv =
+		opts.overrides && "argv" in command
+			? ["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"]
+			: "argv" in command
+				? command.argv
+				: null
+	const commandLine = argv ? argv.join(" ") : "(no automatic command)"
 	return (
 		`Bumps \`${plan.packageName}\` to **${plan.patchedVersion}** in \`${plan.manifestPath}\` ` +
 		`to clear ${advisories} (${plan.severity || "unknown"} severity).\n\n` +
@@ -498,13 +525,22 @@ const UPDATE_TIMEOUT_SEC = 900
  *
  * A repo-wide "is there any open vuln PR" check would be wrong: it would let one
  * open PR suppress every other package in the repo. The check is per branch.
+ *
+ * THREE ANSWERS, NOT TWO. `0` means "no PR, go ahead"; a positive number is the
+ * PR that already exists; `null` means the lookup ANSWERED but the answer could
+ * not be read (a row with no numeric `number`). The old code folded that third
+ * case into `-1` and the caller treated anything non-zero as "already open",
+ * so a malformed reply reported `already open as PR #-1` and the plan was
+ * counted as DONE — a fix that was never attempted, reported as one that was.
+ * A failed REQUEST (non-200, non-array) is different: it returns `0`, and the
+ * subsequent POST answers 422 for a real duplicate, which is handled as success.
  */
 async function openPrForBranch(
 	api: GhClient,
 	repo: string,
 	branch: string,
 	token: string,
-): Promise<number> {
+): Promise<number | null> {
 	const owner = repo.split("/")[0] ?? ""
 	const { status, data } = await api.request(
 		"GET",
@@ -513,7 +549,52 @@ async function openPrForBranch(
 	)
 	if (status !== 200 || !Array.isArray(data) || data.length === 0) return 0
 	const n = Number((data[0] as { number?: number })?.number)
-	return Number.isFinite(n) ? n : -1
+	return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/**
+ * True when a `git status --porcelain` body names `path` as a whole path.
+ *
+ * The lines are `XY <path>`, and a rename is `XY <old> -> <new>`; both sides are
+ * considered, because either means this file changed. Compared EXACTLY: a
+ * substring test let a root `package-lock.json` plan pass on a change to
+ * `apps/web/package-lock.json`.
+ */
+function porcelainTouches(stdout: string, path: string): boolean {
+	for (const raw of stdout.split("\n")) {
+		const line = raw.trimEnd()
+		if (line.length < 4) continue
+		// Two status columns, one space, then the path.
+		const rest = line.slice(3)
+		const [from, to] = rest.split(" -> ")
+		if (from === path || (to !== undefined && to === path)) return true
+	}
+	return false
+}
+
+/**
+ * The remote head of `branch`, or "" when it does not exist (or cannot be read).
+ *
+ * Used ONLY to decide whether a push needs a lease. An unreadable answer is ""
+ * — a plain push — which is the pre-existing behaviour and cannot discard
+ * anything; the force path is reached only on a positive "the branch is there".
+ */
+async function existingBranchHead(
+	api: GhClient,
+	repo: string,
+	branch: string,
+	token: string,
+): Promise<string> {
+	try {
+		const { status, data } = await api.request("GET", `/repos/${repo}/git/ref/heads/${branch}`, {
+			token,
+		})
+		if (status !== 200) return ""
+		const sha = (data as { object?: { sha?: unknown } } | null)?.object?.sha
+		return typeof sha === "string" ? sha : ""
+	} catch {
+		return ""
+	}
 }
 
 /**
@@ -557,7 +638,16 @@ async function applyPlan(
 	const workdir = `${TMP_BASE}/_vuln_${plan.repo.replace(/\//g, "_")}_${unitSlug(plan)}`
 
 	const existing = await openPrForBranch(api, plan.repo, branch, opts.token)
-	if (existing !== 0)
+	if (existing === null) {
+		// The lookup answered, but not with a PR number. Do not claim the work is
+		// done (the old `-1` did exactly that) and do not push either: the next
+		// run re-asks.
+		return {
+			ok: false,
+			detail: `could not read the existing-PR lookup for ${branch} — deferring this plan`,
+		}
+	}
+	if (existing > 0)
 		return { ok: true, alreadyOpen: true, detail: `already open as PR #${existing}` }
 
 	workdirs.remove(workdir)
@@ -764,8 +854,15 @@ async function applyPlan(
 	// written above, `package.json` is dirty whether or not the lockfile was
 	// re-resolved — a check for "any change" would happily ship a PR that adds an
 	// override and fixes nothing.
+	// EXACT PATH MATCH, NOT A SUBSTRING. `status.stdout.includes(manifestPath)`
+	// also matched a NESTED manifest: a plan for the root `package-lock.json`
+	// "found" its change in `apps/web/package-lock.json`, so a PR was opened
+	// claiming the root was fixed when the root file had not moved at all — the
+	// silent half-fix the (manifest, package) grouping exists to prevent. Each
+	// porcelain line is `XY <path>`, so the path is compared as a whole segment
+	// (a rename line's `old -> new` form counts when either side matches).
 	const status = run(["status", "--porcelain"], workdir, 60)
-	if (status.code !== 0 || !status.stdout.includes(plan.manifestPath)) {
+	if (status.code !== 0 || !porcelainTouches(status.stdout, plan.manifestPath)) {
 		workdirs.remove(workdir)
 		// `pnpm` exits 0 having resolved nothing when the package is transitive and
 		// the parent's range already pins the version it keeps — measured on GMW's
@@ -787,9 +884,23 @@ async function applyPlan(
 	// PAT first, then the App token — the same ordering `git.ts` documents, for
 	// the same reason: a branch that touches `.github/workflows/*` is refused for
 	// an App without the `workflows` permission, and the PAT has it.
+	//
+	// FORCED ONLY WHEN THE BRANCH IS OURS TO REPLACE. A previous run can have
+	// pushed this branch and then failed to open the PR (a 5xx, a rate limit, a
+	// permission blip). The next run re-clones the DEFAULT branch, re-applies the
+	// same bump, and pushes to a branch that now exists with a different commit —
+	// a non-fast-forward, rejected on every later run, so the plan is wedged
+	// forever with nothing in the report to say why. The branch is this flow's
+	// own (`fix/vuln-<unit>`), and the lease makes the force safe: it only
+	// replaces the exact remote head that was read, so a human's push on top is
+	// never discarded.
+	const remoteHead = await existingBranchHead(api, plan.repo, branch, opts.token)
 	const pushed = pushRef(workdir, plan.repo, "HEAD", `refs/heads/${branch}`, opts.token, false, {
 		pat: deps.fetchGhToken(),
 		run,
+		// A lease forces the update (force-with-lease) and refuses if the remote
+		// moved since this read.
+		...(remoteHead ? { expectedHeadSha: remoteHead } : {}),
 	})
 	if (!pushed.ok) {
 		workdirs.remove(workdir)

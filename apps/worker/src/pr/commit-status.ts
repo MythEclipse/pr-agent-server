@@ -13,10 +13,19 @@ export async function checkCommitStatus(
 	})
 	const unknown = (msg: string) => ({ count: 0, blocked: { ok: false, unknown: true, msg } })
 	if (status !== 200) return unknown(`⚠️ Commit status unavailable (HTTP ${status})`)
+	// GITHUB'S COMBINED STATE HAS FOUR VALUES, NOT THREE.
+	//
+	// The docs list `error` alongside `pending | success | failure`: it means at
+	// least one context reported `error` (a required check that could not run, a
+	// third-party CI that failed to report). Excluding it from this allow-list
+	// made every such head answer `unknown`, and an unknown gate refuses to merge
+	// — so a PR whose CI had definitively ERRORED waited forever with a message
+	// claiming the status was invalid. `error` is a FAILURE, not an unreadable
+	// answer, and is handled by the red arm below.
 	if (
 		!data ||
 		!Array.isArray(data.statuses) ||
-		!["pending", "success", "failure"].includes(data.state)
+		!["pending", "success", "failure", "error"].includes(data.state)
 	) {
 		return unknown("⚠️ Invalid combined commit status — not merging")
 	}
@@ -32,7 +41,7 @@ export async function checkCommitStatus(
 	return {
 		count,
 		blocked:
-			data.state === "failure"
+			data.state === "failure" || data.state === "error"
 				? { ok: false, msg: `CI FAILED: ${names}` }
 				: { ok: false, pending: true, msg: `CI pending: ${names}` },
 	}

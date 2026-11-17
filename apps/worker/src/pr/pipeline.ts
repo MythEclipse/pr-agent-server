@@ -129,6 +129,25 @@ export async function processPr(deps: WorkerDeps, open: OpenPr): Promise<PrResul
 		c.out.skipped = true // Python lines 1877-1879
 		return c.out
 	}
+	// A DRAFT IS NOT READY, AND THE WORKER MUST NOT DO ITS WORK FOR IT.
+	//
+	// Nothing here filtered `draft`, so a WIP PR went through the whole pipeline:
+	// a PR-Agent review was triggered, the agent ran (up to 1800s), and
+	// `stepMerge` published a PUBLIC approval — then GitHub refused the merge
+	// with 405 because a draft cannot be merged. The approval outlives the failed
+	// merge, so the worker left a permanent endorsement on a PR its author had
+	// explicitly marked unfinished. That is the same "approved but not mergeable"
+	// artifact `mergeableGate` exists to prevent, reached by a different route.
+	//
+	// Draft is a state the author controls, so waiting costs nothing and cannot
+	// pin the PR: `ready_for_review` moves it out of draft and the next tick
+	// processes it normally. The webhook path already ignores drafts for the same
+	// reason (handle-webhook.ts); this is the polling path catching up.
+	if (pr?.draft === true) {
+		deps.report.push("   ⏭️  Draft PR — not reviewing or merging until it is marked ready")
+		c.out.skipped = true
+		return c.out
+	}
 	if (await stepPinGuard(deps, c)) return c.out
 	// BEFORE the review: a bump that cannot install does not need a review, an AI
 	// fix, or a CI wait — and paying for any of the three on it is the bug this
