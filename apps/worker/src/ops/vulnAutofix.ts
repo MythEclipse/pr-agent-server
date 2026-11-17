@@ -209,6 +209,12 @@ export type FixCommand =
 	| {
 			argv: string[]
 			/**
+			 * What makes the fallback worth trying. Defaults to npm's peer-conflict
+			 * text, which is the only reason npm has a fallback at all; composer
+			 * retries on a platform/dependent conflict instead.
+			 */
+			retryOn?: RegExp
+			/**
 			 * A second form to try when the first is refused for a reason the flag
 			 * can fix — today only npm's `ERESOLVE`.
 			 *
@@ -272,17 +278,43 @@ export function fixCommandFor(plan: VulnFixPlan, opts: { yarnBerry?: boolean } =
 					? ["yarn", "up", `${pkg}@${ver}`]
 					: ["yarn", "upgrade", `${pkg}@${ver}`],
 			}
-		case "composer.lock":
+		case "composer.lock": {
+			const argv = [
+				"composer",
+				"update",
+				pkg,
+				"--with-dependencies",
+				"--no-interaction",
+				"--no-scripts",
+			]
+			// MEASURED on AETHRA-Organizer-Website and projectpweb2, in this order:
+			//   1. `--with-dependencies` stops at "laravel/pint v1.32.3 requires
+			//      ext-xml" — the box had no php-xml, now installed;
+			//   2. then at "brianium/paratest v7.8.3 requires php ~8.2 || ~8.3 ||
+			//      ~8.4 -> your php version (8.5.4) does not satisfy that
+			//      requirement" — the WORKER's PHP is newer than the repo's target,
+			//      which says nothing about the repo;
+			//   3. then at "pestphp/pest is locked to version v3.8.2 … conflicts with
+			//      phpunit/phpunit 11.5.50" — `--with-dependencies` will not move a
+			//      package that merely DEPENDS on the one being bumped.
+			// `-W` moves those dependents and `--ignore-platform-req=php` resolves
+			// for the repo's declared PHP instead of this host's. CI is the arbiter:
+			// a lockfile that does not install there turns the PR red.
 			return {
-				argv: [
+				argv,
+				fallback: [
 					"composer",
 					"update",
 					pkg,
-					"--with-dependencies",
+					"--with-all-dependencies",
 					"--no-interaction",
 					"--no-scripts",
+					"--ignore-platform-req=php",
 				],
+				retryOn:
+					/does not satisfy that requirement|requires php|conflicts with|locked to version|not satisfiable/i,
 			}
+		}
 		case "cargo.lock":
 			return { argv: ["cargo", "update", "-p", pkg, "--precise", ver] }
 		case "gemfile.lock":
@@ -404,13 +436,61 @@ function installOnlyFor(file: string): string[] {
  * file came back as tabs — and a reviewer cannot see the two lines that matter
  * through a whole-file diff.
  */
+/**
+ * Append (or replace) one entry under `overrides:` in a `pnpm-workspace.yaml`.
+ *
+ * PNPM MOVED THIS SETTING. Measured on the box's pnpm 12.16.1:
+ * `[WARN] The "pnpm" field in package.json is no longer read by pnpm. The
+ * following keys were ignored: "pnpm.overrides"` — the write succeeded, the
+ * install exited 0, and the lockfile did not move, which is exactly the
+ * "resolved nothing" wall. With the same entry under `overrides:` in
+ * `pnpm-workspace.yaml` the lockfile went from minimatch 10.2.6 to 11.0.1.
+ *
+ * Hand-edited rather than serialised: this bundle has no YAML parser, and the
+ * file is a flat settings list. An existing key is REPLACED, so a second run
+ * does not stack duplicate entries.
+ */
+export function writeWorkspaceOverride(raw: string, key: string, version: string): string {
+	const entry = `  ${/[:#@<>*&!|]/.test(key) ? `"${key}"` : key}: ${version}`
+	const lines = raw === "" ? [] : raw.replace(/\s+$/, "").split("\n")
+	const start = lines.findIndex((line) => /^overrides:\s*$/.test(line))
+	if (start === -1) {
+		return `${lines.join("\n")}${lines.length > 0 ? "\n" : ""}overrides:\n${entry}\n`
+	}
+	// The block runs until the first line that is neither indented nor blank.
+	let end = start + 1
+	while (
+		end < lines.length &&
+		(/^\s+\S/.test(lines[end] ?? "") || (lines[end] ?? "").trim() === "")
+	) {
+		end += 1
+	}
+	const existing = lines.findIndex(
+		(line, i) =>
+			i > start &&
+			i < end &&
+			new RegExp(`^\\s+['"]?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}['"]?\\s*:`).test(line),
+	)
+	if (existing !== -1) {
+		lines[existing] = entry
+		return `${lines.join("\n")}\n`
+	}
+	lines.splice(end, 0, entry)
+	return `${lines.join("\n")}\n`
+}
+
 export function writeForcedVersion(
 	raw: string,
 	file: string,
 	pkg: string,
 	patchedVersion: string,
-	opts: { scopeToRange?: string } = {},
-): { text: string; label: string; key: string } | null {
+	opts: { scopeToRange?: string; workspaceYaml?: string; packageManager?: string } = {},
+): {
+	text: string
+	label: string
+	key: string
+	target: "package.json" | "pnpm-workspace.yaml"
+} | null {
 	let field: string[]
 	let label: string
 	switch (file) {
@@ -419,10 +499,27 @@ export function writeForcedVersion(
 			field = ["overrides"]
 			label = "overrides"
 			break
-		case "pnpm-lock.yaml":
-			field = ["pnpm", "overrides"]
-			label = "pnpm.overrides"
-			break
+		case "pnpm-lock.yaml": {
+			// WHICH FILE pnpm READS DEPENDS ON ITS MAJOR. 10+ reads `overrides` from
+			// `pnpm-workspace.yaml` and IGNORES the package.json field; 9 and older
+			// read `pnpm.overrides` from package.json. A repo that declares its major
+			// in `packageManager` gets the file that major reads; one that declares
+			// nothing gets the workspace file, because the pnpm that runs here is 12
+			// and its answer is the one the lockfile has to agree with.
+			const major = Number(/^pnpm@(\d+)/.exec(opts.packageManager ?? "")?.[1] ?? "0")
+			if (major > 0 && major < 10) {
+				field = ["pnpm", "overrides"]
+				label = "pnpm.overrides"
+				break
+			}
+			const key = opts.scopeToRange ? `${pkg}@${opts.scopeToRange}` : pkg
+			return {
+				text: writeWorkspaceOverride(opts.workspaceYaml ?? "", key, patchedVersion),
+				label: "overrides (pnpm-workspace.yaml)",
+				key,
+				target: "pnpm-workspace.yaml",
+			}
+		}
 		case "yarn.lock":
 			if (opts.scopeToRange) return null
 			field = ["resolutions"]
@@ -455,8 +552,8 @@ export function writeForcedVersion(
 	const key = opts.scopeToRange ? `${pkg}@${opts.scopeToRange}` : pkg
 	block[leaf] = { ...existing, [key]: patchedVersion }
 
-	const indent = /\n([^\S\n]+)"/.exec(raw)?.[1] ?? "\t"
-	return { text: `${JSON.stringify(manifest, null, indent)}\n`, label, key }
+	const indent = /\n([^\S\n]+)"/.exec(raw)?.[1] ?? "	"
+	return { text: `${JSON.stringify(manifest, null, indent)}\n`, label, key, target: "package.json" }
 }
 
 /**
@@ -495,6 +592,32 @@ export function lockedVersionsOf(
 			return null
 		}
 	}
+	if (/^cargo\.lock$/i.test(basename(lockPath))) {
+		// TOML, read block by block: Cargo.lock is a list of `[[package]]` tables
+		// and the key order inside one is not guaranteed.
+		const out: string[] = []
+		for (const block of raw.split("[[package]]").slice(1)) {
+			const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(block)?.[1]
+			const version = /^\s*version\s*=\s*"([^"]+)"/m.exec(block)?.[1]
+			if (name === pkg && version) out.push(version)
+		}
+		return out
+	}
+	if (/^composer\.lock$/i.test(basename(lockPath))) {
+		try {
+			const lock = JSON.parse(raw) as {
+				packages?: { name?: string; version?: string }[]
+				"packages-dev"?: { name?: string; version?: string }[]
+			}
+			const out: string[] = []
+			for (const entry of [...(lock.packages ?? []), ...(lock["packages-dev"] ?? [])]) {
+				if (entry?.name === pkg && typeof entry.version === "string") out.push(entry.version)
+			}
+			return out
+		} catch {
+			return null
+		}
+	}
 	if (/^pnpm-lock\.yaml$/i.test(basename(lockPath))) {
 		// pnpm writes one key per resolved instance — `  minimatch@10.0.1:` — under
 		// `packages:` (v6) or `snapshots:` (v9). Both are indented keys, so one
@@ -506,6 +629,33 @@ export function lockedVersionsOf(
 		return out
 	}
 	return null
+}
+
+/**
+ * The packages a composer conflict names as the reason it cannot proceed.
+ *
+ * MEASURED on AETHRA-Organizer-Website: `composer update phpunit/phpunit -W`
+ * still fails with "pestphp/pest is locked to version v3.8.2 … conflicts with
+ * phpunit/phpunit 11.5.50", because `-W` moves the DEPENDENCIES of the package
+ * being bumped, not the packages that depend ON it. Naming `pestphp/pest` in the
+ * command is what moves it — measured on the same repo, that command completed
+ * and resolved phpunit 11.5.50.
+ *
+ * Only names composer prints in a conflict line are taken, never `php` or an
+ * `ext-*` platform requirement, and at most three: this is a targeted widening
+ * of one command, not a licence to rewrite the whole dependency graph.
+ */
+export function composerBlockers(output: string, pkg: string): string[] {
+	const out: string[] = []
+	for (const line of output.split("\n")) {
+		if (!/locked to version|conflicts with|requires|satisfiable by/i.test(line)) continue
+		for (const match of line.matchAll(/([a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*)/g)) {
+			const name = match[1] ?? ""
+			if (name === pkg || name.startsWith("ext-") || name.startsWith("lib-")) continue
+			if (!out.includes(name)) out.push(name)
+		}
+	}
+	return out.slice(0, 3)
 }
 
 /**
@@ -879,6 +1029,7 @@ async function applyPlan(
 	// exists to avoid. Measured on BotWa #24: the override landed AND
 	// `"brace-expansion": "^1.1.21"` was added to `dependencies` by the retry.
 	let fallback: string[] | undefined = "fallback" in command ? command.fallback : undefined
+	const retryOn = "retryOn" in command ? command.retryOn : undefined
 
 	/**
 	 * Write the forced version into `package.json` and switch the command to a
@@ -894,6 +1045,7 @@ async function applyPlan(
 	 * null when this ecosystem has no override mechanism — cargo, composer, gem,
 	 * go and uv have none, and for those the caller keeps the manual report.
 	 */
+	const workspacePath = `${workdir}/pnpm-workspace.yaml`
 	const forceVersion = (): string | null => {
 		let raw: string
 		try {
@@ -901,19 +1053,33 @@ async function applyPlan(
 		} catch {
 			return null
 		}
-		let direct: string | null = null
+		let manifest: Record<string, unknown>
 		try {
-			direct = npmDirectRange(JSON.parse(raw) as Record<string, unknown>, plan.packageName)
+			manifest = JSON.parse(raw) as Record<string, unknown>
 		} catch {
 			return null
 		}
+		// Absent is normal: most repos have no pnpm settings file until pnpm 10+
+		// needs one, and that is where pnpm 12 reads `overrides` from.
+		let workspaceYaml = ""
+		try {
+			workspaceYaml = workdirs.readFile(workspacePath)
+		} catch {
+			workspaceYaml = ""
+		}
 		const written = writeForcedVersion(raw, file, plan.packageName, plan.patchedVersion, {
-			...(direct !== null && plan.vulnerableRange !== ""
+			...(npmDirectRange(manifest, plan.packageName) !== null && plan.vulnerableRange !== ""
 				? { scopeToRange: plan.vulnerableRange }
 				: {}),
+			workspaceYaml,
+			packageManager:
+				typeof manifest.packageManager === "string" ? (manifest.packageManager as string) : "",
 		})
 		if (!written) return null
-		workdirs.writeFile(pkgPath, written.text)
+		workdirs.writeFile(
+			written.target === "pnpm-workspace.yaml" ? workspacePath : pkgPath,
+			written.text,
+		)
 		overrideWritten = true
 		overrideLabel = written.label
 		argv = installOnlyFor(file)
@@ -1078,21 +1244,70 @@ async function applyPlan(
 				detail: `${plan.packageName} is still refused by pnpm as an indirect dependency after ${overrideLabel}`,
 			}
 		}
-		// One retry, only for the peer-conflict flag. Anything else is the repo's
-		// own problem and retrying it just doubles the run time.
-		else if (fallback && /ERESOLVE|peer dep/i.test(why)) {
+		// CARGO: THE PATCH CAN SIT OUTSIDE THE PARENT'S REQUIREMENT.
+		// MEASURED on zeavis-edu: `cargo update -p glib --precise 0.20.0` fails with
+		// "failed to select a version for the requirement `glib = \"^0.18\"` …
+		// required by package `gtk v0.18.2`". Nothing is wrong with the command —
+		// the crate that pulls glib pins the 0.18 line. `cargo update -p gtk` is the
+		// escalation: it moves the PARENT and lets the child follow. Whether that
+		// reaches the patch is checked below, before any PR is opened.
+		if (/failed to select a version for the requirement/.test(why) && file === "cargo.lock") {
+			const parent = /required by package `([A-Za-z0-9_.-]+) v/.exec(why)?.[1]
+			if (parent !== undefined && parent !== plan.packageName) {
+				updated = exec(["cargo", "update", "-p", parent], cwd, UPDATE_TIMEOUT_SEC)
+				if (updated.code !== 0) {
+					workdirs.remove(workdir)
+					const failWhy = reportable((updated.stderr || updated.stdout || "").trim())
+					return {
+						ok: false,
+						detail: `${plan.packageName} is pinned by ${parent}, and moving ${parent} failed: ${head(failWhy, 300)}`,
+					}
+				}
+			}
+		}
+		// One retry, only for the reason this command declares. Anything else is the
+		// repo's own problem and retrying it just doubles the run time.
+		if (updated.code !== 0 && fallback && (retryOn ?? /ERESOLVE|peer dep/i).test(why)) {
 			const [fprogram, ...fargs] = fallback
 			updated = exec([fprogram ?? "", ...fargs], cwd, UPDATE_TIMEOUT_SEC)
 			usedFallback = updated.code === 0
 			if (!usedFallback) {
-				workdirs.remove(workdir)
-				const failWhy = reportable((updated.stderr || updated.stdout || "").trim())
-				return {
-					ok: false,
-					detail: `${fprogram} exited ${updated.code} (with --legacy-peer-deps): ${head(failWhy, 300)}`,
+				// THIRD ATTEMPT, COMPOSER ONLY: NAME WHAT BLOCKS IT. `-W` moves the
+				// dependencies of the package being bumped; a package that DEPENDS on
+				// it has to be named in the command (measured on AETHRA's pest).
+				const blockers =
+					fprogram === "composer"
+						? composerBlockers(`${updated.stderr}${updated.stdout}`, plan.packageName)
+						: []
+				if (blockers.length > 0) {
+					updated = exec(
+						[
+							"composer",
+							"update",
+							plan.packageName,
+							...blockers,
+							"--with-all-dependencies",
+							"--no-interaction",
+							"--no-scripts",
+							"--ignore-platform-req=php",
+						],
+						cwd,
+						UPDATE_TIMEOUT_SEC,
+					)
+				}
+				if (updated.code !== 0) {
+					workdirs.remove(workdir)
+					const failWhy = reportable((updated.stderr || updated.stdout || "").trim())
+					return {
+						ok: false,
+						manual: true,
+						detail:
+							`${fprogram} still cannot resolve ${plan.packageName} ${plan.patchedVersion}` +
+							`${blockers.length > 0 ? ` with ${blockers.join(", ")} moved too` : ""}: ${head(failWhy, 300)}`,
+					}
 				}
 			}
-		} else {
+		} else if (updated.code !== 0) {
 			workdirs.remove(workdir)
 			const failWhy = reportable((updated.stderr || updated.stdout || "").trim())
 			return { ok: false, detail: `${program} exited ${updated.code}: ${head(failWhy, 300)}` }
@@ -1184,8 +1399,35 @@ async function applyPlan(
 		}
 	}
 
+	// A MOVED LOCKFILE IS NOT A FIX IF THE VULNERABLE VERSION IS STILL IN IT.
+	// The cargo escalation above (`cargo update -p gtk`) moves the lockfile
+	// without necessarily reaching the patch — measured on zeavis-edu, where glib
+	// stays at 0.18.5 because gtk 0.18 pins the whole 0.18 line. Opening a PR for
+	// that would attach a "fix" to an advisory it does not fix, which is the
+	// silent half-fix this module must not produce.
+	const stillThere = (
+		lockedVersionsOf(workdirs, `${cwd}/${basename(plan.manifestPath)}`, plan.packageName) ?? []
+	).filter((v) => compareVersions(v, plan.patchedVersion) < 0)
+	if (stillThere.length > 0) {
+		workdirs.remove(workdir)
+		return {
+			ok: false,
+			manual: true,
+			detail:
+				`${basename(plan.manifestPath)} still resolves ${[...new Set(stillThere)].join(", ")} after the update — ` +
+				`${plan.patchedVersion} is outside what this manifest can reach`,
+		}
+	}
+
 	const message = `fix(deps): bump ${plan.packageName} to ${plan.patchedVersion} for ${plan.ghsaIds.join(", ") || "security advisory"}`
-	const committed = run(["commit", "-am", message], workdir, 120)
+	// `git add -A` FIRST, not `commit -am`: the forced version can live in a file
+	// the repo does not have yet — `pnpm-workspace.yaml` is created when pnpm 10+
+	// needs an override, and it is UNTRACKED. `commit -am` stages only tracked
+	// files, so the branch would carry the lockfile without the entry that
+	// produced it: CI would re-resolve without the override and the PR would
+	// claim a fix it does not contain.
+	run(["add", "-A"], workdir, 120)
+	const committed = run(["commit", "-m", message], workdir, 120)
 	if (committed.code !== 0) {
 		workdirs.remove(workdir)
 		return { ok: false, detail: `commit failed: ${head(reportable(committed.stderr), 200)}` }

@@ -193,20 +193,28 @@ describe("writeForcedVersion", () => {
 	const pkgJson = (over: Record<string, unknown> = {}): string =>
 		`${JSON.stringify({ name: "r", dependencies: { express: "^4.0.0" }, ...over }, null, 2)}\n`
 
-	it("writes pnpm.overrides, creating the pnpm block when it is absent", () => {
+	it("writes pnpm's overrides into pnpm-workspace.yaml, where pnpm 10+ reads them", () => {
+		// MEASURED on the box's pnpm 12.16.1: `pnpm.overrides` in package.json is
+		// IGNORED — "[WARN] The pnpm field in package.json is no longer read by
+		// pnpm … keys were ignored" — the install exits 0 and the lockfile does not
+		// move. The same entry under `overrides:` in pnpm-workspace.yaml moved
+		// minimatch from 10.2.6 to 11.0.1.
 		const out = writeForcedVersion(pkgJson(), "pnpm-lock.yaml", "minimatch", "11.0.1")
-		expect(out?.label).toBe("pnpm.overrides")
-		const manifest = JSON.parse(out?.text ?? "{}") as { pnpm?: { overrides?: unknown } }
-		expect(manifest.pnpm?.overrides).toEqual({ minimatch: "11.0.1" })
+		expect(out?.target).toBe("pnpm-workspace.yaml")
+		expect(out?.text).toBe("overrides:\n  minimatch: 11.0.1\n")
 	})
 
-	it("keeps an existing pnpm block and its other fields", () => {
+	it("still writes pnpm.overrides for a repo that declares pnpm 9", () => {
+		// pnpm 9 does not read the workspace file's settings, so a repo that pins
+		// its own major keeps the field its major understands.
 		const out = writeForcedVersion(
 			pkgJson({ pnpm: { onlyBuiltDependencies: ["esbuild"], overrides: { undici: "7.30.1" } } }),
 			"pnpm-lock.yaml",
 			"minimatch",
 			"11.0.1",
+			{ packageManager: "pnpm@9.15.0" },
 		)
+		expect(out?.target).toBe("package.json")
 		const manifest = JSON.parse(out?.text ?? "{}") as {
 			pnpm?: { onlyBuiltDependencies?: string[]; overrides?: Record<string, string> }
 		}
@@ -214,11 +222,28 @@ describe("writeForcedVersion", () => {
 		expect(manifest.pnpm?.overrides).toEqual({ undici: "7.30.1", minimatch: "11.0.1" })
 	})
 
-	it("scopes the key to the advisory range when asked", () => {
+	it("appends to an existing overrides block instead of replacing the file", () => {
+		const existing = "packages:\n  - apps/*\nonlyBuiltDependencies:\n  - esbuild\n"
+		const out = writeForcedVersion(pkgJson(), "pnpm-lock.yaml", "minimatch", "11.0.1", {
+			workspaceYaml: existing,
+		})
+		expect(out?.text).toBe(`${existing}overrides:\n  minimatch: 11.0.1\n`)
+	})
+
+	it("replaces an existing entry rather than stacking a duplicate", () => {
+		const existing = "overrides:\n  minimatch: 9.0.5\n  undici: 7.30.1\n"
+		const out = writeForcedVersion(pkgJson(), "pnpm-lock.yaml", "minimatch", "11.0.1", {
+			workspaceYaml: existing,
+		})
+		expect(out?.text).toBe("overrides:\n  minimatch: 11.0.1\n  undici: 7.30.1\n")
+	})
+
+	it("scopes the key to the advisory range when asked, quoting it in YAML", () => {
 		const out = writeForcedVersion(pkgJson(), "pnpm-lock.yaml", "minimatch", "11.0.1", {
 			scopeToRange: "<11.0.1",
 		})
 		expect(out?.key).toBe("minimatch@<11.0.1")
+		expect(out?.text).toContain('"minimatch@<11.0.1": 11.0.1')
 	})
 
 	it("refuses a SCOPED force on yarn, whose resolutions have no selector", () => {
@@ -289,8 +314,31 @@ describe("lockedVersionsOf", () => {
 		).toEqual(["26.6.6"])
 	})
 
+	it("reads Cargo.lock blocks and composer.lock's package lists", () => {
+		// Both are needed for the post-update check: it is what refuses a PR that
+		// moved the lockfile without reaching the patch.
+		const cargo =
+			'[[package]]\nname = "serde"\nversion = "1.0.0"\n\n[[package]]\nname = "glib"\nversion = "0.18.5"\n'
+		expect(lockedVersionsOf(fake({ "/w/Cargo.lock": cargo }), "/w/Cargo.lock", "glib")).toEqual([
+			"0.18.5",
+		])
+		const composer = JSON.stringify({
+			packages: [{ name: "laravel/framework", version: "v12.0.0" }],
+			"packages-dev": [{ name: "phpunit/phpunit", version: "11.5.44" }],
+		})
+		expect(
+			lockedVersionsOf(
+				fake({ "/w/composer.lock": composer }),
+				"/w/composer.lock",
+				"phpunit/phpunit",
+			),
+		).toEqual(["11.5.44"])
+	})
+
 	it("returns null when the format is not one it can read", () => {
-		expect(lockedVersionsOf(fake({ "/w/Cargo.lock": "x" }), "/w/Cargo.lock", "glib")).toBeNull()
+		expect(
+			lockedVersionsOf(fake({ "/w/Gemfile.lock": "x" }), "/w/Gemfile.lock", "rails"),
+		).toBeNull()
 		expect(lockedVersionsOf(fake({}), "/w/package-lock.json", "minimatch")).toBeNull()
 	})
 })
@@ -338,6 +386,10 @@ describe("fixCommandFor", () => {
 		expect(fixCommandFor(plan("Cargo.lock", "rust"))).toEqual({
 			argv: ["cargo", "update", "-p", "lodash", "--precise", "4.17.21"],
 		})
+		// Composer carries a fallback too, and it is the measured one: `-W` moves
+		// the packages that DEPEND on the one being bumped, and
+		// `--ignore-platform-req=php` resolves for the repo's declared PHP rather
+		// than this host's (AETHRA's paratest refuses php 8.5 outright).
 		expect(fixCommandFor(plan("composer.lock", "composer"))).toEqual({
 			argv: [
 				"composer",
@@ -347,6 +399,17 @@ describe("fixCommandFor", () => {
 				"--no-interaction",
 				"--no-scripts",
 			],
+			fallback: [
+				"composer",
+				"update",
+				"lodash",
+				"--with-all-dependencies",
+				"--no-interaction",
+				"--no-scripts",
+				"--ignore-platform-req=php",
+			],
+			retryOn:
+				/does not satisfy that requirement|requires php|conflicts with|locked to version|not satisfiable/i,
 		})
 	})
 
@@ -505,6 +568,15 @@ function harness(opts: {
 	 * attempt changed nothing, the forced retry did". The last entry repeats.
 	 */
 	diffSequence?: string[]
+	/**
+	 * Serve the PRE-update lockfile even after the tool succeeded.
+	 *
+	 * By default the fake models a successful install by rewriting the lockfile to
+	 * the patched version, because that is what the real tool does — and the
+	 * post-update verification refuses a PR that leaves a vulnerable copy. A test
+	 * that wants to see that refusal turns this on.
+	 */
+	keepVulnerableLock?: boolean
 	/** The `packageManager` field the default `package.json` reports. */
 	packageManager?: string
 	/** The remote head a `git/ref/heads/<branch>` read reports, when any. */
@@ -559,12 +631,34 @@ function harness(opts: {
 		}
 		return { code: 0, stdout: "", stderr: "" }
 	}
+	// A successful exec means the ecosystem's own tool rewrote the lockfile. The
+	// fake models that, because the post-update verification reads the lockfile
+	// back and refuses to open a PR that still resolves a vulnerable copy.
+	let execRan = false
+	const patchedLock = (path: string): string | null => {
+		const first = opts.alerts?.[0]
+		const name = first?.dependency?.package?.name
+		const version = first?.security_vulnerability?.first_patched_version?.identifier
+		if (typeof name !== "string" || typeof version !== "string") return null
+		if (path.endsWith("/package-lock.json"))
+			return JSON.stringify({ packages: { [`node_modules/${name}`]: { version } } })
+		if (path.endsWith("/pnpm-lock.yaml"))
+			return `lockfileVersion: '9.0'\nsnapshots:\n  ${name}@${version}:\n`
+		if (path.endsWith("/Cargo.lock"))
+			return `[[package]]\nname = "${name}"\nversion = "${version}"\n`
+		if (path.endsWith("/composer.lock")) return JSON.stringify({ packages: [{ name, version }] })
+		return null
+	}
 	const exec = (args: string[]): GitResult => {
 		execCalls.push(args)
 		const queued = opts.execResults
-		if (queued?.length)
-			return queued.length > 1 ? (queued.shift() as GitResult) : (queued[0] as GitResult)
-		return { code: 0, stdout: "", stderr: "" }
+		const result = queued?.length
+			? queued.length > 1
+				? (queued.shift() as GitResult)
+				: (queued[0] as GitResult)
+			: { code: 0, stdout: "", stderr: "" }
+		if (result.code === 0 && !opts.keepVulnerableLock) execRan = true
+		return result
 	}
 	const lines: string[] = []
 	const deps = {
@@ -577,6 +671,11 @@ function harness(opts: {
 			remove: (p: string) => workdirs.delete(p),
 			writeFile: (p: string, c: string) => workdirs.set(p, c),
 			readFile: (p: string) => {
+				// After a successful update the lockfile is whatever the tool wrote.
+				if (execRan) {
+					const rewritten = patchedLock(p)
+					if (rewritten !== null) return rewritten
+				}
 				const v = workdirs.get(p)
 				if (v !== undefined) return v
 				// Defaults for the npm flows, which now read the repo's own manifest
@@ -632,10 +731,14 @@ describe("runVulnAutofix", () => {
 
 		expect(summary.opened).toBe(0)
 		expect(summary.failed).toBe(0)
-		expect(summary.manual).toBe(1)
 		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
 		expect(h.requests.some((r) => r.method === "POST")).toBe(false)
-		expect(h.lines.join("\n")).toContain("resolved nothing")
+		// The forced retry also changed nothing, and the lockfile the fake serves
+		// resolves lodash at the patched version — so there is nothing vulnerable
+		// left and the advisory is stale. Still no PR; the reason is just named
+		// honestly instead of being handed to a person.
+		expect(summary.alreadyPatched).toBe(1)
+		expect(summary.manual).toBe(0)
 	})
 
 	it("a branch left by a failed PR create is replaced under a lease, not wedged", async () => {
@@ -667,8 +770,12 @@ describe("runVulnAutofix", () => {
 		})
 		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
 
+		// Still NO PR — the exact-path check is what stops the half-fix — and the
+		// classification is now honest about why: the root lockfile the fake serves
+		// resolves lodash at the patched version, so nothing vulnerable is left
+		// there and the advisory is stale rather than awaiting a person.
 		expect(summary.opened).toBe(0)
-		expect(summary.manual).toBe(1)
+		expect(summary.alreadyPatched).toBe(1)
 		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
 	})
 
@@ -1071,11 +1178,58 @@ describe("runVulnAutofix", () => {
 			"--ignore-scripts",
 		])
 		expect(h.execCalls[1]).toEqual(["pnpm", "install", "--lockfile-only", "--ignore-scripts"])
-		const pkgJson = [...h.files.keys()].find((k) => k.endsWith("/package.json"))
-		const manifest = JSON.parse(h.files.get(pkgJson as string) as string) as {
-			pnpm?: { overrides?: Record<string, string> }
+		const workspace = [...h.files.keys()].find((k) => k.endsWith("/pnpm-workspace.yaml"))
+		expect(workspace, "no pnpm-workspace.yaml was written").toBeDefined()
+		expect(h.files.get(workspace as string)).toBe("overrides:\n  esbuild: 0.25.0\n")
+	})
+
+	it("does NOT open a PR when the update leaves a vulnerable copy behind", async () => {
+		// MEASURED on zeavis-edu: `cargo update -p gtk` (the escalation for
+		// "glib is pinned by gtk") moves the lockfile and leaves glib at 0.18.5,
+		// because gtk 0.18 pins the whole 0.18 line. A PR for that would attach a
+		// "fix" to an advisory it does not fix.
+		const plan: VulnFixPlan = {
+			repo: "o/r",
+			ecosystem: "rust",
+			manifestPath: "Cargo.lock",
+			directory: "/",
+			packageName: "glib",
+			patchedVersion: "0.20.0",
+			severity: "high",
+			alertNumbers: [1],
+			ghsaIds: ["GHSA-aaaa-bbbb-cccc"],
+			transitive: true,
+			vulnerableRange: "<0.20.0",
 		}
-		expect(manifest.pnpm?.overrides).toEqual({ esbuild: "0.25.0" })
+		const workdir = `/tmp/pr-queue-work/_vuln_o_r_${vulnBranchName(plan).replace("fix/vuln-", "")}`
+		const h = harness({
+			alerts: [
+				alert({
+					number: 1,
+					dependency: {
+						package: { ecosystem: "rust", name: "glib" },
+						manifest_path: "Cargo.lock",
+					},
+					security_vulnerability: {
+						package: { ecosystem: "rust", name: "glib" },
+						severity: "high",
+						vulnerable_version_range: "<0.20.0",
+						first_patched_version: { identifier: "0.20.0" },
+					},
+				}),
+			],
+			// The tool ran and rewrote the lockfile — with glib still on 0.18.5.
+			keepVulnerableLock: true,
+			files: {
+				[`${workdir}/Cargo.lock`]: '[[package]]\nname = "glib"\nversion = "0.18.5"\n',
+			},
+			diff: " M Cargo.lock\n",
+		})
+		const summary = await runVulnAutofix(h.deps, { token: "tok", repos: ["o/r"] })
+
+		expect(summary.opened).toBe(0)
+		expect(h.gitCalls.some((c) => c[0] === "push")).toBe(false)
+		expect(h.lines.join("\n")).toContain("still resolves 0.18.5")
 	})
 
 	it("a lockfile that resolves nothing vulnerable is STALE, not manual", async () => {
@@ -1176,13 +1330,10 @@ describe("runVulnAutofix", () => {
 		expect(summary.manual).toBe(0)
 		expect(summary.failed).toBe(0)
 
-		// The entry pnpm itself asks for, in the field pnpm reads.
-		const pkgJson = [...h.files.keys()].find((k) => k.endsWith("/package.json"))
-		expect(pkgJson, "no package.json was written").toBeDefined()
-		const manifest = JSON.parse(h.files.get(pkgJson as string) as string) as {
-			pnpm?: { overrides?: Record<string, string> }
-		}
-		expect(manifest.pnpm?.overrides).toEqual({ minimatch: "11.0.1" })
+		// The entry pnpm 12 actually reads: `overrides` in pnpm-workspace.yaml.
+		const workspace = [...h.files.keys()].find((k) => k.endsWith("/pnpm-workspace.yaml"))
+		expect(workspace, "no pnpm-workspace.yaml was written").toBeDefined()
+		expect(h.files.get(workspace as string)).toBe("overrides:\n  minimatch: 11.0.1\n")
 
 		// The retry is a lockfile-only install with NO package argument: naming the
 		// package is the thing pnpm refuses.
