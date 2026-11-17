@@ -1,3 +1,10 @@
+## [1.13.6](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.5...v1.13.6) (2026-11-17)
+
+
+### Bug Fixes
+
+* **disk:** a non-zero du exit discarded the report it had already produced ([7acd1eb](https://github.com/MythEclipse/pr-agent-server/commit/7acd1ebfde6c17aa656b00661dd866573053dd18))
+
 ## [1.13.5](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.4...v1.13.5) (2026-11-17)
 
 
