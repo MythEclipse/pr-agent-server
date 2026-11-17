@@ -416,7 +416,7 @@ describe("group 1 · upstreamStatus", () => {
 
 describe("group 2 · runUpstreamSync gating", () => {
 	const routes = (tip: string) => (_method: string, path: string) => {
-		if (path === "/app/installations") return { data: [{ id: 1 }] }
+		if (path.startsWith("/app/installations")) return { data: [{ id: 1 }] }
 		if (path.startsWith("/installation/repositories")) {
 			return {
 				data: {
@@ -516,7 +516,7 @@ describe("group 2 · runUpstreamSync gating", () => {
 		const state: SyncState = {}
 		const forks = ["o/fresh", "o/stale", "o/middle"]
 		const api = fakeApi((_m, path) => {
-			if (path === "/app/installations") return { data: [{ id: 1 }] }
+			if (path.startsWith("/app/installations")) return { data: [{ id: 1 }] }
 			if (path.startsWith("/installation/repositories")) {
 				return { data: { repositories: forks.map((f) => ({ full_name: f, fork: true })) } }
 			}
@@ -555,7 +555,7 @@ describe("group 2 · runUpstreamSync gating", () => {
 		const state: SyncState = {}
 		const forks = ["o/a", "o/b", "o/c"]
 		const api = fakeApi((_m, path) => {
-			if (path === "/app/installations") return { data: [{ id: 1 }] }
+			if (path.startsWith("/app/installations")) return { data: [{ id: 1 }] }
 			if (path.startsWith("/installation/repositories")) {
 				return { data: { repositories: forks.map((f) => ({ full_name: f, fork: true })) } }
 			}
@@ -1287,7 +1287,7 @@ describe("group 9 · verifyPendingSyncs", () => {
 describe("group 10 · listForkRepos", () => {
 	test("returns only forks whose parent resolves", async () => {
 		const { api } = fakeApi((_m, path) => {
-			if (path === "/app/installations") return { data: [{ id: 1 }] }
+			if (path.startsWith("/app/installations")) return { data: [{ id: 1 }] }
 			if (path.startsWith("/installation/repositories")) {
 				return {
 					data: {
@@ -1312,7 +1312,7 @@ describe("group 10 · listForkRepos", () => {
 
 	test("a fork with no default_branch reports main", async () => {
 		const { api } = fakeApi((_m, path) => {
-			if (path === "/app/installations") return { data: [{ id: 1 }] }
+			if (path.startsWith("/app/installations")) return { data: [{ id: 1 }] }
 			if (path.startsWith("/installation/repositories")) {
 				return { data: { repositories: [{ full_name: "o/f", fork: true }] } }
 			}

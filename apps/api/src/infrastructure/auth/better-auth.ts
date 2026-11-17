@@ -27,6 +27,8 @@ export interface BuildAuthOptions {
 	 * (see `parseAllowlist`). Empty means nobody may sign in.
 	 */
 	allowedEmails?: readonly string[]
+	/** Trusted local provisioning only. Never enable on the HTTP server. */
+	allowPasswordSignUp?: boolean
 	/** Omit both and the Google provider is not registered at all. */
 	google?: {
 		clientId: string
@@ -50,19 +52,8 @@ export function buildAuth(opts: BuildAuthOptions) {
 				verification: authSchema.verification,
 			},
 		}),
-		/**
-		 * The allowlist, enforced where an account is CREATED.
-		 *
-		 * A Google sign-in from an address that is not on the list must not get as
-		 * far as a user row: no row means no session, no dashboard, and nothing to
-		 * clean up afterwards. Throwing `APIError` (not returning false) is what
-		 * produces a real 403 the login page can display, instead of a silent no-op
-		 * that leaves the browser on a blank redirect.
-		 *
-		 * This covers BOTH surfaces on purpose. Email+password registration is not
-		 * exposed by the UI, but the endpoint exists, and an allowlist that only
-		 * guarded OAuth would leave that door open.
-		 */
+		// Public password registration is disabled. Google-created accounts must
+		// carry a verified address before the allowlist can grant operator access.
 		databaseHooks: {
 			user: {
 				create: {
@@ -77,21 +68,9 @@ export function buildAuth(opts: BuildAuthOptions) {
 							)
 							throw new APIError("FORBIDDEN", { message: NOT_ALLOWED_MESSAGE })
 						}
-						// EVERY account that can be created here is admin, because the
-						// allowlist IS the operator list — and the dashboard is admin-only
-						// (`review.list`, `review.get`, `queue.stats` all use adminProcedure).
-						//
-						// Without this the flow is broken in the same shape as the allowlist
-						// lockout: Google sign-in succeeds, a row is created with the schema
-						// default `role=user`, and then every page answers 403. The user is
-						// signed in and sees an empty dashboard, and nothing says why.
-						//
-						// The promotion is only on CREATE, so a later demotion (UPDATE the
-						// role) sticks — adding a read-only viewer later does not mean
-						// fighting this hook on every sign-in.
-						//
-						// `input: false` on the field still holds: this is server-side, and a
-						// registration body cannot ask for a role.
+						if (!opts.allowPasswordSignUp && user.emailVerified !== true) {
+							throw new APIError("FORBIDDEN", { message: NOT_ALLOWED_MESSAGE })
+						}
 						return { data: { ...user, role: "admin" } }
 					},
 				},
@@ -101,12 +80,13 @@ export function buildAuth(opts: BuildAuthOptions) {
 			additionalFields: {
 				// Read by the single-tenant authorization axis. Defaults to
 				// "user", and input:false keeps a registration form from
-				// choosing its own role — only the seed script grants admin.
+				// choosing its own role. The hook grants it after identity checks.
 				role: { type: "string", defaultValue: "user", input: false },
 			},
 		},
 		emailAndPassword: {
 			enabled: true,
+			disableSignUp: !opts.allowPasswordSignUp,
 		},
 		// Registered only when both halves exist. A provider with an empty client
 		// secret would fail at the token exchange with a confusing 401 from Google.

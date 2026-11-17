@@ -6,8 +6,9 @@
 //
 // Both halves matter:
 //   1. a non-allowlisted address must not get a user row;
-//   2. an ALLOWLISTED one must still be able to sign up (otherwise "locked down"
-//      just means "locked out", and the fix would silently break login).
+//   2. trusted local provisioning can create an allowlisted operator.
+// Public password signup and verified OAuth identities are covered separately
+// by auth-provisioning.test.ts.
 
 import { describe, expect, test } from "vitest"
 import { isEmailAllowed, parseAllowlist } from "../src/infrastructure/auth/allowlist.ts"
@@ -29,6 +30,8 @@ const makeAuth = (db: ITestDb["db"], allowedEmails: string[]) =>
 		baseURL: BASE,
 		trustedOrigins: [BASE],
 		allowedEmails,
+		// This instance represents trusted local provisioning, never the HTTP server.
+		allowPasswordSignUp: true,
 	})
 
 /**
@@ -55,9 +58,8 @@ describe("allowlist enforcement in better-auth", () => {
 		try {
 			const auth = makeAuth(store.db, parseAllowlist("superaseph@gmail.com"))
 
-			// The password path is the reachable one in a unit test; OAuth would need
-			// a full Google redirect. Both funnel through the SAME create hook, which
-			// is the thing under test.
+			// This trusted provisioning instance exercises the same allowlist hook
+			// as OAuth; the production instance disables password registration.
 			await expect(
 				auth.api.signUpEmail({
 					body: { email: "intruder@example.com", password: "a-long-enough-password", name: "X" },

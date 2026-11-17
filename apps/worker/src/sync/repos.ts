@@ -21,7 +21,7 @@
  *    and `behind_by` is the fork's own divergence, which is never discarded.
  *    The docstring records the `git rev-list --count` cross-check.
  */
-import type { GhAppClient } from "../pr/scan.ts"
+import { type GhAppClient, listInstallationRepos, listInstallations } from "../pr/scan.ts"
 import { SYNC_PR_PREFIX } from "./merge.ts"
 
 /**
@@ -63,18 +63,14 @@ const str = (value: unknown): string => (typeof value === "string" ? value : "")
  */
 export async function listForkRepos(api: GhAppClient): Promise<ForkRepo[]> {
 	const out: ForkRepo[] = []
-	const { data: installs } = await api.request("GET", "/app/installations")
-	if (!Array.isArray(installs)) return out // Python line 1075
+	const installs = await listInstallations(api)
 
 	for (const inst of installs) {
 		const id = (inst as { id?: number })?.id
 		if (typeof id !== "number") continue // guard: `inst["id"]` would throw
 		const token = await api.installationToken(id)
 		if (!token) continue // Python line 1077
-		const { data: repos } = await api.request("GET", "/installation/repositories?per_page=100", {
-			token,
-		})
-		const list = Array.isArray(asObject(repos)?.repositories) ? (repos as any).repositories : []
+		const list = await listInstallationRepos(api, token)
 		for (const r of list) {
 			const full = str(r?.full_name)
 			if (!full || !r?.fork) continue // Python lines 1082-1083
@@ -169,16 +165,25 @@ export async function syncOpenPr(
 	fork: string,
 	baseBranch: string,
 ): Promise<number> {
-	const { data: prs } = await api.request("GET", `/repos/${fork}/pulls?state=open&per_page=50`, {
-		token,
-	})
-	if (!Array.isArray(prs)) return 0 // Python line 1124
-	for (const pr of prs) {
-		const headRef = str(asObject(pr?.head)?.ref)
-		if (headRef.startsWith(SYNC_PR_PREFIX) && str(asObject(pr?.base)?.ref) === baseBranch) {
-			const n = Number((pr as any)?.number)
-			return Number.isFinite(n) ? n : 0
+	for (let page = 1; page <= 100; page++) {
+		const {
+			status,
+			data: prs,
+			link,
+		} = await api.request("GET", `/repos/${fork}/pulls?state=open&per_page=50&page=${page}`, {
+			token,
+		})
+		if (status !== 200 || !Array.isArray(prs)) {
+			throw new Error(`Cannot confirm existing sync PRs for ${fork} (HTTP ${status})`)
 		}
+		for (const pr of prs) {
+			const headRef = str(asObject(pr?.head)?.ref)
+			if (headRef.startsWith(SYNC_PR_PREFIX) && str(asObject(pr?.base)?.ref) === baseBranch) {
+				const n = Number(pr?.number)
+				if (Number.isFinite(n) && n > 0) return n
+			}
+		}
+		if (prs.length === 0 || (link ? !link.includes('rel="next"') : prs.length < 50)) return 0
 	}
-	return 0
+	throw new Error(`Existing sync PR list for ${fork} exceeded the pagination limit`)
 }

@@ -68,15 +68,15 @@ const PER_PAGE = 100
  * accumulated count reaches `total_count` (whichever comes first, so a server that
  * ignores `page` cannot loop forever).
  */
-async function listInstallationRepos(api: GhClient, token: string): Promise<any[]> {
+export async function listInstallationRepos(api: GhClient, token: string): Promise<any[]> {
 	const out: any[] = []
 	for (let page = 1; page <= 100; page++) {
-		const { data } = await api.request(
+		const { status, data, link } = await api.request(
 			"GET",
 			`/installation/repositories?per_page=${PER_PAGE}&page=${page}`,
 			{ token },
 		)
-		if (data === null || typeof data !== "object") break
+		if (status !== 200 || data === null || typeof data !== "object") break
 		const batch = Array.isArray((data as any).repositories) ? (data as any).repositories : []
 		if (!batch.length) break
 		out.push(...batch)
@@ -88,7 +88,7 @@ async function listInstallationRepos(api: GhClient, token: string): Promise<any[
 		// page-length heuristic when the body carries no count.
 		if (total > 0) {
 			if (out.length >= total) break
-		} else if (batch.length < PER_PAGE) break
+		} else if (link ? !link.includes('rel="next"') : batch.length < PER_PAGE) break
 	}
 	return out
 }
@@ -119,7 +119,7 @@ async function listOpenPrs(api: GhClient, token: string, fullName: string): Prom
 }
 
 /** Follow every installation page; Link takes precedence over page length. */
-async function listInstallations(api: GhAppClient): Promise<any[]> {
+export async function listInstallations(api: GhAppClient): Promise<any[]> {
 	const out: any[] = []
 	for (let page = 1; page <= 100; page++) {
 		const { status, data, link } = await api.request(

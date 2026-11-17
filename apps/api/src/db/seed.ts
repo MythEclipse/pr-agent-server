@@ -1,18 +1,16 @@
 // One-shot admin seed.
 //
 // The dashboard is behind better-auth and the role field is `input: false`, so
-// there is no signup path that could grant admin — this script is the only way
-// the first admin exists. Idempotent: re-running with the same email is a no-op.
+// public password signup is disabled. This script provisions the password admin.
+// Re-running with the same email is a no-op.
 //
 // Credentials come from the environment, never from a checked-in file:
 //   SEED_ADMIN_EMAIL     required
 //   SEED_ADMIN_PASSWORD  required, min 12 chars
 //   SEED_ADMIN_NAME      optional, defaults to "Admin"
 
-import { eq } from "drizzle-orm"
-import { buildAuth } from "../infrastructure/auth/better-auth.ts"
+import { seedAdmin } from "../infrastructure/auth/seed-admin.ts"
 import { loadEnv } from "../infrastructure/config/env.ts"
-import { user } from "../infrastructure/db/auth-schema.ts"
 import { createDb } from "../infrastructure/db/client.ts"
 
 async function main(): Promise<void> {
@@ -31,33 +29,18 @@ async function main(): Promise<void> {
 
 	const { db, close } = createDb(env.DATABASE_URL)
 	try {
-		const existing = await db
-			.select({ id: user.id })
-			.from(user)
-			.where(eq(user.email, email))
-			.limit(1)
-		if (existing[0]) {
-			console.log(`pr-agent-api seed: ${email} already exists — nothing to do`)
-			return
-		}
-
-		// better-auth hashes the password itself; writing the row directly would
-		// store a plaintext credential.
-		const auth = buildAuth({
+		const result = await seedAdmin({
 			db,
 			secret: env.BETTER_AUTH_SECRET,
 			baseURL: env.BETTER_AUTH_URL,
 			trustedOrigins: [env.WEB_ORIGIN],
+			email,
+			password,
+			name: process.env.SEED_ADMIN_NAME ?? "Admin",
 		})
-		await auth.api.signUpEmail({
-			body: { email, password, name: process.env.SEED_ADMIN_NAME ?? "Admin" },
-		})
-
-		// The signup above creates role="user" by default. Promote explicitly —
-		// this is the only place the admin role is ever granted.
-		await db.update(user).set({ role: "admin" }).where(eq(user.email, email))
-
-		console.log(`pr-agent-api seed: admin created for ${email}`)
+		console.log(
+			`pr-agent-api seed: ${email} ${result === "created" ? "admin created" : "already exists — nothing to do"}`,
+		)
 	} finally {
 		await close()
 	}

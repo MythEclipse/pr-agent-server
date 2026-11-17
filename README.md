@@ -206,6 +206,12 @@ Secrets required in GitHub Actions:
 - **API docs**: `GET /api/docs` for the oRPC surface, `/api/docs/spec` for the OpenAPI document
 - **Admin seed**: `pnpm db:seed` with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — creates the single admin the dashboard authenticates as
 
+Public password registration is disabled. Create password accounts with the local
+seed command, and include their addresses in `AUTH_ALLOWED_EMAILS` to permit
+dashboard access. Google may create an allowlisted operator account only when
+its email is verified. Re-running the seed preserves an existing account and
+password; it does not promote or reset that account.
+
 ## Legacy (Python/Nix — retired 2026-09-21)
 
 The original Python `pr_agent` server (FastAPI + Nix build, port 4002) is fully
