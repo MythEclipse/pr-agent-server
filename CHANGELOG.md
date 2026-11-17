@@ -1,3 +1,15 @@
+## [1.12.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.7...v1.12.8) (2026-11-17)
+
+
+### Bug Fixes
+
+* close merge-gate holes and truncated-read lies in the worker ([91366c3](https://github.com/MythEclipse/pr-agent-server/commit/91366c3f10c0d2d1e86c65eda87b6a1da1f7497a))
+* enforce post-fix review and CI gates and recover queue completion ([3bd01d2](https://github.com/MythEclipse/pr-agent-server/commit/3bd01d26a0e06b3255d02d34726b486268a64c05))
+* enhance CI checks and improve branch naming for vulnerability fixes ([84bb948](https://github.com/MythEclipse/pr-agent-server/commit/84bb948d9c624f2ee4e7a8052583b01973b2fcb3))
+* preserve sync verification and guard rollback with a head lease ([070aaa5](https://github.com/MythEclipse/pr-agent-server/commit/070aaa51d92232c40a4e9e58d13ba498050b0abc))
+* restrict password provisioning and paginate fork discovery ([93331ce](https://github.com/MythEclipse/pr-agent-server/commit/93331ced81958cd0c92730843ef1b89eb24bf168))
+* verify commit statuses and authenticate review notifications ([d8a8532](https://github.com/MythEclipse/pr-agent-server/commit/d8a853267452889ea780e0047b5aa9e2982f600c))
+
 ## [1.12.7](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.6...v1.12.7) (2026-11-16)
 
 
