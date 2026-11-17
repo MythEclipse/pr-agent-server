@@ -1,3 +1,10 @@
+## [1.13.4](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.3...v1.13.4) (2026-11-17)
+
+
+### Bug Fixes
+
+* **sync:** emit double-quoted CodeQL languages so the generated file passes lint ([5a9bc33](https://github.com/MythEclipse/pr-agent-server/commit/5a9bc3333a34f95bb2c85d9459d3b548544d9e3a))
+
 ## [1.13.3](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.2...v1.13.3) (2026-11-17)
 
 
