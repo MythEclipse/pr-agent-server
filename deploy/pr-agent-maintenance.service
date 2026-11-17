@@ -1,0 +1,63 @@
+# PR-Agent housekeeping — the pass that owns everything with no PR of its own.
+#
+# WHY THIS UNIT EXISTS. Four gaps were measured on this box, and none of them had
+# an owner:
+#
+#   DISK         `/` was 103G of 116G (90%) with 13G left. The worker clones a repo
+#                into /tmp/pr-queue-work for every unit of work and nothing pruned
+#                them. At 100% the failure is not "a review failed": the API cannot
+#                write its queue, the deploy cannot unpack a tarball, and the thing
+#                that would tell you is the thing that is down.
+#   SETTINGS     Vulnerability alerts and automated security fixes were enabled
+#                nightly, but secret scanning and push protection were never
+#                touched at all, and nothing compared the fleet against a desired
+#                state — so a setting turned OFF looked identical to one that never
+#                needed turning on.
+#   HYGIENE      Every plan pushes `fix/vuln-<pkg>-<ver>-<hash>`. A closed PR left
+#                its branch behind forever, and a superseded plan kept its PR open
+#                next to the newer one — two green PRs for one advisory is how the
+#                wrong one gets merged.
+#   TRIAGE       A fix PR with red CI sat there silently: no comment, no retry, and
+#                the next run saw "already open as PR #N" and moved on.
+#
+# NOT HERE: retrying failed queue jobs. Those rows live in the database the API
+# owns, and its queue pump now sweeps them at boot and every half hour — a second
+# writer of that state from a CLI would be worse than none.
+#
+# EVERY STEP IS IDEMPOTENT, which is what makes a timer safe: the settings converge,
+# the hygiene pass only touches `fix/vuln-` branches, and the triage comment is
+# deduplicated by head SHA.
+[Unit]
+Description=PR-Agent housekeeping (disk guard, security settings, branch hygiene, CI triage)
+Documentation=file:///opt/pr-agent-worker/run-worker.sh
+After=network-online.target
+Wants=network-online.target
+OnFailure=pr-agent-alert@%N.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pr-agent-worker
+User=pr-agent
+Group=pr-agent
+
+Environment=HOME=/var/lib/pr-agent-server
+Environment=PR_AGENT_APP_DIR=/var/lib/pr-agent-server
+Environment=PR_AGENT_KEY_PATH=/var/lib/pr-agent-server/private-key.pem
+Environment=PR_AGENT_WEBHOOK_URL=https://pr-agent.asepharyana.my.id/api/v1/github_webhooks
+# The toolchains the hygiene/triage steps shell out to (`pnpm store prune`,
+# `cargo cache clean`) — same paths the fixer uses, so the cache prune finds them.
+Environment=PATH=/opt/rust/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=RUSTUP_HOME=/opt/rust/rustup
+Environment=CARGO_HOME=/var/lib/pr-agent-cargo
+
+# 30 minutes: the alert/settings sweep is ~50 API calls per repo, and the triage
+# step reads check runs per PR. Nothing here clones a repo.
+TimeoutStartSec=1800
+
+Nice=10
+NoNewPrivileges=true
+# The lock this takes lives in /tmp, and the queue worker's does too — with
+# PrivateTmp=true the two would each hold a lock nobody else can see.
+PrivateTmp=false
+
+ExecStart=/usr/local/bin/bws-exec pr-agent /opt/pr-agent-worker/run-worker.sh --maintain

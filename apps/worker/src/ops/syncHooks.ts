@@ -111,6 +111,8 @@ export const GMW_REPO = "asepharyana/GMW"
 const DEPENDABOT_FILE = "dependabot.yml"
 const GMW_DEPENDABOT_FILE = "dependabot-gmw.yml"
 const AUTO_MERGE_FILE = "dependabot-auto-merge.yml"
+/** The code-scanning workflow, templated like the Dependabot config. */
+const CODEQL_FILE = "codeql.yml"
 const GITHUB_DIR = ".github"
 /**
  * `.github/workflows`, NOT `.github`. GitHub executes workflow files from this
@@ -315,6 +317,23 @@ function templateBody(file: string): string {
 	const body = readFileSync(join(TEMPLATE_DIR, file), "utf8")
 	templateCache.set(file, body)
 	return body
+}
+
+/**
+ * Which CodeQL languages a repo needs, from the file names at its root.
+ *
+ * NAME-BASED, not content-based: one `GET /contents/` per repo is the cheapest
+ * honest signal, and a repo with `package.json` is a JS/TS repo whatever else it
+ * holds. Rust and PHP are absent on purpose — CodeQL has no extractor for them, so
+ * a workflow would fail on every push and turn the fleet's CI red for nothing.
+ */
+export function codeqlLanguagesFor(rootNames: readonly string[]): string[] {
+	const langs: string[] = []
+	if (rootNames.includes("package.json")) langs.push("javascript-typescript")
+	if (rootNames.includes("pyproject.toml") || rootNames.includes("requirements.txt"))
+		langs.push("python")
+	if (rootNames.includes("go.mod")) langs.push("go")
+	return langs
 }
 
 /** The Dependabot config a repo gets: GMW has its own, everything else shares. */
@@ -752,6 +771,27 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 			// The workflow's escape hatch is a label, so the label has to exist on
 			// every repo or the gate is documented and unusable.
 			record(await syncOptOutLabel(api, repo, token, dry))
+
+			// CODE SCANNING. The Dependabot lane only reacts to advisories in
+			// DEPENDENCIES; nothing scanned first-party code, so a tainted-sink bug in
+			// the app itself had no path to a report at all. The language list comes
+			// from what the repo actually contains — a repo with neither JS/TS nor
+			// Python nor Go gets no workflow, because a CodeQL job with no supported
+			// language fails on every push and reddens CI for nothing.
+			const root = await api.request("GET", `/repos/${repo}/contents/`, { token })
+			const rootNames = Array.isArray(root.data)
+				? (root.data as Record<string, unknown>[]).map((entry) => str(entry.name))
+				: []
+			if (root.status === 200) {
+				const languages = codeqlLanguagesFor(rootNames)
+				if (languages.length > 0) {
+					const body = templateBody(CODEQL_FILE).replace(
+						"__LANGUAGES__",
+						languages.map((l) => `'${l}'`).join(", "),
+					)
+					record(await syncFile(api, repo, `${WORKFLOWS_DIR}/${CODEQL_FILE}`, body, token, dry))
+				}
+			}
 			// And the copy at the old, non-executable path is retired. Without
 			// this the fleet keeps an inert duplicate forever, because a
 			// conditional write can only create or update — it never cleans up a

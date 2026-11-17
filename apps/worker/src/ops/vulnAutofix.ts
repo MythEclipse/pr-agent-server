@@ -632,6 +632,41 @@ export function lockedVersionsOf(
 }
 
 /**
+ * Close the alerts whose advisory no longer describes the repo.
+ *
+ * WHY DISMISS AT ALL. `alreadyPatched` means the lockfile resolves nothing
+ * vulnerable, yet GitHub still lists the alert — because Dependabot's view is
+ * updated on its own schedule, and for a manifest it never re-read the alert can
+ * outlive the problem by days. Leaving it open is not neutral: it is the reason a
+ * dashboard shows a number that nobody can action, and the reason the same plan is
+ * re-examined every run.
+ *
+ * `dismissed_reason: "inaccurate"` with the lockfile evidence in the comment is
+ * the honest one — the advisory is not being tolerated, it is being contradicted by
+ * measurement. If the App lacks `dependabot_alerts: write` the PATCH answers 403
+ * and this reports that instead of pretending it worked.
+ */
+export async function dismissStaleAlerts(
+	api: GhClient,
+	repo: string,
+	token: string,
+	alertNumbers: readonly number[],
+	comment: string,
+): Promise<{ dismissed: number; blocked: number }> {
+	let dismissed = 0
+	let blocked = 0
+	for (const number of alertNumbers) {
+		const res = await api.request("PATCH", `/repos/${repo}/dependabot/alerts/${number}`, {
+			token,
+			json: { state: "dismissed", dismissed_reason: "inaccurate", dismissed_comment: comment },
+		})
+		if (res.status === 200) dismissed += 1
+		else blocked += 1
+	}
+	return { dismissed, blocked }
+}
+
+/**
  * The packages a composer conflict names as the reason it cannot proceed.
  *
  * MEASURED on AETHRA-Organizer-Website: `composer update phpunit/phpunit -W`
@@ -832,6 +867,14 @@ export type VulnAutofixDeps = {
 	fetchGhToken: () => string
 	/** Preview only: report the plan and write nothing. */
 	dry: boolean
+	/**
+	 * Close alerts that measurement proved stale (default on).
+	 *
+	 * Off only for a caller that must not touch alert state at all; the dismissal
+	 * is guarded by the lockfile evidence that produced `alreadyPatched`, so the
+	 * default is safe.
+	 */
+	dismissStale?: boolean
 	report: (line: string) => void
 }
 
@@ -1623,12 +1666,30 @@ export async function runVulnAutofix(
 				)
 			} else if (res.alreadyPatched) {
 				// Not a failure and not a decision: the lockfile no longer resolves
-				// anything vulnerable, so the alert is stale. Reported as its own line
-				// so the operator can dismiss it (or ignore it) instead of reading it
-				// as work the tool refused to do.
+				// anything vulnerable, so the alert is stale.
 				summary.alreadyPatched += 1
+				// AND CLOSE IT, when the App is allowed to. Otherwise the same stale
+				// row is re-examined on every run and keeps the dashboard's number up
+				// for a problem the measurement already disproved.
+				let note = ""
+				if (!deps.dry && deps.dismissStale !== false && plan.alertNumbers.length > 0) {
+					const dismissal = await dismissStaleAlerts(
+						deps.api,
+						repo,
+						opts.token,
+						plan.alertNumbers,
+						`pr-agent-server: ${plan.manifestPath} resolves no version below ${plan.patchedVersion} ` +
+							`for ${plan.packageName} (checked after running the package manager), so this advisory ` +
+							`no longer applies. Verified automatically, not by assumption.`,
+					)
+					if (dismissal.dismissed > 0)
+						note = ` — ${dismissal.dismissed} alert(s) dismissed as inaccurate`
+					if (dismissal.blocked > 0) {
+						note += ` — ${dismissal.blocked} could not be dismissed (the App needs \`dependabot_alerts: write\`)`
+					}
+				}
 				say(
-					`   ✔️ ${repo}: ${plan.packageName} ${plan.patchedVersion} — nothing vulnerable left, advisory stale (${plan.alertNumbers.length} alert(s))`,
+					`   ✔️ ${repo}: ${plan.packageName} ${plan.patchedVersion} — nothing vulnerable left, advisory stale (${plan.alertNumbers.length} alert(s))${note}`,
 				)
 			} else if (res.manual) {
 				// NOT a failure: the tooling answered "a human has to decide". Counting

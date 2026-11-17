@@ -28,6 +28,19 @@ export interface DbReviewQueueOptions {
 }
 
 /**
+ * How many attempts a job gets before it is left failed for good.
+ *
+ * THREE, because the failures worth retrying are transient (a 502, a rate limit,
+ * a clone timeout) and three is enough to ride out a bad minute without turning a
+ * permanently broken PR into an endless loop of model calls.
+ */
+const RETRY_MAX_ATTEMPTS = 3
+/** Only recent failures are retried: an old one would comment on a stale head. */
+const RETRY_WINDOW_MS = 24 * 60 * 60 * 1000
+/** How often the failed-job sweep runs while the process is up. */
+const RETRY_EVERY_MS = 30 * 60 * 1000
+
+/**
  * Persistent review queue. `claimDue` is SKIP LOCKED under the hood, so two
  * API processes can share one database without double-reviewing a PR — which
  * would otherwise post a second GitHub comment for the same head SHA.
@@ -140,6 +153,32 @@ export function makeDbReviewQueue(opts: DbReviewQueueOptions): IDbReviewQueue {
 			if (requeued > 0) {
 				log(`[queue] requeued ${requeued} job(s) interrupted by a restart`)
 			}
+			// AND THE FAILURES. A `failed` row was terminal: `enqueue` re-arms one
+			// only when the SAME PR gets another webhook, and a PR that failed and
+			// then went quiet never gets one — measured on the live database, 8 rows
+			// sat in `failed` with nothing that would ever look at them again. Most
+			// were transient (a 502 from the gateway, a rate limit, a clone timeout),
+			// which is the class a retry fixes and a person does not.
+			//
+			// At boot AND every half hour: boot alone would leave a failure that
+			// happens right after a deploy sitting until the next one, and this is a
+			// single indexed UPDATE against a table with hundreds of rows.
+			const retryFailed = async (): Promise<void> => {
+				try {
+					const again = await store.requeueFailed({
+						maxAttempts: RETRY_MAX_ATTEMPTS,
+						withinMs: RETRY_WINDOW_MS,
+					})
+					if (again > 0) log(`[queue] requeued ${again} failed job(s) for another attempt`)
+				} catch (err) {
+					log(`[queue] failed-job requeue skipped: ${String(err)}`)
+				}
+			}
+			await retryFailed()
+			const timer = setInterval(() => void retryFailed(), RETRY_EVERY_MS)
+			// `unref` so a test (or a short-lived process) is not held open by a
+			// housekeeping timer that has nothing to do.
+			timer.unref?.()
 			void loop()
 		},
 		/**

@@ -1,4 +1,5 @@
 import { acquireWithWait, LOCK_FILE } from "../lock.ts"
+import { guardDisk, nodeDiskDeps } from "../ops/diskGuard.ts"
 import { listAllOwnedRepos } from "../ops/repoList.ts"
 import { dependabotTemplateBody, runSyncHooks } from "../ops/syncHooks.ts"
 import { dependabotUrl, runVulnAutofix } from "../ops/vulnAutofix.ts"
@@ -64,6 +65,26 @@ export async function fixVulns(argv: string[], context: WorkerCliContext): Promi
 	setReleaseHeld(() => lock.release())
 	try {
 		const deps = buildDeps({ dry, report: new Report() })
+		// THE DISK, BEFORE THE CLONES. Each plan clones a repo; a full disk turns
+		// every one of them into a failed plan whose error is `ENOSPC` deep inside
+		// git, and the run reports 13 failures that all describe the same cause.
+		// Measured on the box: 90% used with nothing pruning the workdirs.
+		const disk = guardDisk(
+			nodeDiskDeps((argv2) => deps.exec(argv2, undefined, 600), console.log),
+			{
+				base: process.env.PR_AGENT_WORK_DIR || "/tmp/pr-queue-work",
+				...(dry ? { reapAtPct: 101 } : {}),
+			},
+		)
+		if (disk.removed > 0 || disk.pruned.length > 0) {
+			console.log(
+				`vuln-fix: disk ${disk.usedPctBefore}% → ${disk.usedPctAfter}% (${disk.removed} workdir(s) reaped)`,
+			)
+		}
+		if (disk.refuse && !dry) {
+			console.error("vuln-fix: refusing to start — disk is too full for another clone")
+			return 1
+		}
 		const res = await runSyncHooks({
 			api: deps.api,
 			ghToken: deps.fetchGhToken(),

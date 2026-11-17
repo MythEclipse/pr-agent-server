@@ -209,10 +209,22 @@ and it only runs on push to `main` (or an explicit dispatch on `main`).
 - **Timers on the box**: `pr-agent-worker.timer` (every 5 min, PR queue loop),
   `pr-agent-sync-hooks.timer` (daily 03:17, Dependabot/webhook config sync),
   `pr-agent-vuln-fix.timer` (04:23 and 16:23, `--fix-vulns`: derives the
-  Dependabot lanes **and** bumps the vulnerable dependency, opening the PR).
+  Dependabot lanes **and** bumps the vulnerable dependency, opening the PR),
+  `pr-agent-maintenance.timer` (00/06/12/18:47, `--maintain`: disk guard,
+  security-settings enforcement, `fix/vuln-` branch hygiene, CI triage).
   The vuln pass is the only thing that moves a version, so it is scheduled
   rather than left to be run by hand — see the unit's own comment for the
   measurement that made that necessary.
+- **Failure alerting**: every unit carries `OnFailure=pr-agent-alert@%N.service`,
+  which runs `/usr/local/bin/pr-agent-alert.sh` and POSTs the unit's last journal
+  lines to `PR_AGENT_ALERT_URL` from `/etc/pr-agent/alert.env` (root, 0600). With
+  no URL configured it writes to stderr instead of failing. Set
+  `PR_AGENT_HEALTHCHECK_URL` in the same file for a dead-man switch: the absence
+  of a ping then means the timer stopped firing at all, which `OnFailure=` cannot
+  see.
+- **Failed queue jobs** are retried automatically: the API's queue pump sweeps
+  `failed` rows at boot and every 30 minutes, up to 3 attempts and only within
+  24 hours (`db-review-queue.ts`). A job that keeps failing stops being requeued.
 - **Health watchdog**: cron `pr-agent-health-watchdog` (every 10 min) → `~/.hermes/scripts/pr-agent-health-check.sh` → curl `http://127.0.0.1:4023/health`
 - **Secrets**: systemd `ExecStart=/usr/local/bin/bws-exec pr-agent env PORT=4023 /opt/node/bin/node /opt/pr-agent-server/dist/main.js`
 - **Prometheus**: `GET /api/metrics` → `pr_agent_requests_total`, `pr_agent_model_failures`.

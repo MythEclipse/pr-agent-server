@@ -288,6 +288,12 @@ jobs:
           cp deploy/pr-agent-sync-hooks.timer     /tmp/pkg-units/
           cp deploy/pr-agent-vuln-fix.service     /tmp/pkg-units/
           cp deploy/pr-agent-vuln-fix.timer       /tmp/pkg-units/
+          cp deploy/pr-agent-maintenance.service  /tmp/pkg-units/
+          cp deploy/pr-agent-maintenance.timer    /tmp/pkg-units/
+          # The failure notifier: a template unit plus the script it runs. Neither
+          # is scheduled — they exist so a failed run is not silent.
+          cp deploy/pr-agent-alert@.service       /tmp/pkg-units/
+          cp deploy/pr-agent-alert.sh             /tmp/pkg-units/
           ls -l /tmp/pkg-units/
 
       - name: Package the worker
@@ -516,15 +522,24 @@ jobs:
             tar -xzf /tmp/pkg-units.tar.gz -C /tmp/pkg-units.new
             for u in pr-agent-worker.service pr-agent-worker.timer \
                      pr-agent-sync-hooks.service pr-agent-sync-hooks.timer \
-                     pr-agent-vuln-fix.service pr-agent-vuln-fix.timer; do
+                     pr-agent-vuln-fix.service pr-agent-vuln-fix.timer \
+                     pr-agent-maintenance.service pr-agent-maintenance.timer \
+                     'pr-agent-alert@.service'; do
               if [ -f "/tmp/pkg-units.new/$u" ]; then
                 sudo -n install -m 644 "/tmp/pkg-units.new/$u" "/etc/systemd/system/$u"
                 echo "installed $u"
               fi
             done
+            # The notifier script is a file on PATH, not a unit: installed
+            # separately, executable, and owned by root because it reads the
+            # journal of every pr-agent unit.
+            if [ -f /tmp/pkg-units.new/pr-agent-alert.sh ]; then
+              sudo -n install -m 755 /tmp/pkg-units.new/pr-agent-alert.sh /usr/local/bin/pr-agent-alert.sh
+              echo "installed /usr/local/bin/pr-agent-alert.sh"
+            fi
             sudo -n systemctl daemon-reload
             sudo -n systemctl enable pr-agent-worker.timer pr-agent-sync-hooks.timer \
-              pr-agent-vuln-fix.timer
+              pr-agent-vuln-fix.timer pr-agent-maintenance.timer
             rm -rf /tmp/pkg-units.new /tmp/pkg-units.tar.gz
           else
             echo "::warning::no /tmp/pkg-units.tar.gz; the worker units were NOT updated on this box"
@@ -556,6 +571,7 @@ jobs:
           # and never starts one, which is what we want here — a deploy must not
           # begin cloning repos and opening PRs as a side effect.
           sudo -n systemctl restart pr-agent-vuln-fix.timer
+          sudo -n systemctl restart pr-agent-maintenance.timer
           REMOTE
 
       # Same poll the old workflow used, on the same port: the health watchdog

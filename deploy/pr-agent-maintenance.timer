@@ -1,0 +1,24 @@
+# Four times a day, at 47 past, for the same reason the vuln fixer is offset: the
+# sync-hooks run owns 03:17 and the fixer owns 04:23/16:23, and this pass reads and
+# writes the same repos. The lock protects the state; the schedule keeps the runs
+# from queueing behind each other for no reason.
+#
+# SIX-HOURLY RATHER THAN NIGHTLY because of the triage step: a fix PR that goes red
+# at 09:00 should not wait until 03:47 the next morning to be looked at. The rest
+# of the pass is read-mostly (a `statfs`, four settings reads per repo, two PR
+# listings), so the extra runs cost almost nothing.
+[Unit]
+Description=Run PR-Agent housekeeping four times a day
+Documentation=file:///opt/pr-agent-worker/run-worker.sh
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:47:00
+# A laptop-style box that was off at 00:47 should still converge when it comes
+# back: the pass is idempotent, so a catch-up run is safe.
+Persistent=true
+# Spread the fleet-wide API calls instead of hitting GitHub at the same second as
+# the other timers.
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

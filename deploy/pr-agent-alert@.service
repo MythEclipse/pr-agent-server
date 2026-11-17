@@ -1,0 +1,23 @@
+# The failure notifier, instantiated per unit by `OnFailure=pr-agent-alert@%N.service`.
+#
+# WHY A TEMPLATE. Five units need it and the only thing that varies is the name of
+# the unit that failed, which systemd passes as `%i`. One file, one script, no
+# per-unit copies to drift.
+#
+# `OnFailure=` ON THE FAILING UNIT, not a timer here: this must fire the moment a
+# run fails, and a timer would add up to its own interval of silence.
+#
+# IT DOES NOT RETRY. A failed delivery is recorded in the journal by the script;
+# retrying inside the notifier would make a broken webhook look like a hung unit.
+[Unit]
+Description=Report a failed pr-agent unit (%i) to the operator
+
+[Service]
+Type=oneshot
+# Root: `journalctl -u <unit>` for another user's unit needs the journal group,
+# and this runs only after a failure — it does no work on the normal path.
+User=root
+ExecStart=/usr/local/bin/pr-agent-alert.sh %i
+# The notifier must never be the reason a failure is invisible: a non-zero exit
+# here would just add a second failed unit to the journal.
+SuccessExitStatus=0 1

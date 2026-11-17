@@ -26,13 +26,14 @@ import { readFileSync, realpathSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { AgentClient } from "./claude-agent.ts"
 import type { WorkerCliContext } from "./cli/context.ts"
+import { maintain } from "./cli/maintain.ts"
 import { syncHooks, syncOnly } from "./cli/sync.ts"
 import { auditVulns, fixVulns } from "./cli/vulns.ts"
-
 import { notifyReview, postDiscordOps } from "./discord.ts"
 import { runGit } from "./git.ts"
 import { GitHubApi } from "./github.ts"
 import { WorkerLock } from "./lock.ts"
+import { guardDisk, nodeDiskDeps } from "./ops/diskGuard.ts"
 import { nodeProcessDeps } from "./pr/autofix.ts"
 import { registryFetchFrom } from "./pr/bump-guard.ts"
 import { nodeWorkdirs, type ProcRunner } from "./pr/lockfix.ts"
@@ -271,6 +272,36 @@ async function main(argvIn?: string[]): Promise<number> {
 		// Read-only: no gate. An audit that requires a write flag is an audit
 		// nobody runs.
 		return auditVulns(argv, cliContext)
+	}
+	if (
+		argv.includes("--maintain") ||
+		argv.includes("--enforce-settings") ||
+		argv.includes("--hygiene") ||
+		argv.includes("--triage")
+	) {
+		// The housekeeping pass: disk guard, security-settings enforcement, branch
+		// hygiene, CI triage. `--dry` reports without writing.
+		return maintain(argv, cliContext)
+	}
+
+	// THE DISK GUARD RUNS ON EVERY TICK, and it is cheap: one `statfs`, and the
+	// reaper only wakes above the threshold. The tick clones repos too, so a guard
+	// that only ran in the nightly modes would miss the path that actually fills
+	// the disk — a busy queue is exactly when the clones pile up.
+	const tickDisk = guardDisk(
+		nodeDiskDeps((a) => runProc(a, undefined, 600), console.log),
+		{
+			base: process.env.PR_AGENT_WORK_DIR || "/tmp/pr-queue-work",
+		},
+	)
+	if (tickDisk.removed > 0) {
+		console.log(
+			`pr-queue-worker: disk ${tickDisk.usedPctBefore}% → ${tickDisk.usedPctAfter}% (${tickDisk.removed} workdir(s) reaped)`,
+		)
+	}
+	if (tickDisk.refuse) {
+		console.error("pr-queue-worker: skipping this tick — disk is too full to clone")
+		return 1
 	}
 
 	const report = new Report()

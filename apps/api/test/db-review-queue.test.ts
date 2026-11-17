@@ -40,6 +40,7 @@ describe("DB queue completion recovery", () => {
 						.mockResolvedValue([]),
 					complete,
 					requeueInterrupted: async () => 0,
+					requeueFailed: async () => 0,
 					stats: async () => ({
 						pending: 0,
 						running: completed ? 0 : 1,

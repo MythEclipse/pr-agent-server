@@ -18,6 +18,12 @@ Description=PR-Agent webhook server (Node/TypeScript)
 After=network-online.target
 Requires=network-online.target
 
+# A failed run must not be silent: every unit here is Type=oneshot under a
+# timer, and a failure used to leave exactly one trace — a `Result: exit-code`
+# line in the journal. `%N` is the unit name without the type suffix, so the
+# instance name is readable and the script can name the unit it reports.
+OnFailure=pr-agent-alert@%N.service
+
 [Service]
 Type=simple
 User=pr-agent

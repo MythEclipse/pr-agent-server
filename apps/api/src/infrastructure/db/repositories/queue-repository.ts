@@ -9,7 +9,7 @@
 //   - a job that fails is still completed, so one bad PR cannot wedge the
 //     queue (the in-memory queue logs and moves on; so does this).
 
-import { and, asc, count, eq, inArray, lte, sql } from "drizzle-orm"
+import { and, asc, count, eq, gte, inArray, lt, lte, sql } from "drizzle-orm"
 import type { PgDatabase } from "drizzle-orm/pg-core"
 import type {
 	QueueRepository,
@@ -384,6 +384,42 @@ export function createQueueRepository<TDb extends TAnyPgDatabase>(db: TDb): Queu
 				return { rerun }
 			})
 			return settled
+		},
+
+		/**
+		 * Give failed jobs another attempt.
+		 *
+		 * A FAILED JOB USED TO BE TERMINAL. Measured on the live database: 8 rows
+		 * sat in state `failed` with nothing that would ever look at them again —
+		 * `enqueue` re-arms a row only when the SAME PR gets another webhook, and a
+		 * PR that failed and then went quiet never gets one. Most of those failures
+		 * were transient (a 502 from the model gateway, a rate limit, a clone that
+		 * timed out), which is exactly the class a retry fixes and a human does not.
+		 *
+		 * Three bounds keep it from becoming a loop:
+		 *   - `attempts < maxAttempts` — `claimDue` increments the counter, so a job
+		 *     that keeps failing stops being requeued after N tries;
+		 *   - `updated_at >= since` — only recent failures. A row that failed last
+		 *     week is history, and re-running it would comment on a stale head;
+		 *   - `run_after = now()` — the next poll picks it up, no waiting.
+		 *
+		 * It does NOT clear `last_error`: the failure that is about to be retried is
+		 * the reason the retry exists, and erasing it would hide the pattern.
+		 */
+		async requeueFailed(opts: { maxAttempts: number; withinMs: number }): Promise<number> {
+			const since = new Date(Date.now() - opts.withinMs)
+			const requeued = await db
+				.update(reviewQueueJobs)
+				.set({ state: "pending", runAfter: new Date(), updatedAt: new Date() })
+				.where(
+					and(
+						eq(reviewQueueJobs.state, "failed"),
+						lt(reviewQueueJobs.attempts, opts.maxAttempts),
+						gte(reviewQueueJobs.updatedAt, since),
+					),
+				)
+				.returning({ id: reviewQueueJobs.id })
+			return requeued.length
 		},
 
 		async requeueInterrupted(): Promise<number> {

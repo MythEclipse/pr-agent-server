@@ -76,6 +76,13 @@ export interface QueueRepository {
 	 * interrupted review is retried rather than lost (at-least-once).
 	 */
 	requeueInterrupted(): Promise<number>
+	/**
+	 * Re-arm recent failures, bounded by attempt count and age.
+	 *
+	 * Returns how many rows were requeued. See the implementation for why a failed
+	 * job must not be terminal.
+	 */
+	requeueFailed(opts: { maxAttempts: number; withinMs: number }): Promise<number>
 
 	stats(): Promise<TQueueStats>
 }
