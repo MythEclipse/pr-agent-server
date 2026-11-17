@@ -1,3 +1,5 @@
+## [1.12.9](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.8...v1.12.9) (2026-11-17)
+
 ## [1.12.8](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.7...v1.12.8) (2026-11-17)
 
 
