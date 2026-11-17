@@ -1,3 +1,10 @@
+## [1.12.14](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.13...v1.12.14) (2026-11-17)
+
+
+### Bug Fixes
+
+* **worker:** the last four alerts were blocked by the tooling, not by a decision ([28452a4](https://github.com/MythEclipse/pr-agent-server/commit/28452a403af2a92b3f186f279465ddca56f5f45b))
+
 ## [1.12.13](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.12...v1.12.13) (2026-11-17)
 
 
