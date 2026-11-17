@@ -1,3 +1,10 @@
+## [1.13.1](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.0...v1.13.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **ops:** measure the disk that actually fills, and stop paging for a plan limit ([5009231](https://github.com/MythEclipse/pr-agent-server/commit/5009231cdeb1ddbfd45a7879a7b43d1f3f8bc46b))
+
 # [1.13.0](https://github.com/MythEclipse/pr-agent-server/compare/v1.12.15...v1.13.0) (2026-11-17)
 
 
