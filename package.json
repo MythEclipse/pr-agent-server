@@ -18,7 +18,7 @@
 		"db:studio": "pnpm -C apps/api drizzle-kit studio"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.6.7",
+		"@biomejs/biome": "2.6.8",
 		"@moonrepo/cli": "2.6.5",
 		"typescript": "^7.0.2"
 	}
