@@ -337,6 +337,51 @@ export function codeqlLanguagesFor(rootNames: readonly string[]): string[] {
 }
 
 /**
+ * Whether a CodeQL workflow can actually RUN in a repo, and why not when it
+ * cannot.
+ *
+ * THE MEASURED FAILURE. `codeql.yml` was installed on every repo with a
+ * scannable language, with no regard for whether that repo could run it. Code
+ * scanning on a PRIVATE repo needs GitHub Advanced Security; without it the
+ * workflow file is accepted, committed, and then the `analyze` step fails on
+ * EVERY push. Measured on MythEclipse/web1 and MythEclipse/tracerstudy-siuinjambi
+ * — both private, both permanently red, `CodeQL / Analyze` failing on every
+ * commit and every weekly schedule since 2026-11-17. A workflow that can only
+ * fail is worse than no workflow: it buries real failures under a red that
+ * nobody can clear, and it costs a runner minute every push to do it.
+ *
+ * WHY `private` AND NOT `security_and_analysis.advanced_security`. The obvious
+ * check — read the repo's `advanced_security.status` and require `enabled` — was
+ * tried and is USELESS on this fleet: measured across all 48 owned repos, the
+ * `advanced_security` key is present on NONE of them, public or private. GitHub
+ * omits it entirely unless the account has GHAS, so a guard that requires
+ * `enabled` skips every repo including the 42 public ones where CodeQL works
+ * fine — it converts a working scan into no scan, silently. The key is checked
+ * first anyway, because on an account that DOES own GHAS it is the only signal
+ * that a private repo is scannable.
+ */
+export type CodeScanningVerdict = { allowed: boolean; reason: string }
+
+export function codeScanningVerdict(repo: {
+	isPrivate: boolean
+	advancedSecurityEnabled: boolean
+}): CodeScanningVerdict {
+	if (repo.advancedSecurityEnabled) {
+		return { allowed: true, reason: "GitHub Advanced Security is enabled" }
+	}
+	if (repo.isPrivate) {
+		return {
+			allowed: false,
+			reason:
+				"private repo without GitHub Advanced Security — CodeQL cannot upload its results, so the workflow would fail on every push",
+		}
+	}
+	// PUBLIC repos scan for free: code scanning is free on public repositories,
+	// which is why 42 of them were green while the two private ones were red.
+	return { allowed: true, reason: "public repo — code scanning is free" }
+}
+
+/**
  * The CodeQL workflow body for a set of languages.
  *
  * A FUNCTION, and `replaceAll`, because the first version used a bare
@@ -403,6 +448,45 @@ function decodeContent(data: unknown): string | undefined {
 
 /** One action's outcome, accumulated into the summary by the caller. */
 type Step = { ok: boolean; line: string }
+
+/**
+ * Read a repo's scanning capability and decide whether CodeQL belongs there.
+ *
+ * THE NAME IS `codeScanningFor`, NOT `hasCodeScanning`, AND THAT IS A FIX. The
+ * obvious spelling was tried on this box and broke the whole sync:
+ *
+ *     const hasCodeScanning = await hasCodeScanning(api, repo, token)
+ *
+ * A `const` of the same name as the function it calls puts the binding in the
+ * temporal dead zone for the WHOLE block, so the right-hand side resolves to the
+ * uninitialised `const` instead of the function. Every repo then threw
+ * `ReferenceError: Cannot access 'hasCodeScanning' before initialization`, the
+ * sync reported `0 updated, 1 skipped` on a 48-repo fleet, and the vuln-fix pass
+ * exited 1. A distinct name makes the collision impossible to reintroduce by
+ * accident.
+ *
+ * A FAILED READ IS NOT A VERDICT. A non-200 here leaves the workflow ALONE
+ * rather than deleting it: the sync must not tear a working scan out of a repo
+ * because one API call was rate-limited. Only a definite `private: true` with no
+ * GHAS removes anything.
+ */
+async function codeScanningFor(
+	api: GhClient,
+	repo: string,
+	token: string,
+): Promise<CodeScanningVerdict> {
+	const res = await api.request("GET", `/repos/${repo}`, { token })
+	if (res.status !== 200) {
+		return { allowed: true, reason: `repo metadata unreadable (HTTP ${res.status}) — left alone` }
+	}
+	const meta = asObject(res.data)
+	const advancedSecurityEnabled =
+		str(asObject(asObject(meta?.security_and_analysis)?.advanced_security)?.status) === "enabled"
+	return codeScanningVerdict({
+		isPrivate: meta?.private === true,
+		advancedSecurityEnabled,
+	})
+}
 
 /**
  * Step 1 — make sure the repo has the pr-agent webhook.
@@ -802,15 +886,26 @@ export async function runSyncHooks(deps: SyncHooksDeps = {}): Promise<SyncSummar
 			// from what the repo actually contains — a repo with neither JS/TS nor
 			// Python nor Go gets no workflow, because a CodeQL job with no supported
 			// language fails on every push and reddens CI for nothing.
-			const root = await api.request("GET", `/repos/${repo}/contents/`, { token })
-			const rootNames = Array.isArray(root.data)
-				? (root.data as Record<string, unknown>[]).map((entry) => str(entry.name))
-				: []
-			if (root.status === 200) {
-				const languages = codeqlLanguagesFor(rootNames)
-				if (languages.length > 0) {
-					const body = codeqlWorkflowBody(templateBody(CODEQL_FILE), languages)
-					record(await syncFile(api, repo, `${WORKFLOWS_DIR}/${CODEQL_FILE}`, body, token, dry))
+			//
+			// AND THE REPO HAS TO BE ABLE TO RUN IT. `codeScanningVerdict` answers
+			// that from the repo's own metadata before anything is written; a repo
+			// that cannot run the scan gets the workflow REMOVED rather than
+			// installed, because a permanently-red `Analyze` on every push is a
+			// failure nobody can act on. See the function for the measurement.
+			const verdict = await codeScanningFor(api, repo, token)
+			if (!verdict.allowed) {
+				record(await removeStaleFile(api, repo, `${WORKFLOWS_DIR}/${CODEQL_FILE}`, token, dry))
+			} else {
+				const root = await api.request("GET", `/repos/${repo}/contents/`, { token })
+				const rootNames = Array.isArray(root.data)
+					? (root.data as Record<string, unknown>[]).map((entry) => str(entry.name))
+					: []
+				if (root.status === 200) {
+					const languages = codeqlLanguagesFor(rootNames)
+					if (languages.length > 0) {
+						const body = codeqlWorkflowBody(templateBody(CODEQL_FILE), languages)
+						record(await syncFile(api, repo, `${WORKFLOWS_DIR}/${CODEQL_FILE}`, body, token, dry))
+					}
 				}
 			}
 			// And the copy at the old, non-executable path is retired. Without

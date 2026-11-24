@@ -57,7 +57,16 @@ const unb64 = (text: string) => Buffer.from(text, "base64").toString("utf8")
 type Recorded = { method: string; path: string; token?: string; json?: any }
 
 /** Per-repo world: which hooks exist, and which files exist with what content. */
-type Fixture = { hooks?: any[]; files?: Record<string, string>; labels?: string[]; alerts?: any[] }
+type Fixture = {
+	hooks?: any[]
+	files?: Record<string, string>
+	labels?: string[]
+	alerts?: any[]
+	/** Repo metadata the CodeQL guard reads. Absent means "not routed". */
+	private?: boolean
+	/** Names at the repo root, for the CodeQL language probe. */
+	root?: string[]
+}
 
 type Fake = { api: NonNullable<SyncHooksDeps["api"]>; calls: Recorded[] }
 
@@ -140,6 +149,29 @@ function fakeApi(repos: string[], fixtures: Record<string, Fixture> = {}): Fake 
 			return held.includes(name)
 				? { status: 422, data: { message: "already_exists" } }
 				: { status: 201, data: { name } }
+		}
+		// Repo metadata, read by the CodeQL guard. Routed per repo so a fixture
+		// can be private, public, or absent; an unrouted repo answers 404, which
+		// the guard treats as "leave the workflow alone" rather than "remove it".
+		const meta = /^GET \/repos\/([^/]+\/[^/]+)$/.exec(`${method} ${path}`)
+		if (meta && fixtures[meta[1]]?.private !== undefined) {
+			return {
+				status: 200,
+				data: {
+					name: meta[1].split("/")[1],
+					full_name: meta[1],
+					private: fixtures[meta[1]]?.private,
+					security_and_analysis: {},
+				},
+			}
+		}
+		// The repo ROOT listing, used to derive the CodeQL language matrix.
+		const root = /^GET \/repos\/([^/]+\/[^/]+)\/contents\/$/.exec(`${method} ${path}`)
+		if (root && fixtures[root[1]]?.root !== undefined) {
+			return {
+				status: 200,
+				data: (fixtures[root[1]]?.root ?? []).map((name) => ({ name, type: "file" })),
+			}
 		}
 		const content = /^(GET|PUT|DELETE) \/repos\/([^/]+\/[^/]+)\/contents\/(.+)$/.exec(
 			`${method} ${path}`,
@@ -978,5 +1010,69 @@ describe("the sync writes the DERIVED Dependabot config", () => {
 		const mine = res.lanes?.find((c) => c.repo === repo)
 		expect(mine).toMatchObject({ repo, alerts: 3, unreachable: 3 })
 		expect(mine?.added.map((l) => l.directory).sort()).toEqual(["/Proyek_A", "/Proyek_B"])
+	})
+})
+
+// ── The CodeQL guard, end to end ─────────────────────────────────────────────
+
+describe("runSyncHooks > code scanning", () => {
+	const CODEQL_PATH = ".github/workflows/codeql.yml"
+
+	test("does not install the workflow on a private repo that cannot run it", async () => {
+		// THE FAILURE THIS PREVENTS, measured on the fleet: a private repo with no
+		// GitHub Advanced Security got codeql.yml anyway, and its `analyze` step
+		// then failed on every push and every weekly schedule. The workflow must
+		// not be written at all.
+		const fake = fakeApi(["MythEclipse/secret-app"], {
+			"MythEclipse/secret-app": { files: {}, private: true, root: ["package.json"] },
+		})
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s" })
+
+		expect(contentPuts(fake.calls).some((c) => c.path.endsWith(CODEQL_PATH))).toBe(false)
+		// And the root listing is never even read: with no verdict there is
+		// nothing to derive a language matrix from.
+		expect(fake.calls.some((c) => c.path.endsWith("/contents/"))).toBe(false)
+	})
+
+	test("removes a workflow that a previous run installed on a private repo", async () => {
+		// The two repos that are broken RIGHT NOW carry the file. A guard that only
+		// stops future writes would leave them red forever.
+		const fake = fakeApi(["MythEclipse/secret-app"], {
+			"MythEclipse/secret-app": {
+				files: { [CODEQL_PATH]: "name: CodeQL\n" },
+				private: true,
+				root: ["package.json"],
+			},
+		})
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s" })
+
+		const deletes = fake.calls.filter((c) => c.method === "DELETE")
+		expect(deletes.map((c) => c.path)).toContain(
+			"/repos/MythEclipse/secret-app/contents/" + CODEQL_PATH,
+		)
+	})
+
+	test("still installs the workflow on a public repo", async () => {
+		// The other half of the discriminator: 42 public repos were green with this
+		// exact workflow, so the guard must not touch them.
+		const fake = fakeApi(["MythEclipse/public-app"], {
+			"MythEclipse/public-app": { files: {}, private: false, root: ["package.json"] },
+		})
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s" })
+
+		const put = contentPuts(fake.calls).find((c) => c.path.endsWith(CODEQL_PATH))
+		expect(put).toBeDefined()
+		expect(unb64(put!.json.content)).toContain('language: ["javascript-typescript"]')
+	})
+
+	test("leaves the workflow alone when the repo metadata cannot be read", async () => {
+		// A rate-limited read must never be read as "this repo cannot scan": that
+		// would delete a working workflow across the fleet on a bad minute.
+		const fake = fakeApi(["MythEclipse/flaky"], {
+			"MythEclipse/flaky": { files: { [CODEQL_PATH]: "name: CodeQL\n" }, root: ["package.json"] },
+		})
+		await runSyncHooks({ api: fake.api, ghToken: "t", webhookSecret: "s" })
+
+		expect(fake.calls.filter((c) => c.method === "DELETE")).toHaveLength(0)
 	})
 })

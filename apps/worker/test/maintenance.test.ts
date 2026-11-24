@@ -5,7 +5,11 @@ import { looksFlaky, runIdFromDetailsUrl, runTriage } from "../src/ops/ciTriage.
 import { formatBytes, guardDisk, parseDuOutput, reapWorkdirs } from "../src/ops/diskGuard.ts"
 import { packageFromTitle, runHygiene, supersededPrs } from "../src/ops/hygiene.ts"
 import { enforceRepoSettings, readSettings } from "../src/ops/repoSettings.ts"
-import { codeqlLanguagesFor, codeqlWorkflowBody } from "../src/ops/syncHooks.ts"
+import {
+	codeqlLanguagesFor,
+	codeqlWorkflowBody,
+	codeScanningVerdict,
+} from "../src/ops/syncHooks.ts"
 
 /** A GitHub client that answers from a script and records every call. */
 function fakeApi(routes: Record<string, { status: number; data?: any }>) {
@@ -501,6 +505,36 @@ describe("codeqlWorkflowBody", () => {
 		// `replaceAll` handles both occurrences, and an empty list produces an empty
 		// matrix rather than a body that cannot parse.
 		expect(codeqlWorkflowBody("language: [__LANGUAGES__]", [])).toBe("language: []")
+	})
+})
+
+describe("codeScanningVerdict", () => {
+	it("refuses a private repo with no GHAS, which is the case that reddened CI", () => {
+		// MEASURED: MythEclipse/web1 and MythEclipse/tracerstudy-siuinjambi are
+		// private, have no GHAS, and got codeql.yml from the sync anyway. The
+		// `analyze` step then failed on every push and every weekly schedule from
+		// 2026-11-17 onward — a red nobody could clear.
+		const verdict = codeScanningVerdict({ isPrivate: true, advancedSecurityEnabled: false })
+		expect(verdict.allowed).toBe(false)
+		expect(verdict.reason).toContain("Advanced Security")
+	})
+
+	it("allows a public repo, because code scanning is free there", () => {
+		// The other half of the same measurement: 42 public repos were green with
+		// the identical workflow, so `private` is the discriminator — not
+		// `advanced_security`, which is absent from ALL 48 repos.
+		expect(codeScanningVerdict({ isPrivate: false, advancedSecurityEnabled: false }).allowed).toBe(
+			true,
+		)
+	})
+
+	it("allows a private repo once GHAS is actually enabled", () => {
+		// The case the account does not have yet, and the reason the flag is
+		// checked BEFORE `private`: buying GHAS must re-enable scanning without a
+		// code change.
+		expect(codeScanningVerdict({ isPrivate: true, advancedSecurityEnabled: true }).allowed).toBe(
+			true,
+		)
 	})
 })
 
