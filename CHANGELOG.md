@@ -1,3 +1,10 @@
+## [1.13.10](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.9...v1.13.10) (2026-11-24)
+
+
+### Bug Fixes
+
+* **sync:** only install CodeQL where the scan can actually run ([#26](https://github.com/MythEclipse/pr-agent-server/issues/26)) ([4f4db85](https://github.com/MythEclipse/pr-agent-server/commit/4f4db85670e562c60a79c9a0854463d2ce36f395))
+
 ## [1.13.9](https://github.com/MythEclipse/pr-agent-server/compare/v1.13.8...v1.13.9) (2026-11-17)
 
 
